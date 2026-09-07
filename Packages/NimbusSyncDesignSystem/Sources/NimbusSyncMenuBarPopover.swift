@@ -303,7 +303,7 @@ public struct MenuBarPopoverView: View {
             switch domain.status {
             case .healthy, .syncing, .reconciling, .initializing, .eventDegraded, .appNotRunning, .removalPreflight:
                 return false
-            case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired:
+            case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired, .preservedRemoval:
                 return true
             }
         }.count

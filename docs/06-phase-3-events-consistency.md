@@ -6,6 +6,8 @@
 > 前序阶段：[阶段 2：写路径、上传恢复与冲突安全](./05-phase-2-write-path-upload-recovery.md)
 > 后续阶段：[阶段 4：1.0 产品化与发布](./07-phase-4-product-release.md)
 
+> Parity implementation update：immutable provider journal、v2 anchor、bounded replay、working-set keyset、directory generation 和 trash-aware reconciliation 已实现；真实 SSE/Finder/long-run 证据仍保持 Conditional Go，见 [parity report](./archive/reports/phase-5-nextcloud-parity-implementation.md)。
+
 ## 1. 需求背景
 
 阶段 2 已能正确处理系统主动发起的读写请求，但主应用退出、SSE 断流、服务端重启、事件遗漏或本地数据库恢复后，Finder 与远端仍可能长期不一致。Cloudreve SSE 当前只提供变化线索，没有可依赖的全局单调事件序号，因此不能把“连接正常”或“收到 resumed”视为同步完成。

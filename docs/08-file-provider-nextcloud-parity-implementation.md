@@ -1,6 +1,6 @@
 # NimbusSync File Provider 对齐 Nextcloud Desktop 的设计与实施方案
 
-> 文档状态：Implementation Proposal
+> 文档状态：Implementation baseline completed; external acceptance gates remain explicit
 > 日期：2026-09-05
 > 适用版本：NimbusSync Technical Preview / Beta，macOS 13+
 > 参考实现：Nextcloud Desktop `3769349affcab99aee8ba6dd15b80bd632829beb`
@@ -60,7 +60,16 @@ NimbusSync 当前的 File Provider 入口位于 [Extensions/NimbusSyncFileProvid
 
 参考只取行为和测试意图。Nextcloud 目录存在混合 `LGPL-3.0-or-later`/`GPL-2.0-or-later` 文件，NimbusSync 的 Apache-2.0 代码不得直接复制或无条件 vendoring。
 
-### 1.4 非目标
+### 1.4 当前实现与证据边界
+
+本方案的本地实现基线已落地至当前 checkout，阶段状态和证据见
+[phase-5-nextcloud-parity-implementation.md](./archive/reports/phase-5-nextcloud-parity-implementation.md)。
+
+- Phase A–E 的 Store、协议、Enumerator、journal、system-set、projection、异步传输合同、条件写门禁、父链、trash、排除和 actions 已实现，并有 Swift/Rust 单元与故障测试。
+- Phase F 的 projection refresh、静态安全门禁、unsigned package build 和统一 Xcode build script 已实现；Xcode 工程 unsigned build 已在允许缓存访问后通过。
+- Cloudreve 条件写、trash/list、Provider upload/zero-byte/chunk resume、signed Finder、macOS 13–26 matrix、性能数据和 72 小时 long-run 属于外部验收证据，当前不以本地单元测试替代；未验证能力继续由 capability gate 降级。
+
+### 1.5 非目标
 
 - 不把 NimbusSync 改造成 Nextcloud WebDAV 客户端；Cloudreve REST/SSE 和 Provider capability 仍是协议边界。
 - 不把 `cri-UUID` 改为远端 ID、路径或账号可推导的标识。
@@ -1234,6 +1243,7 @@ Unsigned Debug 或本地 unit test 不能替代 signed Finder、真实 Cloudreve
 - `ConflictLocalSource`、`requestModification(.contents)` source replay、受协调用户导出和 resolution lifecycle；
 - `ExclusionCoordinator`、rule parser adapter、action predicates/UI routing；
 - `FrameworkCacheRefreshCoordinator`。
+- 本地 Store 基准入口 [`run-local-benchmarks.sh`](../Scripts/run-local-benchmarks.sh) 与 Release benchmark target，用于输出脱敏 p50/p95/p99；它不替代 signed Finder/Cloudreve 性能证据。
 
 ### 9.2 测试交付物
 
@@ -1245,6 +1255,8 @@ Unsigned Debug 或本地 unit test 不能替代 signed Finder、真实 Cloudreve
 - signed Finder callback replay、sleep/wake、upgrade/uninstall E2E；
 - Cloudreve capability/provider contract matrix 和 72 小时报告。
 - 第 7.3 节基准数据集、采样脚本和 p50/p95/p99 可复现报告。
+- 脱敏外部证据模板 [`phase-5-external-evidence.example.json`](./archive/reports/phase-5-external-evidence.example.json) 和发布前校验脚本 [`validate-phase-5-evidence.sh`](../Scripts/validate-phase-5-evidence.sh)；缺少或未验证的门禁必须阻断 Go。
+- 发布 manifest 入口 [`generate-release-manifest.sh`](../Scripts/generate-release-manifest.sh)，通过 `NIMBUSSYNC_SIGNING_MODE=signed|unsigned` 记录构建流水线确认的签名模式；未提供时明确写入 `unknown`，同时只记录 commit、dirty 状态、工具链、artifact checksum 和外部 gate 汇总，不记录绝对路径或秘密。
 
 ### 9.3 文档交付物
 

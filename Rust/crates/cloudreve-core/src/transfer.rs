@@ -97,12 +97,41 @@ pub fn encrypted_chunks(
 
 pub fn provider_is_write_capable(snapshot: &CapabilitySnapshot, provider: &str) -> bool {
     snapshot.allows_write()
+        && snapshot.operations.conditional_modify == CapabilityState::Verified
+        && snapshot.operations.collision_safe_create == CapabilityState::Verified
+        && snapshot.operations.resumable == CapabilityState::Verified
         && snapshot
             .provider(provider)
             .map(|capability| {
                 capability.write == CapabilityState::Verified
                     && capability.resumable == CapabilityState::Verified
-                    && capability.zero_byte == CapabilityState::Verified
+                    && snapshot
+                        .resumable_upload_providers
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(provider))
+                    && snapshot
+                        .upload_completion_queryable_providers
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(provider))
+                    && snapshot
+                        .resolved_upload_policy_kinds
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(provider))
+            })
+            .unwrap_or(false)
+}
+
+pub fn provider_is_zero_byte_write_capable(snapshot: &CapabilitySnapshot, provider: &str) -> bool {
+    provider_is_write_capable(snapshot, provider)
+        && snapshot.operations.zero_byte == CapabilityState::Verified
+        && snapshot
+            .provider(provider)
+            .map(|capability| {
+                capability.zero_byte == CapabilityState::Verified
+                    && snapshot
+                        .zero_byte_write_providers
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(provider))
             })
             .unwrap_or(false)
 }
@@ -240,5 +269,37 @@ mod tests {
         });
         assert!(!provider_is_write_capable(&snapshot, "s3"));
         assert!(!provider_is_write_capable(&snapshot, "missing"));
+    }
+
+    #[test]
+    fn complete_provider_matrix_is_required_before_write_is_allowed() {
+        let mut snapshot = CapabilitySnapshot::read_only_default();
+        snapshot.stable_item_identity = CapabilityState::Verified;
+        snapshot.stable_root_identity = CapabilityState::Verified;
+        snapshot.conditional_content_write = CapabilityState::Verified;
+        snapshot.idempotent_create = CapabilityState::Verified;
+        snapshot.content_version_semantics = CapabilityState::Verified;
+        snapshot.operations.conditional_modify = CapabilityState::Verified;
+        snapshot.operations.collision_safe_create = CapabilityState::Verified;
+        snapshot.operations.resumable = CapabilityState::Verified;
+        snapshot.providers.push(ProviderCapability {
+            provider: "s3".into(),
+            read: CapabilityState::Verified,
+            write: CapabilityState::Verified,
+            resumable: CapabilityState::Verified,
+            zero_byte: CapabilityState::Verified,
+            crypto: CapabilityState::Verified,
+        });
+        snapshot.resumable_upload_providers = vec!["s3".into()];
+        snapshot.upload_completion_queryable_providers = vec!["s3".into()];
+        snapshot.resolved_upload_policy_kinds = vec!["s3".into()];
+
+        assert!(provider_is_write_capable(&snapshot, "S3"));
+        assert!(!provider_is_zero_byte_write_capable(&snapshot, "s3"));
+        snapshot.operations.zero_byte = CapabilityState::Verified;
+        snapshot.zero_byte_write_providers = vec!["s3".into()];
+        assert!(provider_is_zero_byte_write_capable(&snapshot, "s3"));
+        snapshot.upload_completion_queryable_providers.clear();
+        assert!(!provider_is_write_capable(&snapshot, "s3"));
     }
 }

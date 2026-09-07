@@ -3,8 +3,11 @@ import FileProviderUI
 
 final class ActionViewController: FPUIActionExtensionViewController {
     override func prepare(forAction actionIdentifier: String, itemIdentifiers: [NSFileProviderItemIdentifier]) {
-		let itemIdentifier = itemIdentifiers.first?.rawValue ?? ""
-		guard ["ai.tiy.nimbussync.open-in-nimbussync", "ai.tiy.nimbussync.resolve-conflict"].contains(actionIdentifier), itemIdentifier.hasPrefix("cri-"), itemIdentifier.count == 40 else {
+	let itemIdentifier = itemIdentifiers.first?.rawValue ?? ""
+	let isOpaqueItemIdentifier = itemIdentifier.hasPrefix("cri-") && UUID(uuidString: String(itemIdentifier.dropFirst(4))) != nil
+		guard itemIdentifiers.count == 1,
+			["ai.tiy.nimbussync.open-in-nimbussync", "ai.tiy.nimbussync.resolve-conflict"].contains(actionIdentifier),
+			isOpaqueItemIdentifier else {
 			extensionContext.cancelRequest(withError: NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
 			return
 		}

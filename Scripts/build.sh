@@ -49,9 +49,27 @@ artifact_scan() {
     fi
 }
 
+external_evidence_scan() {
+    if [ -n "${NIMBUSSYNC_EXTERNAL_EVIDENCE:-}" ]; then
+        case "${NIMBUSSYNC_REQUIRE_GO:-0}" in
+            1|true|TRUE)
+                "$ROOT/Scripts/validate-phase-5-evidence.sh" "$NIMBUSSYNC_EXTERNAL_EVIDENCE" --require-go
+                ;;
+            0|false|FALSE|'')
+                "$ROOT/Scripts/validate-phase-5-evidence.sh" "$NIMBUSSYNC_EXTERNAL_EVIDENCE"
+                ;;
+            *)
+                printf '%s\n' "unsupported NIMBUSSYNC_REQUIRE_GO: ${NIMBUSSYNC_REQUIRE_GO}" >&2
+                return 2
+                ;;
+        esac
+    fi
+}
+
 secret_scan
 release_scan
 artifact_scan
+external_evidence_scan
 git --no-pager -C "$ROOT" diff --check
 
 mkdir -p "$BUILD_ROOT" "$DIST_DIR"

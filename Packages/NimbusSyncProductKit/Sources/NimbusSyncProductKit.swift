@@ -53,9 +53,15 @@ public struct ProductConflict: Identifiable, Codable, Equatable, Sendable {
     public let localSummary: String
     public let remoteSummary: String
     public let remoteVersion: Data?
+    public let localSourceKind: String?
+    public let sourceAvailable: Bool
+    public let sourceGeneration: UInt64
+    public let expectedBaseVersion: Data?
+    public let expectedSourceHash: Data?
+    public let expectedSourceSize: Int64?
     public let createdAt: Date
     public var state: String
-    public init(id: UUID, domainIdentifier: String, itemIdentifier: String, filename: String, kind: String, baseSummary: String, localSummary: String, remoteSummary: String, remoteVersion: Data? = nil, createdAt: Date, state: String = "pending") { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.filename = filename; self.kind = kind; self.baseSummary = baseSummary; self.localSummary = localSummary; self.remoteSummary = remoteSummary; self.remoteVersion = remoteVersion; self.createdAt = createdAt; self.state = state }
+    public init(id: UUID, domainIdentifier: String, itemIdentifier: String, filename: String, kind: String, baseSummary: String, localSummary: String, remoteSummary: String, remoteVersion: Data? = nil, localSourceKind: String? = nil, sourceAvailable: Bool = false, sourceGeneration: UInt64 = 0, expectedBaseVersion: Data? = nil, expectedSourceHash: Data? = nil, expectedSourceSize: Int64? = nil, createdAt: Date, state: String = "pending") { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.filename = filename; self.kind = kind; self.baseSummary = baseSummary; self.localSummary = localSummary; self.remoteSummary = remoteSummary; self.remoteVersion = remoteVersion; self.localSourceKind = localSourceKind; self.sourceAvailable = sourceAvailable; self.sourceGeneration = sourceGeneration; self.expectedBaseVersion = expectedBaseVersion; self.expectedSourceHash = expectedSourceHash; self.expectedSourceSize = expectedSourceSize; self.createdAt = createdAt; self.state = state }
 }
 
 public struct ConflictCenterModel: Sendable {
@@ -112,29 +118,73 @@ public actor ProductStore {
         } ?? []
         var tasks: [ProductTask] = []
         var conflicts: [ProductConflict] = []
+        var exclusionRules: [String: String] = [:]
         for domain in domains {
             let domainStore: SQLiteStateStore?
             if let storeFactory { domainStore = try? storeFactory.domainStore(identifier: domain.identifier) } else { domainStore = nil }
+            if let domainStore {
+                do {
+                    if let encoded = try domainStore.preference(key: "exclusion.rules.\(domain.identifier)"),
+                       let data = encoded.data(using: .utf8),
+                       let snapshot = try? JSONDecoder().decode(ExclusionRuleSnapshot.self, from: data) {
+                        exclusionRules[domain.identifier] = snapshot.rules.joined(separator: "\n")
+                    }
+                } catch {
+                    // A malformed local rule snapshot is handled by the
+                    // Store matcher as fail-closed; it should not hide the
+                    // rest of the product snapshot.
+                }
+            }
             let storedOperations = (try? domainStore?.operations(limit: 100) ?? []) ?? []
             tasks.append(contentsOf: storedOperations.map { stored in
+                let transfer: TransferTaskSnapshot?
+                if let domainStore {
+                    transfer = try? domainStore.latestTransferTask(operationID: stored.operation.operationID)
+                } else {
+                    transfer = nil
+                }
                 let errorCode: String?
                 switch stored.operation.state {
                 case "unknown_outcome": errorCode = "unknown_outcome"
                 case "conflict": errorCode = "version_conflict"
                 case "auth_expired": errorCode = "authentication_required"
-                default: errorCode = nil
+                default: errorCode = transfer?.errorCode
                 }
-                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), errorCode: errorCode, updatedAt: stored.updatedAt)
+                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt)
+            })
+            let transferTasks: [TransferTaskSnapshot]
+            if let domainStore {
+                transferTasks = (try? domainStore.transferTasks(limit: 100)) ?? []
+            } else {
+                transferTasks = []
+            }
+            tasks.append(contentsOf: transferTasks.compactMap { transfer in
+                guard transfer.operationID == nil else { return nil }
+                return ProductTask(
+                    id: transfer.taskID,
+                    domainIdentifier: domain.identifier,
+                    itemIdentifier: transfer.itemIdentifier,
+                    title: transfer.itemIdentifier ?? transfer.direction,
+                    direction: transferDirection(for: transfer.direction),
+                    state: transferTaskState(for: transfer.state),
+                    processedBytes: transfer.bytes,
+                    totalBytes: transfer.totalBytes,
+                    errorCode: transfer.errorCode,
+                    updatedAt: transfer.updatedAt
+                )
             })
             let storedConflicts: [ConflictProjection]
             if let domainStore { storedConflicts = (try? domainStore.pendingConflicts(limit: 100)) ?? [] } else { storedConflicts = [] }
             conflicts.append(contentsOf: storedConflicts.map { conflict in
                 let filename = (try? domainStore?.item(identifier: conflict.itemIdentifier)?.name) ?? conflict.itemIdentifier
-                return ProductConflict(id: conflict.conflictID, domainIdentifier: domain.identifier, itemIdentifier: conflict.itemIdentifier, filename: filename, kind: conflict.kind, baseSummary: conflict.baseSummary, localSummary: conflict.localSummary, remoteSummary: conflict.remoteSummary, remoteVersion: conflict.remoteVersion, createdAt: conflict.createdAt, state: conflict.state)
+                let sourceAvailable = conflict.expectedSourceHash != nil &&
+                    conflict.expectedSourceSize != nil &&
+                    (domain.capabilitySnapshot.operationVerified("fallback_conflict"))
+                return ProductConflict(id: conflict.conflictID, domainIdentifier: domain.identifier, itemIdentifier: conflict.itemIdentifier, filename: filename, kind: conflict.kind, baseSummary: conflict.baseSummary, localSummary: conflict.localSummary, remoteSummary: conflict.remoteSummary, remoteVersion: conflict.remoteVersion, localSourceKind: conflict.localSourceKind, sourceAvailable: sourceAvailable, sourceGeneration: conflict.sourceGeneration, expectedBaseVersion: conflict.expectedBaseVersion, expectedSourceHash: conflict.expectedSourceHash, expectedSourceSize: conflict.expectedSourceSize, createdAt: conflict.createdAt, state: conflict.state)
             })
         }
         let preferences = userDefaults.data(forKey: notificationKey).flatMap { try? JSONDecoder().decode(NotificationPreferences.self, from: $0) } ?? NotificationPreferences()
-        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences)
+        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules)
     }
 
     public func saveNotificationPreferences(_ preferences: NotificationPreferences) throws {
@@ -177,11 +227,29 @@ private func direction(for kind: String) -> ProductTaskDirection {
     switch kind.lowercased() { case "create", "modify", "rename", "move", "trash", "restore", "delete": return .upload; default: return .other }
 }
 
+private func transferDirection(for direction: String) -> ProductTaskDirection {
+    switch direction.lowercased() {
+    case "upload": return .upload
+    case "download": return .download
+    default: return .other
+    }
+}
+
+private func transferTaskState(for state: String) -> ProductTaskState {
+    switch state.lowercased() {
+    case "running", "queued": return .running
+    case "succeeded", "completed": return .succeeded
+    case "cancelled": return .cancelled
+    case "failed": return .failed
+    default: return .failed
+    }
+}
+
 private func taskState(for state: String, cancelRequested: Bool = false) -> ProductTaskState {
-    if cancelRequested && !["committed", "cancelled", "permanently_failed"].contains(state) { return .cancelled }
+    if cancelRequested && !["committed", "cancelled", "permanently_failed", "resolved"].contains(state) { return .cancelled }
     switch state {
     case "queued": return .queued
-    case "committed": return .succeeded
+    case "committed", "resolved": return .succeeded
     case "cancelled": return .cancelled
     case "retry_wait": return .retrying
     case "permanently_failed", "conflict", "unknown_outcome", "auth_expired": return .failed
@@ -267,20 +335,22 @@ public enum DeepLinkRouter {
 public struct ExclusionRuleSet: Codable, Equatable, Sendable {
     public let revision: UInt64
     public let rules: [String]
-    public init(revision: UInt64, rules: [String]) throws { self.revision = revision; self.rules = try rules.map(ExclusionRuleSet.normalize) }
+    public let caseSensitive: Bool
+    public init(revision: UInt64, rules: [String], caseSensitive: Bool = false) throws { self.revision = revision; self.rules = try rules.map(ExclusionRuleSet.normalize); self.caseSensitive = caseSensitive }
+
+    private enum CodingKeys: String, CodingKey { case revision, rules, caseSensitive }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try container.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
+        rules = try container.decodeIfPresent([String].self, forKey: .rules)?.map(ExclusionRuleSet.normalize) ?? []
+        caseSensitive = try container.decodeIfPresent(Bool.self, forKey: .caseSensitive) ?? false
+    }
+
     public func matches(relativePath: String, isRoot: Bool = false) -> Bool {
-        guard !isRoot else { return false }
-        let path = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return rules.contains { ExclusionRuleSet.match($0, path: path) }
+        ExclusionMatcher.matches(relativePath: relativePath, rules: rules, caseSensitive: caseSensitive, isRoot: isRoot)
     }
     public static func normalize(_ raw: String) throws -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), !trimmed.contains("\0"), !trimmed.hasPrefix("/") else { throw CoreFailure(code: .invalidName, retryable: false, userActionRequired: true) }
-        return trimmed.replacingOccurrences(of: "\\", with: "/")
-    }
-    private static func match(_ pattern: String, path: String) -> Bool {
-        let escaped = NSRegularExpression.escapedPattern(for: pattern).replacingOccurrences(of: "\\*\\*", with: ".*").replacingOccurrences(of: "\\*", with: "[^/]*").replacingOccurrences(of: "\\?", with: "[^/]")
-        return path.range(of: "^\(escaped)(?:/.*)?$", options: .regularExpression) != nil
+        try ExclusionMatcher.normalize(raw)
     }
 }
 
@@ -308,11 +378,15 @@ public actor ExclusionRuleService {
     public func preview(_ ruleSet: ExclusionRuleSet, items: [RemoteItem], rootURI: String = "/") -> ExclusionImpact {
         let matches = items.filter { item in
             guard let relativePath = relativePath(item.uri, rootURI: rootURI) else { return false }
-            return ruleSet.matches(relativePath: relativePath)
+            return ruleSet.matches(relativePath: relativePath, isRoot: item.itemIdentifier == "NSFileProviderRootContainerItemIdentifier")
         }
         return ExclusionImpact(remoteMatches: matches.count, dirtyMatches: matches.filter { !$0.tombstone && !$0.trashed }.count)
     }
     public func persist(_ ruleSet: ExclusionRuleSet, domainIdentifier: String) throws { let data = try JSONEncoder().encode(ruleSet); try store.setPreference(key: "exclusion.rules.\(domainIdentifier)", value: String(data: data, encoding: .utf8) ?? "") }
+    public func applyView(_ ruleSet: ExclusionRuleSet, domainIdentifier: String, rootURI: String) throws -> [JournalChange] {
+        let snapshot = ExclusionRuleSnapshot(revision: ruleSet.revision, rules: ruleSet.rules, caseSensitive: ruleSet.caseSensitive)
+        return try store.applyExclusionRules(snapshot, domainIdentifier: domainIdentifier, rootURI: rootURI)
+    }
 }
 
 public struct ExclusionApplication: Sendable {
@@ -327,9 +401,12 @@ public actor ExclusionApplicationService {
     private let store: SQLiteStateStore
     public init(store: SQLiteStateStore) { self.store = store; self.rules = ExclusionRuleService(store: store) }
     public func preview(revision: UInt64, text: String, items: [RemoteItem], rootURI: String = "/") async throws -> ExclusionApplication { let ruleSet = try await rules.compile(revision: revision, text: text); let impact = await rules.preview(ruleSet, items: items, rootURI: rootURI); return ExclusionApplication(ruleSet: ruleSet, impact: impact) }
-    public func apply(_ application: ExclusionApplication, domainIdentifier: String, preserveDirty: Bool) async throws {
+    @discardableResult
+    public func apply(_ application: ExclusionApplication, domainIdentifier: String, preserveDirty: Bool) async throws -> [JournalChange] {
         guard !application.requiresDirtyPreservation || preserveDirty else { throw CoreFailure(code: .cannotSynchronize, retryable: false, userActionRequired: true) }
-        try await rules.persist(application.ruleSet, domainIdentifier: domainIdentifier)
+        guard let domain = try store.domain(identifier: domainIdentifier) else { throw CoreFailure(code: .database, retryable: false) }
+        let snapshot = ExclusionRuleSnapshot(revision: application.ruleSet.revision, rules: application.ruleSet.rules, caseSensitive: application.ruleSet.caseSensitive)
+        return try store.applyExclusionRules(snapshot, domainIdentifier: domainIdentifier, rootURI: domain.rootURI)
     }
 }
 
@@ -408,5 +485,5 @@ private enum SHA256Digest {
 }
 
 private extension DomainStatus {
-    var priority: Int { switch self { case .authExpired: 100; case .rootUnavailable, .scopeConflict: 90; case .conflict, .permanentError: 80; case .offline: 70; case .reconciling: 60; case .syncing: 50; case .eventDegraded, .appNotRunning: 40; case .healthy: 10; default: 0 } }
+    var priority: Int { switch self { case .authExpired: 100; case .rootUnavailable, .scopeConflict, .preservedRemoval: 90; case .conflict, .permanentError: 80; case .offline: 70; case .reconciling: 60; case .syncing: 50; case .eventDegraded, .appNotRunning: 40; case .healthy: 10; default: 0 } }
 }

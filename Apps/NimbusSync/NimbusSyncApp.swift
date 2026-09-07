@@ -7,6 +7,7 @@ import CloudreveFileProviderKit
 import CloudreveAuthKit
 import CloudreveStoreBridge
 import CloudreveDomainService
+import CloudreveObservability
 import ServiceManagement
 import AppKit
 import FileProvider
@@ -51,16 +52,20 @@ struct NimbusSyncApp: App {
     private func settingsView(runtime: NimbusSyncAppState, appDelegate: NimbusSyncAppDelegate) -> some View {
         SettingsView(
             domains: runtime.snapshot.domains,
+            exclusionRules: runtime.snapshot.exclusionRules,
             notificationPreferences: runtime.snapshot.notificationPreferences,
             finderError: Binding<String?>(get: { runtime.finderError }, set: { runtime.finderError = $0 }),
             finderSettingsActionAvailable: Binding(get: { runtime.finderSettingsActionAvailable }, set: { runtime.finderSettingsActionAvailable = $0 }),
             domainRemovalError: Binding<String?>(get: { runtime.domainRemovalError }, set: { runtime.domainRemovalError = $0 }),
+            exclusionError: Binding<String?>(get: { runtime.exclusionError }, set: { runtime.exclusionError = $0 }),
             removingDomainIdentifier: runtime.removingDomainIdentifier,
             onOpenFinder: runtime.openFinder,
             onOpenFileProviderSettings: runtime.openFileProviderSettings,
             onRemove: runtime.removeDomain,
+            onFinalizeRemoval: runtime.finalizePreservedDomainRemoval,
             onOpenWeb: runtime.openWeb,
             onReauthorize: runtime.reauthorize,
+            onApplyExclusionRules: runtime.applyExclusionRules,
             onNotificationsChanged: runtime.setNotificationPreferences,
             onAddDomain: { appDelegate.openOnboardingWindow() }
         )
@@ -465,7 +470,8 @@ private struct ConflictWindowContent: View {
             selectedItemIdentifier: runtime.selectedConflictItemIdentifier,
             onKeepRemote: runtime.keepRemote,
             onOverwriteRemote: runtime.prepareOverwriteRemote,
-            onKeepBoth: runtime.prepareKeepBoth
+            onKeepBoth: runtime.prepareKeepBoth,
+            onExportLocalCopy: runtime.exportConflictLocalCopy
         )
         .tint(NimbusSyncDesignTokens.brandColor)
     }
@@ -567,12 +573,31 @@ private func isDomainDisabledError(domain: String, code: Int) -> Bool {
         (domain == "NSFileProviderInternalErrorDomain" && code == 12)
 }
 
+private func userFacingError(_ error: Error) -> String {
+    if let localized = error as? LocalizedError, let description = localized.errorDescription {
+        return SecretRedactor.redact(description)
+    }
+    if let failure = error as? CoreFailure {
+        return "NimbusSync could not complete the operation (\(failure.code.rawValue))."
+    }
+    let nsError = error as NSError
+    return "NimbusSync could not complete the operation (\(nsError.domain):\(nsError.code))."
+}
+
 private final class FinderSystemDomainBox: @unchecked Sendable {
     let domain: NSFileProviderDomain
 
     init(_ domain: NSFileProviderDomain) {
         self.domain = domain
     }
+}
+
+private func configuredSystemDomain(for descriptor: DomainDescriptor) -> NSFileProviderDomain {
+    let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(descriptor.identifier), displayName: descriptor.displayName)
+    if #available(macOS 13.0, *) {
+        domain.supportsSyncingTrash = descriptor.capabilitySnapshot.canTrash
+    }
+    return domain
 }
 
 @MainActor
@@ -584,6 +609,7 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published var finderError: String?
     @Published var finderSettingsActionAvailable = false
     @Published var domainRemovalError: String?
+    @Published var exclusionError: String?
     @Published private(set) var removingDomainIdentifier: String?
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
@@ -680,7 +706,7 @@ private final class NimbusSyncAppState: ObservableObject {
             if let supervisor { Task { await supervisor.stop() } }
         }
         for descriptor in domains {
-            if descriptor.status == .removalPreflight {
+            if descriptor.status == .removalPreflight || descriptor.status == .repairRequired || descriptor.status == .preservedRemoval {
                 eventTasks.removeValue(forKey: descriptor.identifier)?.cancel()
                 if let supervisor = eventSupervisors.removeValue(forKey: descriptor.identifier) {
                     Task { await supervisor.stop() }
@@ -754,7 +780,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 if error as? OAuthAuthorizationSessionError == .cancelled {
                     onboardingError = nil
                 } else {
-                    onboardingError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                    onboardingError = userFacingError(error)
                 }
             }
             isAuthorizing = false
@@ -798,7 +824,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 onDomainProvisioned?(descriptor)
             } catch {
                 logOAuthFailure(error, stage: "domain_provisioning", correlation: correlation)
-                onboardingError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                onboardingError = userFacingError(error)
             }
             isProvisioningDomain = false
         }
@@ -856,25 +882,94 @@ private final class NimbusSyncAppState: ObservableObject {
             do {
                 guard let domain = snapshot.domains.first(where: { $0.identifier == conflict.domainIdentifier }), let domainStore = try? factory.domainStore(identifier: domain.identifier), let item = try domainStore.item(identifier: conflict.itemIdentifier), let origin = URL(string: domain.scope.origin) else { throw CoreFailure(code: .notFound, retryable: false) }
                 let vault = KeychainCredentialVault(accessGroup: KeychainAccessGroup.current())
-                let backend = NimbusSyncRemoteBackend(origin: origin, rootURI: domain.currentRootURI, store: domainStore, vault: vault, credentialReference: domain.secretReference, capabilitySnapshot: domain.capabilitySnapshot, providerName: domain.capabilitySnapshot.providers.first?.name ?? "unverified", secretVault: KeychainOpaqueSecretVault(accessGroup: KeychainAccessGroup.current()))
+                let backend = NimbusSyncRemoteBackend(origin: origin, rootURI: domain.currentRootURI, store: domainStore, vault: vault, credentialReference: domain.secretReference, capabilitySnapshot: domain.capabilitySnapshot, providerName: domain.capabilitySnapshot.providers.first?.name ?? "unverified", secretVault: KeychainOpaqueSecretVault(accessGroup: KeychainAccessGroup.current()), domainIdentifier: domain.identifier)
                 let projection = ConflictProjection(conflictID: conflict.id, itemIdentifier: item.itemIdentifier, kind: conflict.kind, baseSummary: conflict.baseSummary, remoteSummary: conflict.remoteSummary, localSummary: conflict.localSummary, pendingItemIdentifier: nil, sourceGeneration: 0, createdAt: conflict.createdAt, remoteVersion: conflict.remoteVersion)
                 _ = try ConflictResolutionService(store: domainStore, backend: backend).keepRemote(conflict: projection)
-                let systemDomain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(domain.identifier), displayName: domain.displayName)
+                let systemDomain = configuredSystemDomain(for: domain)
                 if let manager = NSFileProviderManager(for: systemDomain) {
                     try? await manager.signalEnumerator(for: .workingSet)
                     try? await manager.reimportItems(below: NSFileProviderItemIdentifier(item.itemIdentifier))
                 }
                 reload()
-            } catch { onboardingError = String(describing: error) }
+            } catch { onboardingError = userFacingError(error) }
         }
     }
 
     func prepareOverwriteRemote(_ conflict: ProductConflict) {
-        prepareConflictResolution(conflict, resolution: .overwriteRemote)
+        if conflict.localSourceKind == "user_export" {
+            resolveConflictFromUserExport(conflict, resolution: .overwriteRemote)
+        } else {
+            prepareConflictResolution(conflict, resolution: .overwriteRemote)
+        }
     }
 
     func prepareKeepBoth(_ conflict: ProductConflict) {
-        prepareConflictResolution(conflict, resolution: .keepBoth)
+        if conflict.localSourceKind == "user_export" {
+            resolveConflictFromUserExport(conflict, resolution: .keepBoth)
+        } else {
+            prepareConflictResolution(conflict, resolution: .keepBoth)
+        }
+    }
+
+    func exportConflictLocalCopy(_ conflict: ProductConflict) {
+        Task { @MainActor in
+            do {
+                guard let domain = snapshot.domains.first(where: { $0.identifier == conflict.domainIdentifier }),
+                      let domainStore = try? factory.domainStore(identifier: domain.identifier) else {
+                    throw CoreFailure(code: .notFound, retryable: false)
+                }
+                let systemDomain = configuredSystemDomain(for: domain)
+                guard let manager = NSFileProviderManager(for: systemDomain) else { throw CoreFailure(code: .database, retryable: true) }
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = conflict.filename
+                panel.canCreateDirectories = true
+                guard panel.runModal() == .OK, let destination = panel.url else { return }
+                let projection = ConflictProjection(conflictID: conflict.id, itemIdentifier: conflict.itemIdentifier, kind: conflict.kind, baseSummary: conflict.baseSummary, remoteSummary: conflict.remoteSummary, localSummary: conflict.localSummary, pendingItemIdentifier: conflict.itemIdentifier, sourceGeneration: conflict.sourceGeneration, createdAt: conflict.createdAt, remoteVersion: conflict.remoteVersion, localSourceKind: conflict.localSourceKind, expectedBaseVersion: conflict.expectedBaseVersion, expectedSourceHash: conflict.expectedSourceHash, expectedSourceSize: conflict.expectedSourceSize)
+                _ = try await ConflictSourceExportCoordinator(store: domainStore).export(conflict: projection, manager: manager, destination: destination)
+                reload()
+            } catch {
+                onboardingError = userFacingError(error)
+            }
+        }
+    }
+
+    private func resolveConflictFromUserExport(_ conflict: ProductConflict, resolution: ConflictResolutionAction) {
+        Task { @MainActor in
+            do {
+                guard let domain = snapshot.domains.first(where: { $0.identifier == conflict.domainIdentifier }),
+                      let domainStore = try? factory.domainStore(identifier: domain.identifier),
+                      try domainStore.item(identifier: conflict.itemIdentifier) != nil,
+                      let origin = URL(string: domain.scope.origin) else {
+                    throw CoreFailure(code: .notFound, retryable: false)
+                }
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = true
+                panel.canChooseDirectories = false
+                panel.allowsMultipleSelection = false
+                panel.prompt = "Use Exported Copy"
+                guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+                let startedAccess = sourceURL.startAccessingSecurityScopedResource()
+                defer { if startedAccess { sourceURL.stopAccessingSecurityScopedResource() } }
+                let vault = KeychainCredentialVault(accessGroup: KeychainAccessGroup.current())
+                let backend = NimbusSyncRemoteBackend(origin: origin, rootURI: domain.currentRootURI, store: domainStore, vault: vault, credentialReference: domain.secretReference, capabilitySnapshot: domain.capabilitySnapshot, providerName: domain.capabilitySnapshot.providers.first?.name ?? "unverified", secretVault: KeychainOpaqueSecretVault(accessGroup: KeychainAccessGroup.current()), domainIdentifier: domain.identifier)
+                let projection = ConflictProjection(conflictID: conflict.id, itemIdentifier: conflict.itemIdentifier, kind: conflict.kind, baseSummary: conflict.baseSummary, remoteSummary: conflict.remoteSummary, localSummary: conflict.localSummary, pendingItemIdentifier: conflict.itemIdentifier, sourceGeneration: conflict.sourceGeneration, createdAt: conflict.createdAt, remoteVersion: conflict.remoteVersion, localSourceKind: conflict.localSourceKind, expectedBaseVersion: conflict.expectedBaseVersion, expectedSourceHash: conflict.expectedSourceHash, expectedSourceSize: conflict.expectedSourceSize)
+                let service = ConflictResolutionService(store: domainStore, backend: backend)
+                switch resolution {
+                case .overwriteRemote: try service.prepareOverwriteRemote(conflict: projection)
+                case .keepBoth: try service.prepareKeepBoth(conflict: projection)
+                case .keepRemote: return
+                }
+                guard let manager = NSFileProviderManager(for: configuredSystemDomain(for: domain)) else { throw CoreFailure(code: .database, retryable: true) }
+                let context = FileProviderOperationContext(itemIdentifier: NSFileProviderItemIdentifier(conflict.itemIdentifier), progress: Progress(totalUnitCount: 1), registrar: FileProviderManagerTaskRegistrar(manager: manager), cancellation: CancellationToken())
+                let updated = try await AsyncFileProviderMutationCoordinator(store: domainStore, backend: backend).resolveConflictFromSource(conflict: projection, sourceURL: sourceURL, context: context)
+                _ = updated
+                try? await manager.signalEnumerator(for: .workingSet)
+                try? await manager.reimportItems(below: NSFileProviderItemIdentifier(conflict.itemIdentifier))
+                reload()
+            } catch {
+                onboardingError = userFacingError(error)
+            }
+        }
     }
 
     private func prepareConflictResolution(_ conflict: ProductConflict, resolution: ConflictResolutionAction) {
@@ -884,18 +979,22 @@ private final class NimbusSyncAppState: ObservableObject {
                       let domainStore = try? factory.domainStore(identifier: domain.identifier),
                       let origin = URL(string: domain.scope.origin) else { throw CoreFailure(code: .notFound, retryable: false) }
                 let vault = KeychainCredentialVault(accessGroup: KeychainAccessGroup.current())
-                let backend = NimbusSyncRemoteBackend(origin: origin, rootURI: domain.currentRootURI, store: domainStore, vault: vault, credentialReference: domain.secretReference, capabilitySnapshot: domain.capabilitySnapshot, providerName: domain.capabilitySnapshot.providers.first?.name ?? "unverified", secretVault: KeychainOpaqueSecretVault(accessGroup: KeychainAccessGroup.current()))
-                let projection = ConflictProjection(conflictID: conflict.id, itemIdentifier: conflict.itemIdentifier, kind: conflict.kind, baseSummary: conflict.baseSummary, remoteSummary: conflict.remoteSummary, localSummary: conflict.localSummary, pendingItemIdentifier: conflict.itemIdentifier, sourceGeneration: 0, createdAt: conflict.createdAt, remoteVersion: conflict.remoteVersion)
+                let backend = NimbusSyncRemoteBackend(origin: origin, rootURI: domain.currentRootURI, store: domainStore, vault: vault, credentialReference: domain.secretReference, capabilitySnapshot: domain.capabilitySnapshot, providerName: domain.capabilitySnapshot.providers.first?.name ?? "unverified", secretVault: KeychainOpaqueSecretVault(accessGroup: KeychainAccessGroup.current()), domainIdentifier: domain.identifier)
+                let projection = ConflictProjection(conflictID: conflict.id, itemIdentifier: conflict.itemIdentifier, kind: conflict.kind, baseSummary: conflict.baseSummary, remoteSummary: conflict.remoteSummary, localSummary: conflict.localSummary, pendingItemIdentifier: conflict.itemIdentifier, sourceGeneration: conflict.sourceGeneration, createdAt: conflict.createdAt, remoteVersion: conflict.remoteVersion, localSourceKind: conflict.localSourceKind, expectedBaseVersion: conflict.expectedBaseVersion, expectedSourceHash: conflict.expectedSourceHash, expectedSourceSize: conflict.expectedSourceSize)
                 let service = ConflictResolutionService(store: domainStore, backend: backend)
                 switch resolution {
-                case .overwriteRemote: try service.prepareOverwriteRemote(conflict: projection)
-                case .keepBoth: try service.prepareKeepBoth(conflict: projection)
+                case .overwriteRemote:
+                    try service.prepareOverwriteRemote(conflict: projection)
+                    if let manager = NSFileProviderManager(for: configuredSystemDomain(for: domain)) { try await service.requestSourceReplay(conflict: projection, manager: manager) }
+                case .keepBoth:
+                    try service.prepareKeepBoth(conflict: projection)
+                    if let manager = NSFileProviderManager(for: configuredSystemDomain(for: domain)) { try await service.requestSourceReplay(conflict: projection, manager: manager) }
                 case .keepRemote: break
                 }
-                let systemDomain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(domain.identifier), displayName: domain.displayName)
+                let systemDomain = configuredSystemDomain(for: domain)
                 if let manager = NSFileProviderManager(for: systemDomain) { try? await manager.signalEnumerator(for: .workingSet) }
                 reload()
-            } catch { onboardingError = String(describing: error) }
+            } catch { onboardingError = userFacingError(error) }
         }
     }
 
@@ -961,7 +1060,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 // the migration path for an existing non-replicated record. On
                 // macOS isReplicated is not a reliable way to identify old
                 // records, so refresh every existing record through that path.
-                let replicatedDomain = NSFileProviderDomain(identifier: identifier, displayName: descriptor.displayName)
+                let replicatedDomain = configuredSystemDomain(for: descriptor)
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     NSFileProviderManager.add(replicatedDomain) { error in
                         if let error {
@@ -1060,7 +1159,8 @@ private final class NimbusSyncAppState: ObservableObject {
             finderError = "Unable to open \(displayName) in Finder. \(failure.errorDescription ?? "The File Provider location is unavailable.")"
             return
         }
-        lifecycleLogger.error("finder.open_failed stage=unknown error=\(String(describing: error), privacy: .public)")
+        let nsError = error as NSError
+        lifecycleLogger.error("finder.open_failed stage=unknown error_domain=\(nsError.domain, privacy: .public) error_code=\(nsError.code, privacy: .public)")
         finderError = "Unable to open \(displayName) in Finder. Please try again after reopening NimbusSync."
     }
 
@@ -1083,6 +1183,53 @@ private final class NimbusSyncAppState: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func applyExclusionRules(_ domain: DomainDescriptor, text: String) {
+        exclusionError = nil
+        Task {
+            do {
+                let domainStore = try factory.domainStore(identifier: domain.identifier)
+                let currentRevision: UInt64
+                if let encoded = try domainStore.preference(key: "exclusion.rules.\(domain.identifier)"),
+                   let data = encoded.data(using: .utf8),
+                   let current = try? JSONDecoder().decode(ExclusionRuleSnapshot.self, from: data) {
+                    currentRevision = current.revision
+                } else {
+                    currentRevision = 0
+                }
+                guard currentRevision < UInt64.max else {
+                    throw CoreFailure(code: .cannotSynchronize, retryable: false, userActionRequired: true)
+                }
+                let service = ExclusionApplicationService(store: domainStore)
+                let application = try await service.preview(
+                    revision: max(1, currentRevision + 1),
+                    text: text,
+                    items: try domainStore.allItems(limit: 100_000),
+                    rootURI: domain.currentRootURI
+                )
+                // Applying a view rule never deletes remote objects. When
+                // dirty data is among the matches, retain it and let the
+                // system/pending projection continue to surface recovery.
+                let changes = try await service.apply(application, domainIdentifier: domain.identifier, preserveDirty: true)
+                let systemDomain = configuredSystemDomain(for: domain)
+                if let manager = NSFileProviderManager(for: systemDomain) {
+                    try? await manager.signalEnumerator(for: .workingSet)
+                    if changes.contains(where: { $0.kind == "view_added" }) {
+                        let excludedError = FileProviderErrorMapper.map(CoreFailure(code: .excludedFromSync, retryable: false))
+                        try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                            manager.signalErrorResolved(excludedError) { error in
+                                if let error { continuation.resume(throwing: error) }
+                                else { continuation.resume() }
+                            }
+                        }
+                    }
+                }
+                reload()
+            } catch {
+                exclusionError = userFacingError(error)
+            }
+        }
+    }
+
     func removeDomain(_ domain: DomainDescriptor) {
         guard removingDomainIdentifier == nil else { return }
         domainRemovalError = nil
@@ -1092,10 +1239,30 @@ private final class NimbusSyncAppState: ObservableObject {
             do {
                 guard let registry else { throw StoreBridgeError.openFailed("App Group is unavailable") }
                 let service = SafeDomainRemovalService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
-                _ = try await service.remove(descriptor: domain)
+                if let preserved = try await service.remove(descriptor: domain) {
+                    domainRemovalError = "Finder removed this location, but local changes were preserved at:\n\(preserved.path)\n\nSave that copy, then choose Finish removal from the domain menu."
+                }
                 reload()
             } catch {
-                domainRemovalError = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                domainRemovalError = userFacingError(error)
+                reload()
+            }
+            removingDomainIdentifier = nil
+        }
+    }
+
+    func finalizePreservedDomainRemoval(_ domain: DomainDescriptor) {
+        guard removingDomainIdentifier == nil, domain.status == .preservedRemoval else { return }
+        domainRemovalError = nil
+        removingDomainIdentifier = domain.identifier
+        Task {
+            do {
+                guard let registry else { throw StoreBridgeError.openFailed("App Group is unavailable") }
+                let service = SafeDomainRemovalService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
+                try await service.finalizePreservedRemoval(descriptor: domain)
+                reload()
+            } catch {
+                domainRemovalError = userFacingError(error)
                 reload()
             }
             removingDomainIdentifier = nil
@@ -1120,7 +1287,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 await resetEventSupervisor(domainIdentifier: domain.identifier)
                 _ = site
                 reload()
-            } catch { onboardingError = String(describing: error) }
+            } catch { onboardingError = userFacingError(error) }
         }
     }
 
@@ -1233,35 +1400,44 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
 private struct SettingsView: View {
     let domains: [DomainDescriptor]
+    let exclusionRules: [String: String]
     let persistedNotificationPreferences: NotificationPreferences
     @Binding var finderError: String?
     @Binding var finderSettingsActionAvailable: Bool
     @Binding var domainRemovalError: String?
+    @Binding var exclusionError: String?
     let removingDomainIdentifier: String?
     let onOpenFinder: (DomainDescriptor) -> Void
     let onOpenFileProviderSettings: () -> Void
     let onRemove: (DomainDescriptor) -> Void
+    let onFinalizeRemoval: (DomainDescriptor) -> Void
     let onOpenWeb: (DomainDescriptor) -> Void
     let onReauthorize: (DomainDescriptor) -> Void
+    let onApplyExclusionRules: (DomainDescriptor, String) -> Void
     let onNotificationsChanged: (NotificationPreferences) -> Void
     let onAddDomain: () -> Void
     @State private var selectedSection: SettingsSection? = .domains
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var notificationPreferences: NotificationPreferences
     @State private var pendingRemoval: DomainDescriptor?
+    @State private var editingExclusionsDomainIdentifier: String?
 
-    init(domains: [DomainDescriptor], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void) {
         self.domains = domains
+        self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
         _finderError = finderError
         _finderSettingsActionAvailable = finderSettingsActionAvailable
         _domainRemovalError = domainRemovalError
+        _exclusionError = exclusionError
         self.removingDomainIdentifier = removingDomainIdentifier
         self.onOpenFinder = onOpenFinder
         self.onOpenFileProviderSettings = onOpenFileProviderSettings
         self.onRemove = onRemove
+        self.onFinalizeRemoval = onFinalizeRemoval
         self.onOpenWeb = onOpenWeb
         self.onReauthorize = onReauthorize
+        self.onApplyExclusionRules = onApplyExclusionRules
         self.onNotificationsChanged = onNotificationsChanged
         self.onAddDomain = onAddDomain
         _notificationPreferences = State(initialValue: notificationPreferences)
@@ -1283,11 +1459,32 @@ private struct SettingsView: View {
         .onChange(of: persistedNotificationPreferences) { value in
             notificationPreferences = value
         }
-        .confirmationDialog("Remove \(pendingRemoval?.displayName ?? "domain")?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), presenting: pendingRemoval) { domain in
-            Button("Remove", role: .destructive) { onRemove(domain); pendingRemoval = nil }
+        .confirmationDialog(pendingRemoval?.status == .preservedRemoval ? "Finish removing \(pendingRemoval?.displayName ?? "domain")?" : "Remove \(pendingRemoval?.displayName ?? "domain")?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), presenting: pendingRemoval) { domain in
+            if domain.status == .preservedRemoval {
+                Button("I Saved the Local Copy", role: .destructive) { onFinalizeRemoval(domain); pendingRemoval = nil }
+            } else {
+                Button("Remove", role: .destructive) { onRemove(domain); pendingRemoval = nil }
+            }
             Button("Cancel", role: .cancel) { pendingRemoval = nil }
-        } message: { _ in
-            Text("Remote files will not be deleted. Dirty local data may be preserved by File Provider.")
+        } message: { domain in
+            if domain.status == .preservedRemoval {
+                Text("Only continue after saving the local copy preserved by File Provider. NimbusSync will delete its local database and credential reference.")
+            } else {
+                Text("Remote files will not be deleted. Dirty local data may be preserved by File Provider.")
+            }
+        }
+        .sheet(isPresented: Binding(get: { editingExclusionsDomainIdentifier != nil }, set: { if !$0 { editingExclusionsDomainIdentifier = nil } })) {
+            if let identifier = editingExclusionsDomainIdentifier,
+               let domain = domains.first(where: { $0.identifier == identifier }) {
+                ExclusionRulesView(
+                    initialText: exclusionRules[identifier] ?? "",
+                    onApply: { text in
+                        onApplyExclusionRules(domain, text)
+                        editingExclusionsDomainIdentifier = nil
+                    }
+                )
+                .frame(minWidth: 520, minHeight: 300)
+            }
         }
         .alert("Unable to open Finder", isPresented: Binding(get: { finderError != nil }, set: { if !$0 { finderError = nil } })) {
             if finderSettingsActionAvailable {
@@ -1301,10 +1498,15 @@ private struct SettingsView: View {
         } message: {
             Text(finderError ?? "The File Provider location is unavailable.")
         }
-        .alert("Unable to remove domain", isPresented: Binding(get: { domainRemovalError != nil }, set: { if !$0 { domainRemovalError = nil } })) {
+        .alert("Domain removal", isPresented: Binding(get: { domainRemovalError != nil }, set: { if !$0 { domainRemovalError = nil } })) {
             Button("OK", role: .cancel) { domainRemovalError = nil }
         } message: {
             Text(domainRemovalError ?? "The domain could not be removed.")
+        }
+        .alert("Unable to update exclusions", isPresented: Binding(get: { exclusionError != nil }, set: { if !$0 { exclusionError = nil } })) {
+            Button("OK", role: .cancel) { exclusionError = nil }
+        } message: {
+            Text(exclusionError ?? "The exclusion rules could not be applied.")
         }
     }
 
@@ -1448,9 +1650,12 @@ private struct SettingsView: View {
                     Button { onReauthorize(domain) } label: {
                         Label("Reauthorize", systemImage: "person.crop.circle.badge.checkmark")
                     }
+                    Button { editingExclusionsDomainIdentifier = domain.identifier } label: {
+                        Label("Edit exclusions", systemImage: "line.3.horizontal.decrease.circle")
+                    }
                     Divider()
                     Button(role: .destructive) { pendingRemoval = domain } label: {
-                        Label("Remove domain", systemImage: "trash")
+                        Label(domain.status == .preservedRemoval ? "Finish removal" : "Remove domain", systemImage: "trash")
                     }
                     .disabled(removingDomainIdentifier != nil)
                 } label: {
@@ -1629,7 +1834,7 @@ private struct SettingsStatusRow: View {
 private extension DomainStatus {
     var needsAttention: Bool {
         switch self {
-        case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired:
+        case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired, .preservedRemoval:
             true
         default:
             false

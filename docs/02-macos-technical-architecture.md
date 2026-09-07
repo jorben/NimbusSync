@@ -6,6 +6,8 @@
 > 输入文档：[macOS 复刻方案调研](./00-macos-port-research.md)、[macOS 客户端产品需求](./01-macos-product-requirements.md)  
 > 参考实现：[`cloudreve/desktop@71447408`](https://github.com/cloudreve/desktop/tree/71447408df6db38362703fbbb61dc534ea210470)
 
+> File Provider parity implementation update：working-set/trash enumerator、v7 immutable journal、directory snapshot generations、system-set fencing、async transfer registration、projection refresh 和 exclusion safety 已在当前 checkout 落地；实现证据与外部验收边界见 [parity implementation report](./archive/reports/phase-5-nextcloud-parity-implementation.md)。
+
 ## 1. 架构结论
 
 NimbusSync 采用原生多进程架构，连接自托管 Cloudreve 服务端：
@@ -1093,7 +1095,7 @@ UniFFI bindings 和 artifact checksum pipeline 暂缓，待产品集成完成后
 
 正式 identifier、App Group 和 Keychain Group 由签名配置注入，不硬编码在业务模块。
 
-File Provider Info.plist 默认不声明 `NSExtensionFileProviderAppliesChangesAtomically`。只有远端组合 mutation 的可见性经 Spike 证明满足该声明后才能启用。面向 macOS 26+ 若采用系统 fail-on-conflict sync control，则同时声明 `NSExtensionFileProviderSupportsFailingUploadOnConflict=YES`，并仅在收到对应 option 时返回 `localVersionConflictingWithServer`；macOS 13-15 保持稳定的 `cannotSynchronize` + 持久冲突路径。
+File Provider Info.plist 默认不声明 `NSExtensionFileProviderAppliesChangesAtomically`。只有远端组合 mutation 的可见性经 Spike 证明满足该声明后才能启用。当前 checkout 的 macOS 26 原生 fail-on-conflict capability 仍为关闭状态，未声明 `NSExtensionFileProviderSupportsFailingUploadOnConflict`，因此各版本继续使用条件写失败 + 持久 Conflict Center 的 fail-closed 路径；只有 signed Finder contract 证明系统保留两份内容后，才允许另行开启该声明并映射 `localVersionConflictingWithServer`。
 
 ### 17.3 发布物
 

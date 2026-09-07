@@ -202,7 +202,7 @@ public final class DomainLifecycleService: @unchecked Sendable {
     public func makeSystemDomain(for descriptor: DomainDescriptor, trashEnabled: Bool = false) throws -> NSFileProviderDomain {
         guard CloudreveIdentifier.validate(descriptor.identifier, prefix: CloudreveIdentifier.domainPrefix) else { throw DomainLifecycleError.invalidIdentifier }
         let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(descriptor.identifier), displayName: descriptor.displayName)
-        if #available(macOS 13.0, *) { domain.supportsSyncingTrash = trashEnabled }
+        if #available(macOS 13.0, *) { domain.supportsSyncingTrash = trashEnabled && descriptor.capabilitySnapshot.canTrash }
         return domain
     }
 

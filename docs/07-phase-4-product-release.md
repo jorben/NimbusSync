@@ -6,6 +6,8 @@
 > 前序阶段：[阶段 3：SSE、变更交付与最终一致性](./06-phase-3-events-consistency.md)
 > 完整验收基线：[产品需求 AC-001 至 AC-014](./01-macos-product-requirements.md#12-10-端到端验收场景)
 
+> Parity implementation update：projection-schema refresh、item action projection、special-file policy 和 release static gates 已实现；signed Finder、Cloudreve matrix、性能、长稳和 notarization 仍是 1.0 No-Go 条件，见 [parity report](./archive/reports/phase-5-nextcloud-parity-implementation.md)。
+
 ## 1. 需求背景
 
 阶段 0 至 3 建立了协议、File Provider、持久化、读写路径和最终一致性。1.0 仍不能只以“同步核心可运行”为发布标准：用户需要可理解的菜单栏状态、设置、冲突处理、通知、Finder 操作、本机排除、诊断、多语言和安全卸载；工程还必须通过签名、公证、升级、兼容性、性能、可访问性和长稳验证。

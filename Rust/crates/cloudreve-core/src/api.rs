@@ -607,7 +607,7 @@ async fn decode_empty_response(response: reqwest::Response) -> Result<(), CoreEr
 fn map_api_error(code: i32) -> CoreError {
     match code {
         401 | 40020 | 40089 => CoreError::Authentication,
-        40006 | 40007 | 40008 => CoreError::PermissionDenied,
+        40006..=40008 => CoreError::PermissionDenied,
         40009 | 40010 => CoreError::NotFound,
         40012 | 40013 => CoreError::NameCollision,
         40014 | 40015 => CoreError::VersionConflict,

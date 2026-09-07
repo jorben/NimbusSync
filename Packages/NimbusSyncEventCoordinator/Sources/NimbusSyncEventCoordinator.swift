@@ -369,16 +369,68 @@ public struct EnrichedRemoteChange: Sendable, Equatable {
 public actor EventJournalWriter {
     private let store: SQLiteStateStore
     private let outboxDrainer: SignalOutboxDrainer?
+    private var commitsSinceCompaction = 0
 
     public init(store: SQLiteStateStore, outboxDrainer: SignalOutboxDrainer? = nil) { self.store = store; self.outboxDrainer = outboxDrainer }
 
+    private func maintainStorage() {
+        commitsSinceCompaction += 1
+        guard commitsSinceCompaction >= 256 else { return }
+        commitsSinceCompaction = 0
+        try? store.compactJournal()
+        try? store.compactTransferState()
+    }
+
     public func commit(_ change: EnrichedRemoteChange) async throws -> JournalChange? {
-        if let existing = try store.item(identifier: change.item.itemIdentifier),
+        let visibility = try store.isExcludedByCurrentRules(item: change.item)
+        let previousItem = try store.item(identifier: change.item.itemIdentifier)
+        let previousState = try store.localItemState(identifier: change.item.itemIdentifier)
+        let explicitViewState: Bool?
+        switch change.kind.lowercased() {
+        case "view_removed": explicitViewState = true
+        case "view_added": explicitViewState = false
+        default: explicitViewState = nil
+        }
+        if let explicitViewState {
+            if previousItem == nil || previousState.viewExcluded != explicitViewState {
+                let journal = try store.commitProviderViewChange(
+                    item: change.item,
+                    oldParentIdentifier: change.oldParentIdentifier ?? previousItem?.parentIdentifier,
+                    newParentIdentifier: change.newParentIdentifier ?? change.item.parentIdentifier,
+                    excluded: explicitViewState,
+                    origin: "remote_event"
+                )
+                if let outboxDrainer, !(await outboxDrainer.drain()) { throw CoreFailure(code: .network, retryable: true) }
+                maintainStorage()
+                return journal
+            }
+            try store.insertItem(change.item)
+            return nil
+        }
+        if visibility.excluded {
+            let shouldEmit = previousItem == nil || !previousState.viewExcluded
+            if shouldEmit {
+                let journal = try store.commitProviderViewChange(item: change.item, oldParentIdentifier: change.oldParentIdentifier ?? previousItem?.parentIdentifier, newParentIdentifier: change.newParentIdentifier ?? change.item.parentIdentifier, excluded: true, origin: "remote_event")
+                if let outboxDrainer, !(await outboxDrainer.drain()) { throw CoreFailure(code: .network, retryable: true) }
+                maintainStorage()
+                return journal
+            }
+            try store.insertItem(change.item)
+            return nil
+        }
+        if previousState.viewExcluded {
+            let journal = try store.commitProviderViewChange(item: change.item, oldParentIdentifier: change.oldParentIdentifier ?? previousItem?.parentIdentifier, newParentIdentifier: change.newParentIdentifier ?? change.item.parentIdentifier, excluded: false, origin: "remote_event")
+            if let outboxDrainer, !(await outboxDrainer.drain()) { throw CoreFailure(code: .network, retryable: true) }
+            maintainStorage()
+            return journal
+        }
+        if let existing = previousItem,
            existing.remoteID == change.item.remoteID,
            existing.parentIdentifier == change.item.parentIdentifier,
            existing.name == change.item.name,
            existing.uri == change.item.uri,
            existing.kind == change.item.kind,
+           existing.contentType == change.item.contentType,
            existing.size == change.item.size,
            existing.remoteVersion == change.item.remoteVersion,
            existing.creationDate == change.item.creationDate,
@@ -388,16 +440,38 @@ public actor EventJournalWriter {
            existing.canAddChildren == change.item.canAddChildren,
            existing.canTrash == change.item.canTrash,
            existing.canDelete == change.item.canDelete,
+           existing.trashOriginalParentIdentifier == change.item.trashOriginalParentIdentifier,
            existing.trashed == change.item.trashed,
            existing.tombstone == change.item.tombstone,
            existing.version == change.item.version {
             return nil
         }
-        let journal = try store.commitProviderChange(item: change.item, oldParentIdentifier: change.oldParentIdentifier, newParentIdentifier: change.newParentIdentifier, kind: change.kind, origin: "remote_event")
+        let journal = try store.commitProviderChange(item: change.item, oldParentIdentifier: change.oldParentIdentifier ?? previousItem?.parentIdentifier, newParentIdentifier: change.newParentIdentifier ?? change.item.parentIdentifier, kind: change.kind, origin: "remote_event")
         if let outboxDrainer, !(await outboxDrainer.drain()) {
             throw CoreFailure(code: .network, retryable: true)
         }
+        maintainStorage()
         return journal
+    }
+
+    public func commit(_ changes: [EnrichedRemoteChange]) async throws -> [JournalChange] {
+        guard !changes.isEmpty else { return [] }
+        // Fold one producer result before allocating sequence numbers, then
+        // pass each folded change through the same visibility, exclusion and
+        // descendant-refresh path as a single event. This keeps batch and
+        // live-event semantics identical; a process kill between two rows is
+        // safe because the retry sees the already-persisted final projection.
+        let folded = JournalChangeFold.fold(changes.map {
+            ProviderChangeInput(item: $0.item, oldParentIdentifier: $0.oldParentIdentifier, newParentIdentifier: $0.newParentIdentifier, kind: $0.kind, origin: "remote_event")
+        })
+        var journals: [JournalChange] = []
+        for input in folded {
+            let change = EnrichedRemoteChange(item: input.item, oldParentIdentifier: input.oldParentIdentifier, newParentIdentifier: input.newParentIdentifier, kind: input.kind)
+            if let journal = try await commit(change) {
+                journals.append(journal)
+            }
+        }
+        return journals
     }
 
     public func markReconcileStatus(_ status: String, at date: Date = Date()) {

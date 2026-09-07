@@ -12,7 +12,14 @@ pub extern "C" fn cloudreve_core_abi_version() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn cloudreve_validate_local_identifier(
+/// Validates two NUL-terminated UTF-8 strings without exposing Rust-owned
+/// memory across the ABI.
+///
+/// # Safety
+///
+/// When non-null, `value` and `prefix` must point to readable,
+/// NUL-terminated C strings for the duration of this call.
+pub unsafe extern "C" fn cloudreve_validate_local_identifier(
     value: *const c_char,
     prefix: *const c_char,
 ) -> c_int {

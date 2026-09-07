@@ -36,7 +36,31 @@
                 <key>Title</key>
                 <string>Check for Updates</string>
                 <key>Predicate</key>
-                <string>TRUEPREDICATE</string>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>ai.tiy.nimbussync.keep-downloaded</string>
+                <key>Title</key>
+                <string>Keep Downloaded</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == FALSE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>ai.tiy.nimbussync.allow-automatic-freeing</string>
+                <key>Title</key>
+                <string>Allow Automatic Freeing</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>ai.tiy.nimbussync.remove-download</string>
+                <key>Title</key>
+                <string>Remove Download</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canEvict == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
             </dict>
         </array>
         <key>NSFileProviderDecorations</key>
@@ -48,6 +72,26 @@
                 <string>com.apple.icon-decoration.badge.exclamationmark</string>
                 <key>Label</key>
                 <string>Conflict</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>ai.tiy.nimbussync.error</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.exclamationmark</string>
+                <key>Label</key>
+                <string>Sync Error</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>ai.tiy.nimbussync.keep-downloaded</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.lock</string>
+                <key>Label</key>
+                <string>Keep Downloaded</string>
                 <key>Category</key>
                 <string>Badge</string>
             </dict>

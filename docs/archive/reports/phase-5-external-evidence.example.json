@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kind": "nimbussync.phase5.external-evidence",
+  "candidate": {
+    "commit": "0000000",
+    "checked_at": "1970-01-01T00:00:00Z",
+    "macos": "replace-with-tested-version",
+    "architecture": "arm64",
+    "cloudreve_version": "replace-with-tested-version",
+    "provider": "replace-with-tested-provider"
+  },
+  "gates": {
+    "stable_entity_identity": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "stable_root_identity": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "complete_pagination": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "cursor_pagination": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "snapshot_safe_pagination": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "conditional_content_write": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "idempotent_create": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "conditional_metadata_mutation": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "content_version_semantics": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "resumable_upload": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "upload_completion_queryable": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "provider_selection": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "zero_byte_write": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "delete_semantics": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "trash_restore": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "sse_resume": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "account_identity": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "refresh_rotation": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "tls_proxy": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "thumbnail": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "native_conflict_copy": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "fallback_conflict": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "signed_finder": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "performance": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "long_run": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "notarization": {"status": "unverified", "duration_ms": 0, "evidence": []},
+    "clean_machine_upgrade": {"status": "unverified", "duration_ms": 0, "evidence": []}
+  }
+}

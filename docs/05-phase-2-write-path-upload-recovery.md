@@ -6,6 +6,8 @@
 > 前序阶段：[阶段 1：持久化、认证与读路径](./04-phase-1-persistence-read-path.md)
 > 后续阶段：[阶段 3：SSE 与最终一致性](./06-phase-3-events-consistency.md)
 
+> Parity implementation update：async task registration、source replay、条件写 operation gate、conflict source validation 和 tri-state transfer projection 已实现；Cloudreve contract/Finder signed evidence 仍按 [parity report](./archive/reports/phase-5-nextcloud-parity-implementation.md) 单独验收。
+
 ## 1. 需求背景
 
 File Provider 的写入不是普通 API 请求。系统可能重放 create/modify/delete callback，Extension 可能在任意网络步骤被终止，content URL 在 callback 返回后失效，Cloudreve 的部分 mutation 又以 URI 为路由且不一定支持原子条件参数。若只把 Finder 操作直接转成一次 HTTP 请求，会产生重复对象、旧版本覆盖、误删和“服务端成功但本地以为失败”等数据损坏。

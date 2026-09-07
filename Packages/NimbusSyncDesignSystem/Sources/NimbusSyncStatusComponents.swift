@@ -176,6 +176,7 @@ extension DomainStatus {
         case .permanentError: "Action required"
         case .removalPreflight: "Removing"
         case .repairRequired: "Repair required"
+        case .preservedRemoval: "Finish removal"
         default: "Preparing"
         }
     }
@@ -188,6 +189,7 @@ extension DomainStatus {
         case .conflict: "exclamationmark.triangle"
         case .removalPreflight: "trash"
         case .repairRequired: "wrench.and.screwdriver"
+        case .preservedRemoval: "externaldrive.badge.xmark"
         default: "arrow.triangle.2.circlepath"
         }
     }
@@ -195,7 +197,7 @@ extension DomainStatus {
     var tint: Color {
         switch self {
         case .healthy: .green
-        case .authExpired, .conflict, .permanentError, .rootUnavailable, .scopeConflict, .repairRequired: .orange
+        case .authExpired, .conflict, .permanentError, .rootUnavailable, .scopeConflict, .repairRequired, .preservedRemoval: .orange
         case .offline: .secondary
         default: .accentColor
         }
@@ -204,7 +206,7 @@ extension DomainStatus {
     var priority: Int {
         switch self {
         case .authExpired: 100
-        case .rootUnavailable, .scopeConflict, .repairRequired: 90
+        case .rootUnavailable, .scopeConflict, .repairRequired, .preservedRemoval: 90
         case .conflict, .permanentError: 80
         case .offline: 70
         case .reconciling: 60

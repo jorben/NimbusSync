@@ -6,6 +6,7 @@ let package = Package(
     defaultLocalization: "en",
     platforms: [.macOS(.v13)],
     products: [
+        .executable(name: "NimbusSyncBenchmarks", targets: ["NimbusSyncBenchmarks"]),
         .library(name: "CloudreveDomainKit", targets: ["CloudreveDomainKit"]),
         .library(name: "CloudreveStoreBridge", targets: ["CloudreveStoreBridge"]),
         .library(name: "CloudreveAuthKit", targets: ["CloudreveAuthKit"]),
@@ -66,10 +67,20 @@ let package = Package(
             path: "Packages/NimbusSyncProductKit/Sources",
             resources: [.process("Resources")]
         ),
+        .executableTarget(
+            name: "NimbusSyncBenchmarks",
+            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge"],
+            path: "Scripts/NimbusSyncBenchmarks"
+        ),
         .testTarget(
             name: "NimbusSyncTests",
             dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit", "CloudreveEventCoordinator", "CloudreveFileProviderKit", "CloudreveDomainService", "CloudreveProductKit"],
             path: "Tests/SwiftUnitTests"
+        ),
+        .testTarget(
+            name: "NimbusSyncFileProviderTests",
+            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit", "CloudreveFileProviderKit"],
+            path: "Tests/FileProviderUnitTests"
         ),
     ]
 )

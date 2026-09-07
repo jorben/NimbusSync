@@ -120,12 +120,13 @@ public final class CloudreveEventEnricher: RemoteEventEnricher, @unchecked Senda
     private let store: SQLiteStateStore
     private let vault: CredentialVault
     private let credentialReference: String
+    private let capabilitySnapshot: CapabilitySnapshot
     private let session: URLSession
     private let credentialRefresh: CredentialRefreshService
     private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "remote-events")
 
-    public init(origin: URL, rootURI: String, rootRemoteID: String = "", store: SQLiteStateStore, vault: CredentialVault, credentialReference: String, session: URLSession? = nil) {
-        self.origin = origin; self.rootRemoteID = rootRemoteID; self.rootURI = rootURI; self.store = store; self.vault = vault; self.credentialReference = credentialReference
+    public init(origin: URL, rootURI: String, rootRemoteID: String = "", store: SQLiteStateStore, vault: CredentialVault, credentialReference: String, capabilitySnapshot: CapabilitySnapshot = CapabilitySnapshot(), session: URLSession? = nil) {
+        self.origin = origin; self.rootRemoteID = rootRemoteID; self.rootURI = rootURI; self.store = store; self.vault = vault; self.credentialReference = credentialReference; self.capabilitySnapshot = capabilitySnapshot
         self.credentialRefresh = CredentialRefreshService(vault: vault, session: session)
         if let session { self.session = session }
         else {
@@ -146,11 +147,17 @@ public final class CloudreveEventEnricher: RemoteEventEnricher, @unchecked Senda
         }
         let existingIdentifier = try store.itemIdentifier(forRemoteID: remoteID)
         let parentIdentifier = try await parentIdentifier(for: normalizedPath, existingIdentifier: existingIdentifier)
-        let kind: RemoteItemKind = file.type == 1 ? .folder : .file
-        let contentRevision = file.primaryEntity ?? file.updatedAt ?? file.createdAt ?? file.id
+        let kind: RemoteItemKind = file.type == 1 ? .folder : (file.type == 0 ? .file : .unsupported)
+        let contentVersion = RemoteContentVersionPolicy.resolve(primaryEntity: file.primaryEntity, stableEntityID: file.id)
+        let hasReliableContentRevision = contentVersion.reliable
+        let contentRevision = contentVersion.value
         let readable = file.permission.map { $0.contains("r") } ?? true
         let writable = file.capability.map { $0.contains("w") } ?? false
-        let item = RemoteItem(itemIdentifier: existingIdentifier ?? CloudreveIdentifier.item(), remoteID: file.id, parentIdentifier: parentIdentifier, name: file.name, uri: normalizedPath, kind: kind, contentType: kind == .folder ? "public.folder" : "public.data", size: max(0, file.size ?? 0), remoteVersion: file.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: file.name, kind: kind, permissionBits: readable ? 1 : 0, revision: file.updatedAt)), creationDate: parseEventDate(file.createdAt), contentModificationDate: parseEventDate(file.updatedAt), canRead: readable, canWrite: writable && readable, canAddChildren: writable && readable && kind == .folder, canTrash: writable && readable && (file.capability?.contains("d") ?? false), canDelete: false)
+        let contentWriteVerified = capabilitySnapshot.canWrite(provider: capabilitySnapshot.providers.first?.name ?? "unverified")
+        let metadataMoveVerified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.conditionalMetadataMutation == .verified && capabilitySnapshot.operations.metadataMove == .verified
+        let collisionCreateVerified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.operations.collisionSafeCreate == .verified
+        let writeVerified = kind == .folder ? metadataMoveVerified : (hasReliableContentRevision && (contentWriteVerified || metadataMoveVerified))
+        let item = RemoteItem(itemIdentifier: existingIdentifier ?? CloudreveIdentifier.item(), remoteID: file.id, parentIdentifier: parentIdentifier, name: file.name, uri: normalizedPath, kind: kind, contentType: kind == .folder ? "public.folder" : (kind == .symlink ? "public.symlink" : "public.data"), size: max(0, file.size ?? 0), remoteVersion: file.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: file.name, kind: kind, permissionBits: readable ? 1 : 0, revision: file.updatedAt)), creationDate: parseEventDate(file.createdAt), contentModificationDate: parseEventDate(file.updatedAt), canRead: readable && kind != .unsupported, canWrite: writable && readable && kind != .unsupported && writeVerified, canAddChildren: writable && readable && kind == .folder && collisionCreateVerified, canTrash: capabilitySnapshot.canTrash && writable && readable && (file.capability?.contains("d") ?? false), canDelete: capabilitySnapshot.canPurge && writable && readable && (file.capability?.contains("d") ?? false))
         return EnrichedRemoteChange(item: item, oldParentIdentifier: existingIdentifier.flatMap { try? store.item(identifier: $0)?.parentIdentifier }, newParentIdentifier: parentIdentifier, kind: hint.kind.rawValue)
     }
 
@@ -174,12 +181,54 @@ public final class CloudreveEventEnricher: RemoteEventEnricher, @unchecked Senda
         return envelope.data
     }
 
+    private func fetchFile(uri: String) async throws -> EventFileDTO? {
+        var components = URLComponents(url: origin.appendingPathComponent("api/v4/file/info"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "uri", value: uri), URLQueryItem(name: "extended", value: "true")]
+        guard let url = components?.url else { throw CoreFailure(code: .network, retryable: true) }
+        let credential = try await credentialRefresh.credential(origin: origin, reference: credentialReference)
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw EventEnrichmentError.unavailable }
+        if http.statusCode == 404 { return nil }
+        if http.statusCode == 401 { throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true) }
+        guard (200..<300).contains(http.statusCode) else { throw EventEnrichmentError.unavailable }
+        let envelope = try JSONDecoder().decode(EventAPIEnvelope<EventFileDTO>.self, from: data)
+        guard envelope.code == 0 else { return nil }
+        return envelope.data
+    }
+
     private func parentIdentifier(for path: String, existingIdentifier: String?) async throws -> String? {
         guard let parentURI = CloudreveRemoteURI.parent(path), let rootURI = canonicalURI(rootURI) else { throw EventEnrichmentError.unavailable }
         if parentURI == rootURI { return NSFileProviderItemIdentifier.rootContainer.rawValue }
-        if let parentIdentifier = try store.itemIdentifier(forRemoteURI: parentURI) { return parentIdentifier }
         _ = existingIdentifier
-        throw EventEnrichmentError.unavailable
+        return try await hydrateParent(uri: parentURI, rootURI: rootURI, depth: 0)
+    }
+
+    private func hydrateParent(uri: String, rootURI: String, depth: Int) async throws -> String? {
+        guard depth < 32, CloudreveRemoteURI.isWithin(uri, root: rootURI) else { throw EventEnrichmentError.outsideScope }
+        if let parentIdentifier = try store.itemIdentifier(forRemoteURI: uri) { return parentIdentifier }
+        guard let file = try await fetchFile(uri: uri), file.type == 1 else { throw EventEnrichmentError.unavailable }
+        let parentIdentifier: String
+        if let ancestorURI = CloudreveRemoteURI.parent(uri), ancestorURI != rootURI {
+            guard let ancestorIdentifier = try await hydrateParent(uri: ancestorURI, rootURI: rootURI, depth: depth + 1) else { throw EventEnrichmentError.unavailable }
+            parentIdentifier = ancestorIdentifier
+        } else {
+            parentIdentifier = NSFileProviderItemIdentifier.rootContainer.rawValue
+        }
+        guard file.id != rootRemoteID else { throw EventEnrichmentError.outsideScope }
+        let identifier = try store.itemIdentifier(forRemoteID: file.id) ?? CloudreveIdentifier.item()
+        let normalized = try CloudreveRemoteURI.canonical(file.path, accountID: URLComponents(string: rootURI)?.user ?? "")
+        guard CloudreveRemoteURI.isWithin(normalized, root: rootURI) else { throw EventEnrichmentError.outsideScope }
+        let readable = file.permission.map { $0.contains("r") } ?? true
+        let writable = file.capability.map { $0.contains("w") } ?? false
+        let metadataMoveVerified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.conditionalMetadataMutation == .verified && capabilitySnapshot.operations.metadataMove == .verified
+        let collisionCreateVerified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.operations.collisionSafeCreate == .verified
+        let contentRevision = RemoteContentVersionPolicy.resolve(primaryEntity: file.primaryEntity, stableEntityID: file.id).value
+        let item = RemoteItem(itemIdentifier: identifier, remoteID: file.id, parentIdentifier: parentIdentifier, name: file.name, uri: normalized, kind: .folder, contentType: "public.folder", size: max(0, file.size ?? 0), remoteVersion: file.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: file.name, kind: .folder, permissionBits: readable ? 1 : 0, revision: file.updatedAt)), creationDate: parseEventDate(file.createdAt), contentModificationDate: parseEventDate(file.updatedAt), canRead: readable, canWrite: writable && readable && metadataMoveVerified, canAddChildren: writable && readable && collisionCreateVerified, canTrash: capabilitySnapshot.canTrash && writable && readable, canDelete: capabilitySnapshot.canPurge && writable && readable)
+        try store.insertItem(item)
+        return identifier
     }
 }
 
@@ -201,6 +250,12 @@ private struct ReconcilePagination: Decodable {
 }
 
 private struct ReconcileListDTO: Decodable { let files: [EventFileDTO]; let pagination: ReconcilePagination? }
+
+private func reconciliationPaginationIsVerified(_ snapshot: CapabilitySnapshot, usesCursor: Bool) -> Bool {
+    snapshot.completePagination == .verified &&
+        snapshot.snapshotSafePagination == .verified &&
+        (!usesCursor || snapshot.cursorPagination == .verified)
+}
 
 private struct ReconcileWork: Codable {
     let uri: String
@@ -242,9 +297,15 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         let runID = activeRun?.id ?? UUID()
         var savedCursor = activeRun?.cursor.flatMap { try? JSONDecoder().decode(ReconcileCursor.self, from: Data($0.utf8)) }
         if savedCursor?.current == nil && savedCursor?.queue.isEmpty == true { savedCursor = nil }
+        // A resumed cursor does not carry a complete proof of every item
+        // observed before the previous process stopped. Finish the scan and
+        // leave deletion for the next fresh generation instead of risking a
+        // tombstone for an item that was already seen in the earlier prefix.
+        var deletionSafe = savedCursor == nil
         if activeRun == nil {
             try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: UInt64(Date().timeIntervalSince1970), phase: "prepared", cursor: nil)
         }
+        var knownRemoteIDs = Set<String>()
         try store.updateSyncState(reconcileStatus: "scanning_normal")
         do {
             let root = try await fetchFile(id: descriptor.rootRemoteID)
@@ -253,6 +314,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         let rootScope = try RemoteScope(origin: descriptor.scope.origin, accountID: descriptor.accountID, rootURI: rootPath)
         if rootScope.rootURI != descriptor.currentRootURI {
             savedCursor = nil
+            deletionSafe = true
             if let registry, try registry.allDomains().contains(where: { stored in
                 guard stored.identifier != descriptor.identifier, let otherScope = try? RemoteScope(origin: stored.origin, accountID: stored.accountID, rootURI: stored.rootURI) else { return false }
                 return otherScope.overlaps(rootScope)
@@ -262,6 +324,14 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             try store.updateDomainRootURI(identifier: descriptor.identifier, rootURI: rootScope.rootURI)
             try registry?.updateDomainRootURI(identifier: descriptor.identifier, rootURI: rootScope.rootURI)
         }
+        // A root move changes the local view; rows from the previous scope
+        // must never be interpreted as remote deletions during this scan.
+        knownRemoteIDs = Set(try store.allItems(limit: 100_000).compactMap { item in
+            guard let remoteID = item.remoteID,
+                  !item.tombstone,
+                  CloudreveRemoteURI.isWithin(item.uri, root: rootScope.rootURI) else { return nil }
+            return remoteID
+        })
         var queue: [ReconcileWork] = savedCursor?.queue ?? [ReconcileWork(uri: rootScope.rootURI, parent: NSFileProviderItemIdentifier.rootContainer.rawValue)]
         var currentWork = savedCursor?.current
         var page = savedCursor?.page ?? 1
@@ -277,32 +347,97 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             let current = currentWork ?? queue.removeFirst()
             currentWork = current
             repeat {
+                guard page <= 2_000 else {
+                    throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "normal_scan_bound"])
+                }
+                let requestUsedCursor = token != nil
                 let response = try await list(uri: current.uri, page: Int32(page), token: token)
                 logger.info("reconcile.page id=\(correlationID, privacy: .public) page=\(page, privacy: .public) token=\(token != nil, privacy: .public) items=\(response.files.count, privacy: .public)")
                 try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: token ?? "page:\(page)", state: "active")
                 for file in response.files {
                     guard file.id != descriptor.rootRemoteID else { continue }
+                    if !seen.contains(file.id) {
+                        guard seen.count < 100_000 else {
+                            throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "normal_scan_bound"])
+                        }
+                    }
                     guard let normalizedPath = canonicalURI(file.path, accountID: descriptor.accountID), CloudreveRemoteURI.isWithin(normalizedPath, root: rootScope.rootURI) else { throw CoreFailure(code: .scopeConflict, retryable: false, userActionRequired: true) }
                     let itemIdentifier = try store.itemIdentifier(forRemoteID: file.id) ?? CloudreveIdentifier.item()
-                    let item = try makeItem(file, parentIdentifier: current.parent, itemIdentifier: itemIdentifier, accountID: descriptor.accountID)
-                    if let old = try store.item(identifier: itemIdentifier), old == item {
+                    var item = try makeItem(file, parentIdentifier: current.parent, itemIdentifier: itemIdentifier, accountID: descriptor.accountID)
+                    let capability = descriptor.capabilitySnapshot
+                    let metadataMoveVerified = capability.stableItemIdentity == .verified && capability.stableRootIdentity == .verified && capability.conditionalMetadataMutation == .verified && capability.operations.metadataMove == .verified
+                    let contentWriteVerified = capability.canWrite(provider: capability.providers.first?.name ?? "unverified")
+                    item.canWrite = item.canWrite && (item.kind == .folder ? metadataMoveVerified : (metadataMoveVerified || contentWriteVerified))
+                    item.canAddChildren = item.canAddChildren && capability.stableItemIdentity == .verified && capability.stableRootIdentity == .verified && capability.operations.collisionSafeCreate == .verified
+                    let writable = file.capability.map { $0.contains("w") } ?? false
+                    let deletable = file.capability.map { $0.contains("d") } ?? false
+                    item.canTrash = descriptor.capabilitySnapshot.canTrash && writable && deletable
+                    item.canDelete = descriptor.capabilitySnapshot.canPurge && writable && deletable
+                    let visibility = try store.isExcludedByCurrentRules(item: item, domainIdentifier: descriptor.identifier)
+                    let old = try store.item(identifier: itemIdentifier)
+                    let wasViewExcluded = try store.localItemState(identifier: itemIdentifier).viewExcluded
+                    if visibility.excluded && !wasViewExcluded {
+                        _ = try store.commitProviderViewChange(item: item, oldParentIdentifier: old?.parentIdentifier, newParentIdentifier: item.parentIdentifier, excluded: true, origin: "reconciliation")
+                    } else if !visibility.excluded && wasViewExcluded {
+                        _ = try store.commitProviderViewChange(item: item, oldParentIdentifier: old?.parentIdentifier, newParentIdentifier: item.parentIdentifier, excluded: false, origin: "reconciliation")
+                    } else if let old, old == item {
+                        try store.insertItem(item)
+                    } else if visibility.excluded {
                         try store.insertItem(item)
                     } else {
-                        _ = try store.commitProviderChange(item: item, oldParentIdentifier: try store.item(identifier: itemIdentifier)?.parentIdentifier, newParentIdentifier: item.parentIdentifier, kind: "reconciled", origin: "reconciliation")
+                        _ = try store.commitProviderChange(item: item, oldParentIdentifier: old?.parentIdentifier, newParentIdentifier: item.parentIdentifier, kind: "reconciled", origin: "reconciliation")
                     }
                     seen.insert(file.id)
                     if file.type == 1 { queue.append(ReconcileWork(uri: normalizedPath, parent: itemIdentifier)) }
                 }
                 if let nextToken = response.pagination?.nextToken {
-                    guard usedTokens.insert(nextToken).inserted else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
+                    guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: true) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                    }
+                    guard !nextToken.isEmpty, usedTokens.insert(nextToken).inserted, usedTokens.count <= 2_000 else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
                     token = nextToken; page = 0
                     try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
+                } else if requestUsedCursor {
+                    guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: true) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+                    }
+                    break
                 } else if let total = response.pagination?.totalItems {
                     let effectivePageSize = max(1, response.pagination?.pageSize ?? response.files.count)
-                    guard Int64(max(1, Int(page))) * Int64(effectivePageSize) < total, !response.files.isEmpty else { break }
-                    page += 1; token = nil
+                    let currentPage = max(1, response.pagination?.page ?? page)
+                    let hasAnotherPage = Int64(currentPage) * Int64(effectivePageSize) < total
+                    if hasAnotherPage {
+                        guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
+                            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                        }
+                        guard !response.files.isEmpty else {
+                            throw CoreFailure(code: .unknownOutcome, retryable: true, userActionRequired: true, redactedContext: ["stage": "normal_scan_incomplete"])
+                        }
+                    } else {
+                        guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
+                            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+                        }
+                        break
+                    }
+                    page = currentPage + 1; token = nil
                     try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
-                } else { break }
+                } else if response.files.count >= 500 {
+                    // Without an explicit total/token, a full page is not
+                    // proof that the scan is complete. Continue by page and
+                    // keep the cursor durable; otherwise a missing tail
+                    // could be misclassified as a tombstone.
+                    guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                    }
+                    page += 1
+                    token = nil
+                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
+                } else {
+                    guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+                    }
+                    break
+                }
             } while true
             currentWork = nil
             page = 1
@@ -310,12 +445,52 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             usedTokens.removeAll()
             try persistCursor(runID: runID, queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens)
         }
-        _ = seen
+        if descriptor.capabilitySnapshot.canTrash && deletionSafe {
+            try store.updateSyncState(reconcileStatus: "scanning_trash")
+            let trashFiles = try await listTrash(capability: descriptor.capabilitySnapshot)
+            for file in trashFiles {
+                guard file.id != descriptor.rootRemoteID,
+                      let normalizedPath = canonicalURI(file.path, accountID: descriptor.accountID) else {
+                    throw CoreFailure(code: .scopeConflict, retryable: false, userActionRequired: true)
+                }
+                let itemIdentifier = try store.itemIdentifier(forRemoteID: file.id) ?? CloudreveIdentifier.item()
+                var item = try makeItem(file, parentIdentifier: NSFileProviderItemIdentifier.trashContainer.rawValue, itemIdentifier: itemIdentifier, accountID: descriptor.accountID)
+                let previous = try store.item(identifier: itemIdentifier)
+                item.trashed = true
+                item.trashOriginalParentIdentifier = previous?.trashOriginalParentIdentifier ?? previous?.parentIdentifier
+                item.uri = normalizedPath
+                item.canDelete = descriptor.capabilitySnapshot.canPurge && (file.capability?.contains("d") ?? false)
+                if previous == item {
+                    try store.insertItem(item)
+                } else {
+                    _ = try store.commitProviderChange(item: item, oldParentIdentifier: previous?.parentIdentifier, newParentIdentifier: item.parentIdentifier, kind: "trash_reconciled", origin: "reconciliation")
+                }
+                seen.insert(file.id)
+            }
+            let currentItems = try store.allItems()
+            for item in currentItems {
+                guard let remoteID = item.remoteID,
+                      knownRemoteIDs.contains(remoteID),
+                      !seen.contains(remoteID),
+                      !item.tombstone,
+                      remoteID != descriptor.rootRemoteID,
+                      !(try store.hasPendingWork(itemIdentifier: item.itemIdentifier)) else { continue }
+                var tombstone = item
+                tombstone.tombstone = true
+                _ = try store.commitProviderChange(item: tombstone, oldParentIdentifier: item.parentIdentifier, newParentIdentifier: nil, kind: "deleted", origin: "reconciliation")
+            }
+        }
         try store.updateReconcile(runID: runID, phase: "completed", cursor: nil, state: "completed")
+        try? store.compactJournal()
+        try? store.compactTransferState()
         try store.updateSyncState(reconcileAt: Date(), reconcileStatus: "completed")
         logger.info("reconcile.completed id=\(correlationID, privacy: .public) domain=\(descriptor.identifier, privacy: .public)")
         } catch {
-            try? store.updateReconcile(runID: runID, phase: "failed", cursor: nil, state: "failed")
+            var persistedCursor: String?
+            if let runs = try? store.activeReconcileRuns() {
+                persistedCursor = runs.first(where: { $0.id == runID })?.cursor
+            }
+            try? store.updateReconcile(runID: runID, phase: "failed", cursor: persistedCursor, state: "failed")
             try? store.updateSyncState(reconcileStatus: "error:\(reconciliationErrorCode(error))")
             logger.error("reconcile.failed id=\(correlationID, privacy: .public) domain=\(descriptor.identifier, privacy: .public) code=\(reconciliationErrorCode(error), privacy: .public)")
             throw error
@@ -345,6 +520,68 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         return value
     }
 
+    private func listTrash(capability: CapabilitySnapshot) async throws -> [EventFileDTO] {
+        var page = 1
+        var token: String?
+        var result: [EventFileDTO] = []
+        var usedTokens = Set<String>()
+        while true {
+            guard page <= 2_000 else {
+                throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "trash_scan_bound"])
+            }
+            let query = [
+                URLQueryItem(name: "uri", value: "cloudreve://trash"),
+                URLQueryItem(name: "page_size", value: "500"),
+                URLQueryItem(name: "order_by", value: "name"),
+                URLQueryItem(name: "order_direction", value: "asc")
+            ] + (token.map { [URLQueryItem(name: "next_page_token", value: $0)] } ?? [URLQueryItem(name: "page", value: String(page))])
+            let requestUsedCursor = token != nil
+            guard let response: ReconcileListDTO = try await request(path: "file", query: query) else {
+                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
+            }
+            result.append(contentsOf: response.files)
+            guard result.count <= 100_000 else {
+                throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "trash_scan_bound"])
+            }
+            if let next = response.pagination?.nextToken {
+                guard reconciliationPaginationIsVerified(capability, usesCursor: true) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                }
+                guard !next.isEmpty, usedTokens.insert(next).inserted, usedTokens.count <= 2_000 else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
+                token = next
+                continue
+            }
+            if requestUsedCursor {
+                guard reconciliationPaginationIsVerified(capability, usesCursor: true) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+                }
+                return result
+            }
+            if let total = response.pagination?.totalItems, Int64(result.count) < total {
+                guard reconciliationPaginationIsVerified(capability, usesCursor: false) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                }
+                guard !response.files.isEmpty else {
+                    throw CoreFailure(code: .unknownOutcome, retryable: true, userActionRequired: true, redactedContext: ["stage": "trash_scan_incomplete"])
+                }
+                page += 1
+                token = nil
+                continue
+            }
+            if response.pagination == nil && response.files.count >= 500 {
+                guard reconciliationPaginationIsVerified(capability, usesCursor: false) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                }
+                page += 1
+                continue
+            }
+            guard reconciliationPaginationIsVerified(capability, usesCursor: false) else {
+                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+            }
+            return result
+        }
+    }
+
     private func request<Value: Decodable>(path: String, query: [URLQueryItem]) async throws -> Value? {
         var components = URLComponents(url: origin.appendingPathComponent("api/v4").appendingPathComponent(path), resolvingAgainstBaseURL: false)
         components?.queryItems = query
@@ -366,12 +603,14 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
     }
 
     private func makeItem(_ file: EventFileDTO, parentIdentifier: String, itemIdentifier: String, accountID: String) throws -> RemoteItem {
-        let kind: RemoteItemKind = file.type == 1 ? .folder : .file
+        let kind: RemoteItemKind = file.type == 1 ? .folder : (file.type == 0 ? .file : .unsupported)
         let normalizedPath = try CloudreveRemoteURI.canonical(file.path, accountID: accountID)
-        let contentRevision = file.primaryEntity ?? file.updatedAt ?? file.createdAt ?? file.id
+        let contentVersion = RemoteContentVersionPolicy.resolve(primaryEntity: file.primaryEntity, stableEntityID: file.id)
+        let hasReliableContentRevision = contentVersion.reliable
+        let contentRevision = contentVersion.value
         let readable = file.permission.map { $0.contains("r") } ?? true
         let writable = file.capability.map { $0.contains("w") } ?? false
-        return RemoteItem(itemIdentifier: itemIdentifier, remoteID: file.id, parentIdentifier: parentIdentifier, name: file.name, uri: normalizedPath, kind: kind, contentType: kind == .folder ? "public.folder" : "public.data", size: max(0, file.size ?? 0), remoteVersion: file.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: file.name, kind: kind, permissionBits: readable ? 1 : 0, revision: file.updatedAt)), creationDate: parseEventDate(file.createdAt), contentModificationDate: parseEventDate(file.updatedAt), canRead: readable, canWrite: writable && readable, canAddChildren: writable && readable && kind == .folder, canTrash: false, canDelete: false)
+        return RemoteItem(itemIdentifier: itemIdentifier, remoteID: file.id, parentIdentifier: parentIdentifier, name: file.name, uri: normalizedPath, kind: kind, contentType: kind == .folder ? "public.folder" : (kind == .symlink ? "public.symlink" : "public.data"), size: max(0, file.size ?? 0), remoteVersion: file.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: file.name, kind: kind, permissionBits: readable ? 1 : 0, revision: file.updatedAt)), creationDate: parseEventDate(file.createdAt), contentModificationDate: parseEventDate(file.updatedAt), canRead: readable && kind != .unsupported, canWrite: writable && readable && kind != .unsupported && (kind == .folder || hasReliableContentRevision), canAddChildren: writable && readable && kind == .folder, canTrash: false, canDelete: false)
     }
 }
 
@@ -382,6 +621,10 @@ func reconciliationErrorCode(_ error: Error) -> String {
         case .openFailed: return "store_open_failed"
         case .sql: return "store_sql"
         case .schemaFenced: return "schema_fenced"
+        case .anchorExpired: return "anchor_expired"
+        case .pageTokenInvalid: return "page_token_invalid"
+        case .snapshotExpired: return "snapshot_expired"
+        case .generationFenced: return "generation_fenced"
         case .corrupted: return "store_corrupted"
         case .unknownDomain: return "unknown_domain"
         }
@@ -650,7 +893,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         self.currentRootURI = descriptor.currentRootURI
         self.onRootChanged = onRootChanged
         self.vault = vault
-        let enricher = CloudreveEventEnricher(origin: origin, rootURI: descriptor.currentRootURI, rootRemoteID: descriptor.rootRemoteID, store: store, vault: vault, credentialReference: descriptor.secretReference)
+        let enricher = CloudreveEventEnricher(origin: origin, rootURI: descriptor.currentRootURI, rootRemoteID: descriptor.rootRemoteID, store: store, vault: vault, credentialReference: descriptor.secretReference, capabilitySnapshot: descriptor.capabilitySnapshot)
         self.reconciler = CloudreveReconciliationService(origin: origin, store: store, registry: registry, vault: vault, credentialReference: descriptor.secretReference)
         let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(descriptor.identifier), displayName: descriptor.displayName)
         let signaller = FileProviderWorkingSetSignaller(domain: domain)
@@ -708,7 +951,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
                         await markEventDegraded()
                         return
                     }
-                    let enricher = CloudreveEventEnricher(origin: updatedOrigin, rootURI: updatedScope.rootURI, rootRemoteID: updated.rootRemoteID, store: store, vault: vault, credentialReference: updated.secretReference)
+                    let enricher = CloudreveEventEnricher(origin: updatedOrigin, rootURI: updatedScope.rootURI, rootRemoteID: updated.rootRemoteID, store: store, vault: vault, credentialReference: updated.secretReference, capabilitySnapshot: updated.capabilitySnapshot)
                     pipeline = EventNormalizationPipeline(scopeGuard: EventScopeGuard(rootRemoteID: updated.rootRemoteID, rootURI: updatedScope.rootURI), enricher: enricher, writer: EventJournalWriter(store: store, outboxDrainer: outboxDrainer))
                     streamRestartRequired = true
                     await onRootChanged?(updatedScope.rootURI)

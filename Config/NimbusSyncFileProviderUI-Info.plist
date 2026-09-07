@@ -28,7 +28,7 @@
                 <key>Title</key>
                 <string>Open in NimbusSync</string>
                 <key>Predicate</key>
-                <string>TRUEPREDICATE</string>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
             </dict>
             <dict>
                 <key>Identifier</key>
@@ -36,7 +36,7 @@
                 <key>Title</key>
                 <string>Resolve Conflict</string>
                 <key>Predicate</key>
-                <string>userInfo.hasConflict == TRUE</string>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.hasConflict == TRUE ).@count &gt; 0</string>
             </dict>
         </array>
     </dict>

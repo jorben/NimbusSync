@@ -4,6 +4,28 @@ import CryptoKit
 import CloudreveDomainKit
 import CloudreveStoreBridge
 
+/// A replay key is an operation identity, not permission to retry a terminal
+/// outcome. Conflict/auth/unknown states require their explicit recovery path
+/// (or an explicit user retry) before the same callback can run again.
+func storedOperationTerminalFailure(_ state: String) -> CoreFailure? {
+    switch state {
+    case "unknown_outcome":
+        return CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
+    case "conflict":
+        return CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true)
+    case "auth_expired":
+        return CoreFailure(code: .authentication, retryable: false, userActionRequired: true)
+    case "cancelled":
+        return CoreFailure(code: .cancelled, retryable: false)
+    case "permanently_failed":
+        return CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
+    case "resolved":
+        return CoreFailure(code: .cannotSynchronize, retryable: false, userActionRequired: true)
+    default:
+        return nil
+    }
+}
+
 public struct SourceFingerprint: Codable, Equatable, Sendable {
     public let size: Int64
     public let baseVersion: Data
@@ -42,13 +64,14 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
     public func create(template: RemoteItem, content: Data?, fields: NSFileProviderItemFields, options: NSFileProviderCreateItemOptions) throws -> RemoteItem {
         guard let store else { return try backend.create(template: template, content: content, replayKey: template.itemIdentifier) }
         if template.kind == .symlink || template.kind == .unsupported {
-            try store.createExclusionIntent(ExclusionIntent(itemIdentifier: template.itemIdentifier, systemItemIdentifier: template.itemIdentifier, ruleRevision: 1, kind: .unsupportedLocalType, sourceGeneration: 1))
+            try store.createExclusionIntent(ExclusionIntent(itemIdentifier: template.itemIdentifier, systemItemIdentifier: template.itemIdentifier, ruleRevision: 1, kind: .unsupportedLocalType, sourceGeneration: 1, expectedVersion: template.version.content, pathHash: pathHash(template.uri)))
             throw CoreFailure(code: .excludedFromSync, retryable: false, userActionRequired: false)
         }
         let replay = MutationReplay(replayKey: template.itemIdentifier, operationID: operationID(for: template.itemIdentifier), sourceGeneration: 1)
-        let operation = try begin(replay: replay, kind: .create, itemIdentifier: template.itemIdentifier)
+        let operation = try begin(replay: replay, kind: .create, itemIdentifier: template.itemIdentifier, expectedVersion: template.version.content, changedFields: String(fields.rawValue))
         if let result = try committedResult(operation) { return result }
         try ensureLease(operation)
+        try store.insertItem(template)
         do {
             let item = try backend.create(template: template, content: content, replayKey: replay.replayKey)
             try commitRemoteResult(operationID: replay.operationID, item: item)
@@ -68,7 +91,8 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         let fingerprint = SourceFingerprint(content: contents, baseVersion: baseVersion.contentVersion, sourceGeneration: 1)
         let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.contentVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.edgeDigest.base64EncodedString())"
         let replay = MutationReplay(replayKey: replayKey, operationID: operationID(for: replayKey), sourceGeneration: fingerprint.sourceGeneration)
-        let operation = try begin(replay: replay, kind: .modify, itemIdentifier: item.itemIdentifier)
+        let previousParent = (try? store?.item(identifier: item.itemIdentifier))??.parentIdentifier
+        let operation = try begin(replay: replay, kind: .modify, itemIdentifier: item.itemIdentifier, expectedVersion: baseVersion.contentVersion, changedFields: String(fields.rawValue))
         if let result = try committedResult(operation) { return result }
         try ensureLease(operation)
         do {
@@ -80,7 +104,7 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
             } else {
                 updated = try backend.modify(item: item, expectedVersion: baseVersion.contentVersion, changedFields: fields, content: contents, replayKey: replay.replayKey)
             }
-            try commitRemoteResult(operationID: replay.operationID, item: updated)
+            try commitRemoteResult(operationID: replay.operationID, item: updated, oldParentIdentifier: previousParent)
             return updated
         } catch {
             recordConflictIfNeeded(item: item, baseVersion: baseVersion, fields: fields, contents: contents, error: error)
@@ -94,12 +118,18 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         guard let item = try store.item(identifier: itemIdentifier) else { return }
         let replayKey = "delete|\(itemIdentifier)|\(baseVersion.contentVersion.base64EncodedString())|\(options.rawValue)"
         let replay = MutationReplay(replayKey: replayKey, operationID: operationID(for: replayKey), sourceGeneration: 1)
-        let operation = try begin(replay: replay, kind: .delete, itemIdentifier: itemIdentifier)
+        let operation = try begin(replay: replay, kind: .delete, itemIdentifier: itemIdentifier, expectedVersion: baseVersion.contentVersion, changedFields: options.contains(.recursive) ? "recursive" : "single")
         if operation.operation.state == "committed" { return }
-        if operation.operation.state == "unknown_outcome" { throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true) }
-        if try store.consumeMatchingExclusionIntent(itemIdentifier: itemIdentifier, systemItemIdentifier: itemIdentifier, kind: .unsupportedLocalType, ruleRevision: 1, sourceGeneration: 1) {
+        if let failure = storedOperationTerminalFailure(operation.operation.state) { throw failure }
+        let ruleRevision = max(1, (try store.isExcludedByCurrentRules(item: item)).revision)
+        let consumedUnsupportedIntent = try store.consumeExclusionIntent(itemIdentifier: itemIdentifier, systemItemIdentifier: itemIdentifier, kind: .unsupportedLocalType, expectedVersion: baseVersion.contentVersion, pathHash: pathHash(item.uri), ruleRevision: 1, sourceGeneration: 1)
+        let consumedLocalIntent = try store.consumeExclusionIntent(itemIdentifier: itemIdentifier, systemItemIdentifier: itemIdentifier, kind: .localCreate, expectedVersion: baseVersion.contentVersion, pathHash: pathHash(item.uri), ruleRevision: ruleRevision, sourceGeneration: 1)
+        if consumedUnsupportedIntent || consumedLocalIntent {
             try store.commitOperation(operationID: replay.operationID, state: "committed", itemIdentifier: itemIdentifier)
             return
+        }
+        if try store.hasExclusionCandidate(itemIdentifier: itemIdentifier, systemItemIdentifier: itemIdentifier) {
+            throw CoreFailure(code: .excludedFromSync, retryable: false, userActionRequired: true)
         }
         try ensureLease(operation)
         do {
@@ -107,10 +137,10 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
             var tombstone = item
             tombstone.tombstone = true
             if try store.cancelRequested(operationID: replay.operationID) {
-                try store.commitOperationWithItem(operationID: replay.operationID, state: "unknown_outcome", item: tombstone)
+            try store.commitOperationWithItemAndChange(operationID: replay.operationID, state: "unknown_outcome", item: tombstone, oldParentIdentifier: item.parentIdentifier, newParentIdentifier: nil, kind: "deleted", origin: "local_mutation", recursive: options.contains(.recursive))
                 throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
             }
-            try store.commitOperationWithItem(operationID: replay.operationID, state: "committed", item: tombstone)
+            try store.commitOperationWithItemAndChange(operationID: replay.operationID, state: "committed", item: tombstone, oldParentIdentifier: item.parentIdentifier, newParentIdentifier: nil, kind: "deleted", origin: "local_mutation", recursive: options.contains(.recursive))
         } catch {
             if let conflictedItem = try? store.item(identifier: itemIdentifier) {
                 recordConflictIfNeeded(item: conflictedItem, baseVersion: baseVersion, fields: [], contents: nil, error: error)
@@ -120,17 +150,15 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         }
     }
 
-    private func begin(replay: MutationReplay, kind: MutationOperationKind, itemIdentifier: String) throws -> StoredOperation {
+    private func begin(replay: MutationReplay, kind: MutationOperationKind, itemIdentifier: String, expectedVersion: Data? = nil, changedFields: String? = nil) throws -> StoredOperation {
         guard let store else { throw CoreFailure(code: .database, retryable: false) }
-        _ = try store.upsertOperation(PendingOperation(operationID: replay.operationID, replayKey: replay.replayKey, kind: kind.rawValue, itemIdentifier: itemIdentifier, sourceGeneration: replay.sourceGeneration))
+        _ = try store.upsertOperation(PendingOperation(operationID: replay.operationID, replayKey: replay.replayKey, kind: kind.rawValue, itemIdentifier: itemIdentifier, sourceGeneration: replay.sourceGeneration, expectedVersion: expectedVersion, changedFields: changedFields))
         guard let operation = try store.operation(replayKey: replay.replayKey) else { throw CoreFailure(code: .database, retryable: false) }
         return operation
     }
 
     private func committedResult(_ operation: StoredOperation) throws -> RemoteItem? {
-        if operation.operation.state == "unknown_outcome" {
-            throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
-        }
+        if let failure = storedOperationTerminalFailure(operation.operation.state) { throw failure }
         guard operation.operation.state == "committed" else { return nil }
         guard let outcome = operation.outcome, let data = outcome.data(using: .utf8) else {
             throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
@@ -138,14 +166,15 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         return try JSONDecoder().decode(RemoteItem.self, from: data)
     }
 
-    private func commitRemoteResult(operationID: UUID, item: RemoteItem) throws {
+    private func commitRemoteResult(operationID: UUID, item: RemoteItem, oldParentIdentifier: String? = nil) throws {
         guard let store else { throw CoreFailure(code: .database, retryable: false) }
         let outcome = String(data: try JSONEncoder().encode(item), encoding: .utf8)
+        let kind = item.tombstone ? "deleted" : "operation_result"
         if try store.cancelRequested(operationID: operationID) {
-            try store.commitOperationWithItem(operationID: operationID, state: "unknown_outcome", item: item, outcome: outcome)
+            try store.commitOperationWithItemAndChange(operationID: operationID, state: "unknown_outcome", item: item, oldParentIdentifier: oldParentIdentifier, newParentIdentifier: item.tombstone ? nil : item.parentIdentifier, kind: kind, origin: "local_mutation", outcome: outcome)
             throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
         }
-        try store.commitOperationWithItem(operationID: operationID, state: "committed", item: item, outcome: outcome)
+        try store.commitOperationWithItemAndChange(operationID: operationID, state: "committed", item: item, oldParentIdentifier: oldParentIdentifier, newParentIdentifier: item.tombstone ? nil : item.parentIdentifier, kind: kind, origin: "local_mutation", outcome: outcome)
     }
 
     private func preserveUnknownOutcome(operationID: UUID, itemIdentifier: String, error: Error) {
@@ -160,12 +189,17 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         guard let failure = error as? CoreFailure, failure.code == .versionConflict, let store else { return }
         let conflictID = operationID(for: "conflict|\(item.itemIdentifier)|\(baseVersion.contentVersion.base64EncodedString())")
         let localSummary = contents.map { "bytes:\($0.count)" } ?? (fields.isEmpty ? "metadata" : "pending content")
-        let conflict = ConflictProjection(conflictID: conflictID, itemIdentifier: item.itemIdentifier, kind: "version_conflict", baseSummary: "version:\(short(baseVersion.contentVersion))", remoteSummary: "version:\(short(item.version.content))", localSummary: localSummary, pendingItemIdentifier: item.itemIdentifier, sourceGeneration: 1, remoteVersion: item.version.content)
+        let localHash = contents.map { Data(CryptoKit.SHA256.hash(data: $0)) }
+        let conflict = ConflictProjection(conflictID: conflictID, itemIdentifier: item.itemIdentifier, kind: "version_conflict", baseSummary: "version:\(short(baseVersion.contentVersion))", remoteSummary: "remote_version_unknown", localSummary: localSummary, pendingItemIdentifier: item.itemIdentifier, sourceGeneration: 1, remoteVersion: nil, localSourceKind: contents == nil ? "unavailable" : "system_pending", expectedBaseVersion: baseVersion.contentVersion, expectedSourceHash: localHash, expectedSourceSize: contents.map { Int64($0.count) })
         try? store.saveConflict(conflict)
         try? store.setPending(item.itemIdentifier, templateIdentifier: "conflict-local-change", uploadError: "version_conflict")
     }
 
     private func short(_ value: Data) -> String { value.prefix(8).map { String(format: "%02x", $0) }.joined() }
+
+    private func pathHash(_ uri: String) -> Data {
+        Data(CryptoKit.SHA256.hash(data: Data(uri.utf8)))
+    }
 
     private func ensureLease(_ operation: StoredOperation) throws {
         guard let store else { return }
@@ -196,7 +230,7 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         guard let store else { throw CoreFailure(code: .database, retryable: false) }
         let replayKey = "conflict-\(resolution)|\(conflictID.uuidString)"
         let operationID = operationID(for: replayKey)
-        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: resolution, itemIdentifier: item.itemIdentifier)
+        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: resolution, itemIdentifier: item.itemIdentifier, expectedVersion: item.version.content, changedFields: "contents")
         if let result = try committedResult(operation) {
             try store.completeConflictResolution(itemIdentifier: item.itemIdentifier, conflictID: conflictID, resolution: resolution.replacingOccurrences(of: "_pending", with: ""))
             return result
@@ -227,9 +261,9 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
         }
     }
 
-    private func beginOperation(operationID: UUID, replayKey: String, kind: String, itemIdentifier: String) throws -> StoredOperation {
+    private func beginOperation(operationID: UUID, replayKey: String, kind: String, itemIdentifier: String, expectedVersion: Data? = nil, changedFields: String? = nil) throws -> StoredOperation {
         guard let store else { throw CoreFailure(code: .database, retryable: false) }
-        _ = try store.upsertOperation(PendingOperation(operationID: operationID, replayKey: replayKey, kind: kind, itemIdentifier: itemIdentifier, sourceGeneration: 1))
+        _ = try store.upsertOperation(PendingOperation(operationID: operationID, replayKey: replayKey, kind: kind, itemIdentifier: itemIdentifier, sourceGeneration: 1, expectedVersion: expectedVersion, changedFields: changedFields))
         guard let operation = try store.operation(replayKey: replayKey) else { throw CoreFailure(code: .database, retryable: false) }
         return operation
     }
@@ -261,36 +295,85 @@ public final class ConflictResolutionService: @unchecked Sendable {
     }
 
     public func prepareOverwriteRemote(conflict: ConflictProjection) throws {
+        guard try store.isOperationCapabilityVerified("fallback_conflict") else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["operation": "fallback_conflict"])
+        }
         try store.markConflictResolutionPending(conflictID: conflict.conflictID, itemIdentifier: conflict.itemIdentifier, resolution: "overwrite_remote_pending")
     }
 
     public func prepareKeepBoth(conflict: ConflictProjection) throws {
+        guard try store.isOperationCapabilityVerified("fallback_conflict") else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["operation": "fallback_conflict"])
+        }
         try store.markConflictResolutionPending(conflictID: conflict.conflictID, itemIdentifier: conflict.itemIdentifier, resolution: "keep_both_pending")
     }
 
+    @available(macOS 13.0, *)
+    public func requestSourceReplay(conflict: ConflictProjection, manager: NSFileProviderManager) async throws {
+        guard try store.isOperationCapabilityVerified("fallback_conflict") else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["operation": "fallback_conflict"])
+        }
+        // Record the durable intent before asking fileproviderd to schedule a
+        // callback. If the process dies after the request is persisted, the
+        // next callback still has an explicit resolution state to consume.
+        try store.markConflictSourceReplayRequested(conflictID: conflict.conflictID)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            manager.requestModification(of: [.contents], forItemWithIdentifier: NSFileProviderItemIdentifier(conflict.itemIdentifier), options: []) { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
+    }
+
     public func overwriteRemote(conflict: ConflictProjection, localContent: Data) throws -> RemoteItem {
+        guard try store.isOperationCapabilityVerified("fallback_conflict") else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["operation": "fallback_conflict"])
+        }
+        guard let source = conflictSource(for: conflict),
+              ConflictSourceValidator.validateData(localContent, source: source) else {
+            throw CoreFailure(code: .awaitingSourceReplay, retryable: false, userActionRequired: true)
+        }
         guard let current = try backend.item(identifier: conflict.itemIdentifier) else { throw CoreFailure(code: .notFound, retryable: false) }
         if let remoteVersion = conflict.remoteVersion, current.version.content != remoteVersion {
             throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true)
         }
         let replayKey = "conflict-overwrite|\(conflict.conflictID.uuidString)"
         let operationID = operationID(for: replayKey)
-        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: "conflict_overwrite", itemIdentifier: current.itemIdentifier)
-        if let result = try committedResult(operation) { try store.resolveConflict(conflictID: conflict.conflictID, resolution: "overwrite_remote"); return result }
+        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: "conflict_overwrite", itemIdentifier: current.itemIdentifier, expectedVersion: current.version.content, changedFields: "contents")
+        if let result = try committedResult(operation) {
+            try store.completeConflictResolution(itemIdentifier: current.itemIdentifier, conflictID: conflict.conflictID, resolution: "overwrite_remote")
+            return result
+        }
         guard try store.acquireOperationLease(operationID: operationID, owner: ownerID) else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
         let updated: RemoteItem
         do {
             updated = try backend.modify(item: current, expectedVersion: current.version.content, changedFields: [.contents], content: localContent, replayKey: replayKey)
-            try store.commitOperationWithItem(operationID: operationID, state: "committed", item: updated, outcome: String(data: try JSONEncoder().encode(updated), encoding: .utf8))
+            try store.commitOperationWithItemAndChange(
+                operationID: operationID,
+                state: "committed",
+                item: updated,
+                oldParentIdentifier: current.parentIdentifier,
+                newParentIdentifier: updated.parentIdentifier,
+                kind: "conflict_overwrite",
+                origin: "conflict_resolution",
+                outcome: String(data: try JSONEncoder().encode(updated), encoding: .utf8)
+            )
         } catch {
             try? store.commitOperation(operationID: operationID, state: state(for: error), itemIdentifier: current.itemIdentifier)
             throw error
         }
-        try store.resolveConflict(conflictID: conflict.conflictID, resolution: "overwrite_remote")
+        try store.completeConflictResolution(itemIdentifier: current.itemIdentifier, conflictID: conflict.conflictID, resolution: "overwrite_remote")
         return updated
     }
 
     public func keepBoth(conflict: ConflictProjection, localContent: Data, baseName: String) throws -> RemoteItem {
+        guard try store.isOperationCapabilityVerified("fallback_conflict") else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["operation": "fallback_conflict"])
+        }
+        guard let source = conflictSource(for: conflict),
+              ConflictSourceValidator.validateData(localContent, source: source) else {
+            throw CoreFailure(code: .awaitingSourceReplay, retryable: false, userActionRequired: true)
+        }
         guard let current = try backend.item(identifier: conflict.itemIdentifier) else { throw CoreFailure(code: .notFound, retryable: false) }
         if let remoteVersion = conflict.remoteVersion, current.version.content != remoteVersion {
             throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true)
@@ -298,30 +381,43 @@ public final class ConflictResolutionService: @unchecked Sendable {
         let replayKey = "conflict-copy|\(conflict.conflictID.uuidString)"
         let copy = RemoteItem(itemIdentifier: CloudreveIdentifier.item(forTemplate: replayKey), remoteID: nil, parentIdentifier: current.parentIdentifier, name: uniqueName(baseName), uri: current.uri, kind: current.kind, contentType: current.contentType, size: Int64(localContent.count), version: ItemVersion(content: Data(), metadata: Data()), canRead: true, canWrite: current.canWrite, canAddChildren: current.canAddChildren, canTrash: current.canTrash, canDelete: current.canDelete)
         let operationID = operationID(for: replayKey)
-        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: "conflict_copy", itemIdentifier: copy.itemIdentifier)
-        if let result = try committedResult(operation) { try store.resolveConflict(conflictID: conflict.conflictID, resolution: "keep_both"); return result }
+        let operation = try beginOperation(operationID: operationID, replayKey: replayKey, kind: "conflict_copy", itemIdentifier: copy.itemIdentifier, expectedVersion: current.version.content, changedFields: "contents")
+        if let result = try committedResult(operation) {
+            try store.completeConflictResolution(itemIdentifier: current.itemIdentifier, conflictID: conflict.conflictID, resolution: "keep_both")
+            return result
+        }
         guard try store.acquireOperationLease(operationID: operationID, owner: ownerID) else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
         let created: RemoteItem
         do {
             created = try backend.create(template: copy, content: localContent, replayKey: replayKey)
-            try store.commitOperationWithItem(operationID: operationID, state: "committed", item: created, outcome: String(data: try JSONEncoder().encode(created), encoding: .utf8))
+            try store.commitOperationWithItemAndChange(
+                operationID: operationID,
+                state: "committed",
+                item: created,
+                oldParentIdentifier: nil,
+                newParentIdentifier: created.parentIdentifier,
+                kind: "conflict_copy",
+                origin: "conflict_resolution",
+                outcome: String(data: try JSONEncoder().encode(created), encoding: .utf8)
+            )
         } catch {
             try? store.commitOperation(operationID: operationID, state: state(for: error), itemIdentifier: copy.itemIdentifier)
             throw error
         }
-        try store.resolveConflict(conflictID: conflict.conflictID, resolution: "keep_both")
+        try store.completeConflictResolution(itemIdentifier: current.itemIdentifier, conflictID: conflict.conflictID, resolution: "keep_both")
         return created
     }
 
     private let ownerID = UUID()
 
-    private func beginOperation(operationID: UUID, replayKey: String, kind: String, itemIdentifier: String) throws -> StoredOperation {
-        _ = try store.upsertOperation(PendingOperation(operationID: operationID, replayKey: replayKey, kind: kind, itemIdentifier: itemIdentifier, sourceGeneration: 1))
+    private func beginOperation(operationID: UUID, replayKey: String, kind: String, itemIdentifier: String, expectedVersion: Data? = nil, changedFields: String? = nil) throws -> StoredOperation {
+        _ = try store.upsertOperation(PendingOperation(operationID: operationID, replayKey: replayKey, kind: kind, itemIdentifier: itemIdentifier, sourceGeneration: 1, expectedVersion: expectedVersion, changedFields: changedFields))
         guard let operation = try store.operation(replayKey: replayKey) else { throw CoreFailure(code: .database, retryable: false) }
         return operation
     }
 
     private func committedResult(_ operation: StoredOperation) throws -> RemoteItem? {
+        if let failure = storedOperationTerminalFailure(operation.operation.state) { throw failure }
         guard operation.operation.state == "committed" else { return nil }
         guard let outcome = operation.outcome, let data = outcome.data(using: .utf8) else { throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true) }
         return try JSONDecoder().decode(RemoteItem.self, from: data)
@@ -343,5 +439,14 @@ public final class ConflictResolutionService: @unchecked Sendable {
     private func uniqueName(_ name: String) -> String {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
 		return "\(name) (NimbusSync conflict \(stamp))"
+    }
+
+    private func conflictSource(for conflict: ConflictProjection) -> ConflictLocalSource? {
+        guard let expectedHash = conflict.expectedSourceHash, let expectedSize = conflict.expectedSourceSize else { return nil }
+        if conflict.localSourceKind == "system_pending" {
+            return .systemPending(itemIdentifier: conflict.itemIdentifier, sourceGeneration: conflict.sourceGeneration, expectedBaseVersion: conflict.expectedBaseVersion ?? Data(), expectedHash: expectedHash, expectedSize: expectedSize)
+        }
+        guard conflict.localSourceKind == "user_export" else { return nil }
+        return .userExport(sourceGeneration: conflict.sourceGeneration, expectedHash: expectedHash, expectedSize: expectedSize)
     }
 }

@@ -169,7 +169,7 @@ public actor DomainRegistryService {
             try domainStore?.registerDomain(descriptor)
             try store.registerDomain(descriptor)
             try store.advanceProvisioning(domainID: descriptor.identifier, step: .domainDatabaseReady)
-            let systemDomain = try lifecycle.makeSystemDomain(for: descriptor, trashEnabled: false)
+            let systemDomain = try lifecycle.makeSystemDomain(for: descriptor, trashEnabled: descriptor.capabilitySnapshot.canTrash)
             systemDomainRegistrationStarted = true
             try await lifecycle.add(systemDomain)
             systemDomainAdded = true
@@ -266,13 +266,28 @@ public actor SafeDomainRemovalService {
     private let vault: CredentialVault
     private let lifecycle: DomainLifecycleService
     private let storeFactory: AppGroupStoreFactory?
+    private let systemDomainExists: @Sendable (String) async throws -> Bool
 
-    public init(store: SQLiteStateStore, vault: CredentialVault, lifecycle: DomainLifecycleService = DomainLifecycleService(), storeFactory: AppGroupStoreFactory? = nil) { self.store = store; self.vault = vault; self.lifecycle = lifecycle; self.storeFactory = storeFactory }
+    public init(
+        store: SQLiteStateStore,
+        vault: CredentialVault,
+        lifecycle: DomainLifecycleService = DomainLifecycleService(),
+        storeFactory: AppGroupStoreFactory? = nil,
+        systemDomainExists: (@Sendable (String) async throws -> Bool)? = nil
+    ) {
+        self.store = store
+        self.vault = vault
+        self.lifecycle = lifecycle
+        self.storeFactory = storeFactory
+        self.systemDomainExists = systemDomainExists ?? { identifier in
+            try await lifecycle.systemDomainExists(identifier)
+        }
+    }
 
     public func remove(descriptor: DomainDescriptor) async throws -> URL? {
-        let domain = try lifecycle.makeSystemDomain(for: descriptor, trashEnabled: false)
+        let domain = try lifecycle.makeSystemDomain(for: descriptor, trashEnabled: descriptor.capabilitySnapshot.canTrash)
         let domainStore = try storeFactory?.domainStore(identifier: descriptor.identifier) ?? store
-        guard try await lifecycle.systemDomainExists(descriptor.identifier) else {
+        guard try await systemDomainExists(descriptor.identifier) else {
             throw DomainProvisioningError.system("File Provider domain is not registered")
         }
         try setRemovalStatus(.removalPreflight, domainStore: domainStore, identifier: descriptor.identifier)
@@ -283,21 +298,68 @@ public actor SafeDomainRemovalService {
         let decision = DomainRemovalPolicy().decision(hasDirtyOperations: try domainStore.hasDirtyWork(), pendingSetReliable: !pending.capped, waitForChangesSucceeded: waitSucceeded)
         guard decision == .safe || decision == .preserveDirtyData else { throw DomainProvisioningError.rollbackRequired("domain removal preflight blocked") }
         let preserve = decision == .preserveDirtyData
-        let preserved: URL?
-        if #available(macOS 14.0, *) {
-            preserved = try await lifecycle.remove(domain, preserveDirtyData: preserve)
-        } else if preserve {
-            throw DomainProvisioningError.rollbackRequired("preserve dirty data requires macOS 14 or newer")
-        } else {
-            preserved = try await lifecycle.remove(domain, preserveDirtyData: false)
+        do {
+            let preserved: URL?
+            if #available(macOS 14.0, *) {
+                preserved = try await lifecycle.remove(domain, preserveDirtyData: preserve)
+            } else if preserve {
+                throw DomainProvisioningError.rollbackRequired("preserve dirty data requires macOS 14 or newer")
+            } else {
+                preserved = try await lifecycle.remove(domain, preserveDirtyData: false)
+            }
+
+            if preserve {
+                // The system has removed the Finder registration, but the
+                // returned location is now the only user-visible recovery
+                // boundary for dirty local data. Keep both stores and the
+                // Keychain reference until the user explicitly confirms that
+                // the preserved copy is handled; deleting the metadata here
+                // would make the recovery state impossible to audit.
+                guard let preserved, FileManager.default.fileExists(atPath: preserved.path) else {
+                    try? setRemovalStatus(.repairRequired, domainStore: domainStore, identifier: descriptor.identifier)
+                    throw DomainProvisioningError.rollbackRequired("File Provider did not return a readable preserved-data location")
+                }
+                try setRemovalStatus(.preservedRemoval, domainStore: domainStore, identifier: descriptor.identifier)
+                return preserved
+            }
+
+            // Only the clean, fully acknowledged path is allowed to remove
+            // durable credentials and metadata after File Provider confirms
+            // the Domain removal.
+            try removeDurableRecords(descriptor: descriptor, domainStore: domainStore)
+            return nil
+        } catch {
+            // A system callback can fail or time out after the operation has
+            // become externally visible. Preserve the records and make the
+            // repair requirement explicit; never turn uncertainty into a
+            // destructive cleanup.
+            try? setRemovalStatus(.repairRequired, domainStore: domainStore, identifier: descriptor.identifier)
+            throw error
         }
+    }
+
+    /// Completes a user-confirmed removal after File Provider has already
+    /// preserved dirty data and removed the system Domain. This is deliberately
+    /// separate from `remove`: callers must present the preserved-data boundary
+    /// and obtain explicit confirmation before deleting credentials and stores.
+    public func finalizePreservedRemoval(descriptor: DomainDescriptor) async throws {
+        guard descriptor.status == .preservedRemoval else {
+            throw DomainProvisioningError.rollbackRequired("preserved removal has not been confirmed")
+        }
+        guard try await systemDomainExists(descriptor.identifier) == false else {
+            throw DomainProvisioningError.rollbackRequired("File Provider domain is still registered")
+        }
+        let domainStore = try storeFactory?.domainStore(identifier: descriptor.identifier) ?? store
+        try removeDurableRecords(descriptor: descriptor, domainStore: domainStore)
+    }
+
+    private func removeDurableRecords(descriptor: DomainDescriptor, domainStore: SQLiteStateStore) throws {
         try vault.remove(reference: descriptor.secretReference)
         try store.removeDomainRecord(identifier: descriptor.identifier)
         if storeFactory != nil {
             try domainStore.removeDomainRecord(identifier: descriptor.identifier)
             try storeFactory?.removeDomainStore(identifier: descriptor.identifier)
         }
-        return preserved
     }
 
     private func setRemovalStatus(_ status: DomainStatus, domainStore: SQLiteStateStore, identifier: String) throws {

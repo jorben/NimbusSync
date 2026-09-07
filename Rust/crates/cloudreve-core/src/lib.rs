@@ -10,7 +10,8 @@ pub use reconcile::{
 };
 pub use transfer::{
     encrypt_aes_ctr_at_offset, encrypted_chunks, plaintext_hash, plan_chunks,
-    provider_is_write_capable, recover_upload, UploadRecoveryDecision,
+    provider_is_write_capable, provider_is_zero_byte_write_capable, recover_upload,
+    UploadRecoveryDecision,
 };
 
 use cloudreve_protocol::{CapabilitySnapshot, RemoteItem, RemoteItemKind};
@@ -112,6 +113,8 @@ impl OperationIntent {
             replay_key: self.replay_key.clone(),
             kind: format!("{:?}", self.kind).to_lowercase(),
             item_id: self.item_id,
+            expected_version: self.expected_version.clone(),
+            changed_fields: self.changed_fields.clone(),
             state: "queued".into(),
             source_generation: self.source_generation,
             cancel_requested: false,
@@ -575,15 +578,11 @@ pub fn validate_root(check: &RootCheck) -> Result<String, CoreError> {
 }
 
 pub fn provider_can_write(capability: &CapabilitySnapshot, provider: &str) -> bool {
-    capability.allows_write()
-        && capability
-            .provider(provider)
-            .map(|value| {
-                value.write == cloudreve_protocol::CapabilityState::Verified
-                    && value.resumable == cloudreve_protocol::CapabilityState::Verified
-                    && value.zero_byte == cloudreve_protocol::CapabilityState::Verified
-            })
-            .unwrap_or(false)
+    provider_is_write_capable(capability, provider)
+}
+
+pub fn provider_can_write_zero_byte(capability: &CapabilitySnapshot, provider: &str) -> bool {
+    provider_is_zero_byte_write_capable(capability, provider)
 }
 
 #[derive(Debug, Clone, Default)]

@@ -12,6 +12,7 @@ use url::Url;
 use uuid::Uuid;
 
 pub const PROTOCOL_ABI_VERSION: u32 = 1;
+pub const PROJECTION_SCHEMA_REVISION: u64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiEnvelope<T> {
@@ -216,16 +217,23 @@ impl RemoteFileDto {
             .as_deref()
             .map(|value| value.contains('r'))
             .unwrap_or(true);
+        let has_content_version = self
+            .primary_entity
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
         let can_write = self
             .capability
             .as_deref()
             .map(|value| value.contains('w'))
             .unwrap_or(false)
-            && can_read;
+            && can_read
+            && (is_folder || has_content_version);
         let content_version = self
             .primary_entity
             .clone()
-            .unwrap_or_else(|| self.updated_at.clone());
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("unversioned:{}", self.id));
         RemoteItem {
             id: self.id.clone(),
             parent_id,
@@ -311,16 +319,90 @@ pub struct ProviderCapability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationCapabilities {
+    #[serde(default = "default_unsupported")]
+    pub collision_safe_create: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub conditional_modify: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub metadata_move: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub trash: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub purge: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub zero_byte: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub resumable: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub native_conflict_copy: CapabilityState,
+    #[serde(default = "default_unsupported")]
+    pub fallback_conflict: CapabilityState,
+}
+
+fn default_unsupported() -> CapabilityState {
+    CapabilityState::Unsupported
+}
+
+impl Default for OperationCapabilities {
+    fn default() -> Self {
+        Self {
+            collision_safe_create: CapabilityState::Unsupported,
+            conditional_modify: CapabilityState::Unsupported,
+            metadata_move: CapabilityState::Unsupported,
+            trash: CapabilityState::Unsupported,
+            purge: CapabilityState::Unsupported,
+            zero_byte: CapabilityState::Unsupported,
+            resumable: CapabilityState::Unsupported,
+            native_conflict_copy: CapabilityState::Unsupported,
+            fallback_conflict: CapabilityState::Unsupported,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySnapshot {
     pub revision: u64,
     pub cloudreve_version: Option<String>,
     pub stable_item_identity: CapabilityState,
     pub stable_root_identity: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub complete_pagination: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub cursor_pagination: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub snapshot_safe_pagination: CapabilityState,
     pub conditional_content_write: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub conditional_metadata_mutation: CapabilityState,
     pub idempotent_create: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub content_version_semantics: CapabilityState,
+    #[serde(default)]
+    pub resumable_upload_providers: Vec<String>,
+    #[serde(default)]
+    pub upload_completion_queryable_providers: Vec<String>,
+    #[serde(default)]
+    pub zero_byte_write_providers: Vec<String>,
+    #[serde(default)]
+    pub resolved_upload_policy_kinds: Vec<String>,
+    #[serde(default = "default_unsupported")]
+    pub delete_semantics: CapabilityState,
     pub trash_restore: CapabilityState,
     pub sse: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub sse_resume: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub refresh_rotation_semantics: CapabilityState,
+    #[serde(default = "default_unverified")]
+    pub thumbnail: CapabilityState,
     pub providers: Vec<ProviderCapability>,
+    #[serde(default)]
+    pub operations: OperationCapabilities,
+}
+
+fn default_unverified() -> CapabilityState {
+    CapabilityState::Unverified
 }
 
 impl CapabilitySnapshot {
@@ -330,11 +412,25 @@ impl CapabilitySnapshot {
             cloudreve_version: None,
             stable_item_identity: CapabilityState::Unverified,
             stable_root_identity: CapabilityState::Unverified,
+            complete_pagination: CapabilityState::Unverified,
+            cursor_pagination: CapabilityState::Unverified,
+            snapshot_safe_pagination: CapabilityState::Unverified,
             conditional_content_write: CapabilityState::Unsupported,
+            conditional_metadata_mutation: CapabilityState::Unverified,
             idempotent_create: CapabilityState::Unsupported,
+            content_version_semantics: CapabilityState::Unverified,
+            resumable_upload_providers: Vec::new(),
+            upload_completion_queryable_providers: Vec::new(),
+            zero_byte_write_providers: Vec::new(),
+            resolved_upload_policy_kinds: Vec::new(),
+            delete_semantics: CapabilityState::Unsupported,
             trash_restore: CapabilityState::Unsupported,
             sse: CapabilityState::Unverified,
+            sse_resume: CapabilityState::Unverified,
+            refresh_rotation_semantics: CapabilityState::Unverified,
+            thumbnail: CapabilityState::Unverified,
             providers: Vec::new(),
+            operations: OperationCapabilities::default(),
         }
     }
 
@@ -343,12 +439,32 @@ impl CapabilitySnapshot {
             && self.stable_root_identity == CapabilityState::Verified
             && self.conditional_content_write == CapabilityState::Verified
             && self.idempotent_create == CapabilityState::Verified
+            && self.content_version_semantics == CapabilityState::Verified
     }
 
     pub fn provider(&self, name: &str) -> Option<&ProviderCapability> {
         self.providers
             .iter()
-            .find(|provider| provider.provider == name)
+            .find(|provider| provider.provider.eq_ignore_ascii_case(name))
+    }
+
+    pub fn operation_verified(&self, operation: &str) -> bool {
+        let state = match operation {
+            "collision_safe_create" => self.operations.collision_safe_create,
+            "conditional_modify" => self.operations.conditional_modify,
+            "metadata_move" => {
+                return self.conditional_metadata_mutation == CapabilityState::Verified
+                    && self.operations.metadata_move == CapabilityState::Verified;
+            }
+            "trash" => self.operations.trash,
+            "purge" => self.operations.purge,
+            "zero_byte" => self.operations.zero_byte,
+            "resumable" => self.operations.resumable,
+            "native_conflict_copy" => self.operations.native_conflict_copy,
+            "fallback_conflict" => self.operations.fallback_conflict,
+            _ => CapabilityState::Unsupported,
+        };
+        state == CapabilityState::Verified
     }
 }
 
@@ -498,11 +614,75 @@ pub struct PageToken {
     pub snapshot_generation: u64,
     pub offset: u64,
     pub sort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_set_revision: Option<u64>,
+    #[serde(default = "default_projection_schema_revision")]
+    pub projection_schema_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checksum: Vec<u8>,
 }
 
 impl PageToken {
+    pub fn new(
+        domain_id: Uuid,
+        parent_id: impl Into<String>,
+        snapshot_generation: u64,
+        offset: u64,
+        sort: impl Into<String>,
+    ) -> Self {
+        let mut token = Self {
+            version: 2,
+            domain_id,
+            parent_id: parent_id.into(),
+            snapshot_generation,
+            offset,
+            sort: sort.into(),
+            last_item_id: None,
+            working_set_revision: None,
+            projection_schema_revision: PROJECTION_SCHEMA_REVISION,
+            snapshot_id: None,
+            expires_at: None,
+            checksum: Vec::new(),
+        };
+        token.checksum = token.compute_checksum();
+        token
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let json = serde_json::to_vec(self).map_err(|_| ProtocolError::ValueTooLarge)?;
+        let mut token = self.clone();
+        if token.version != 2 || token.projection_schema_revision != PROJECTION_SCHEMA_REVISION {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !opaque_continuation(&token.parent_id, 128) {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !opaque_continuation(&token.sort, 32) {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !token
+            .last_item_id
+            .as_deref()
+            .map(|value| opaque_continuation(value, 64))
+            .unwrap_or(true)
+        {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !token
+            .snapshot_id
+            .as_deref()
+            .map(|value| opaque_continuation(value, 64))
+            .unwrap_or(true)
+        {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        token.checksum = token.compute_checksum();
+        let json = serde_json::to_vec(&token).map_err(|_| ProtocolError::ValueTooLarge)?;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(json)
             .into_bytes();
@@ -516,7 +696,53 @@ impl PageToken {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| ProtocolError::InvalidIdentifier)?;
-        serde_json::from_slice(&json).map_err(|_| ProtocolError::InvalidIdentifier)
+        let token: Self =
+            serde_json::from_slice(&json).map_err(|_| ProtocolError::InvalidIdentifier)?;
+        if token.version != 2 || token.projection_schema_revision != PROJECTION_SCHEMA_REVISION {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !opaque_continuation(&token.parent_id, 128) || !opaque_continuation(&token.sort, 32) {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if !token
+            .last_item_id
+            .as_deref()
+            .map(|value| opaque_continuation(value, 64))
+            .unwrap_or(true)
+            || !token
+                .snapshot_id
+                .as_deref()
+                .map(|value| opaque_continuation(value, 64))
+                .unwrap_or(true)
+        {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        if token.checksum != token.compute_checksum() {
+            return Err(ProtocolError::InvalidIdentifier);
+        }
+        Ok(token)
+    }
+
+    fn compute_checksum(&self) -> Vec<u8> {
+        let core = PageTokenCore {
+            version: self.version,
+            domain_id: self.domain_id,
+            parent_id: self.parent_id.clone(),
+            snapshot_generation: self.snapshot_generation,
+            offset: self.offset,
+            sort: self.sort.clone(),
+            last_item_id: self.last_item_id.clone(),
+            working_set_revision: self.working_set_revision,
+            projection_schema_revision: if self.projection_schema_revision == 0 {
+                PROJECTION_SCHEMA_REVISION
+            } else {
+                self.projection_schema_revision
+            },
+            snapshot_id: self.snapshot_id.clone(),
+            expires_at: self.expires_at,
+        };
+        let bytes = serde_json::to_vec(&core).unwrap_or_default();
+        Sha256::digest(&bytes)[..8].to_vec()
     }
 }
 
@@ -527,11 +753,37 @@ pub struct SyncAnchor {
     pub scope: String,
     pub epoch: Uuid,
     pub sequence: u64,
+    #[serde(default = "default_projection_schema_revision")]
+    pub projection_schema_revision: u64,
+    #[serde(default)]
+    pub checksum: Vec<u8>,
 }
 
 impl SyncAnchor {
+    pub fn new(domain_id: Uuid, scope: impl Into<String>, epoch: Uuid, sequence: u64) -> Self {
+        let mut anchor = Self {
+            version: 2,
+            domain_id,
+            scope: scope.into(),
+            epoch,
+            sequence,
+            projection_schema_revision: PROJECTION_SCHEMA_REVISION,
+            checksum: Vec::new(),
+        };
+        anchor.checksum = anchor.compute_checksum();
+        anchor
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        let json = serde_json::to_vec(self).map_err(|_| ProtocolError::ValueTooLarge)?;
+        let mut anchor = self.clone();
+        if anchor.version != 2 || anchor.projection_schema_revision != PROJECTION_SCHEMA_REVISION {
+            return Err(ProtocolError::AnchorMismatch);
+        }
+        if !opaque_continuation(&anchor.scope, 128) {
+            return Err(ProtocolError::AnchorMismatch);
+        }
+        anchor.checksum = anchor.compute_checksum();
+        let json = serde_json::to_vec(&anchor).map_err(|_| ProtocolError::ValueTooLarge)?;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(json)
             .into_bytes();
@@ -545,7 +797,16 @@ impl SyncAnchor {
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| ProtocolError::AnchorMismatch)?;
-        serde_json::from_slice(&json).map_err(|_| ProtocolError::AnchorMismatch)
+        let anchor: Self =
+            serde_json::from_slice(&json).map_err(|_| ProtocolError::AnchorMismatch)?;
+        if anchor.version != 2
+            || anchor.projection_schema_revision != PROJECTION_SCHEMA_REVISION
+            || !opaque_continuation(&anchor.scope, 128)
+            || anchor.checksum != anchor.compute_checksum()
+        {
+            return Err(ProtocolError::AnchorMismatch);
+        }
+        Ok(anchor)
     }
 
     pub fn validate(
@@ -555,15 +816,77 @@ impl SyncAnchor {
         epoch: Uuid,
         min_sequence: u64,
     ) -> Result<(), ProtocolError> {
-        if self.domain_id != domain_id
+        if self.version != 2
+            || !opaque_continuation(&self.scope, 128)
+            || self.domain_id != domain_id
             || self.scope != scope
             || self.epoch != epoch
             || self.sequence < min_sequence
+            || self.projection_schema_revision != PROJECTION_SCHEMA_REVISION
         {
+            return Err(ProtocolError::AnchorMismatch);
+        }
+        if self.checksum != self.compute_checksum() {
             return Err(ProtocolError::AnchorMismatch);
         }
         Ok(())
     }
+
+    fn compute_checksum(&self) -> Vec<u8> {
+        let core = SyncAnchorCore {
+            version: self.version,
+            domain_id: self.domain_id,
+            scope: self.scope.clone(),
+            epoch: self.epoch,
+            sequence: self.sequence,
+            projection_schema_revision: if self.projection_schema_revision == 0 {
+                PROJECTION_SCHEMA_REVISION
+            } else {
+                self.projection_schema_revision
+            },
+        };
+        let bytes = serde_json::to_vec(&core).unwrap_or_default();
+        Sha256::digest(&bytes)[..8].to_vec()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PageTokenCore {
+    version: u8,
+    domain_id: Uuid,
+    parent_id: String,
+    snapshot_generation: u64,
+    offset: u64,
+    sort: String,
+    last_item_id: Option<String>,
+    working_set_revision: Option<u64>,
+    projection_schema_revision: u64,
+    snapshot_id: Option<String>,
+    expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SyncAnchorCore {
+    version: u8,
+    domain_id: Uuid,
+    scope: String,
+    epoch: Uuid,
+    sequence: u64,
+    projection_schema_revision: u64,
+}
+
+fn default_projection_schema_revision() -> u64 {
+    PROJECTION_SCHEMA_REVISION
+}
+
+fn opaque_continuation(value: &str, maximum_length: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_length
+        && value.bytes().all(|byte| {
+            !byte.is_ascii_control()
+                && !byte.is_ascii_whitespace()
+                && !matches!(byte, b'/' | b'\\' | b':' | b'@' | b'?' | b'#')
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,11 +980,9 @@ impl SseParser {
             return Ok(());
         }
         let text = std::str::from_utf8(line).map_err(|_| SseError::InvalidUtf8)?;
-        let (field, value) = text
-            .split_once(':')
-            .map_or((text.as_ref(), ""), |(field, value)| {
-                (field, value.strip_prefix(' ').unwrap_or(value))
-            });
+        let (field, value) = text.split_once(':').map_or((text, ""), |(field, value)| {
+            (field, value.strip_prefix(' ').unwrap_or(value))
+        });
         match field {
             "event" => self.event = Some(value.to_owned()),
             "data" => self.data.push(value.to_owned()),
@@ -752,6 +1073,9 @@ impl<T> BoundedQueue<T> {
     pub fn len(&self) -> usize {
         self.values.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.values.iter()
     }
@@ -795,6 +1119,23 @@ mod tests {
     }
 
     #[test]
+    fn missing_primary_entity_is_not_treated_as_a_content_version() {
+        let mut file = RemoteFileDto {
+            id: "remote-without-entity".into(),
+            permission: Some("rw".into()),
+            capability: Some("rwd".into()),
+            updated_at: "metadata-revision-1".into(),
+            ..Default::default()
+        };
+        let first = file.to_remote_item(None);
+        file.updated_at = "metadata-revision-2".into();
+        let second = file.to_remote_item(None);
+
+        assert!(!first.can_write);
+        assert_eq!(first.content_etag, second.content_etag);
+    }
+
+    #[test]
     fn identifiers_are_local_and_strict() {
         let id = format!("cri-{}", Uuid::new_v4());
         assert!(validate_local_identifier(&id, "cri").is_ok());
@@ -803,17 +1144,23 @@ mod tests {
 
     #[test]
     fn page_tokens_are_small_and_do_not_contain_remote_cursor() {
-        let token = PageToken {
-            version: 1,
-            domain_id: Uuid::new_v4(),
-            parent_id: "cri-parent".into(),
-            snapshot_generation: 4,
-            offset: 800,
-            sort: "name".into(),
-        };
+        let token = PageToken::new(Uuid::new_v4(), "cri-parent", 4, 800, "name");
+        assert_eq!(token.checksum, token.compute_checksum());
         let encoded = token.encode().unwrap();
         assert!(encoded.len() < 500);
         assert_eq!(PageToken::decode(&encoded).unwrap(), token);
+    }
+
+    #[test]
+    fn continuation_rejects_legacy_and_sensitive_values() {
+        let mut page = PageToken::new(Uuid::new_v4(), "cri-parent", 1, 0, "name");
+        page.version = 1;
+        assert_eq!(page.encode(), Err(ProtocolError::InvalidIdentifier));
+
+        let mut anchor = SyncAnchor::new(Uuid::new_v4(), "https://example.com", Uuid::new_v4(), 0);
+        assert_eq!(anchor.encode(), Err(ProtocolError::AnchorMismatch));
+        anchor.scope = "working_set".into();
+        assert!(anchor.encode().is_ok());
     }
 
     #[test]
@@ -883,25 +1230,14 @@ mod tests {
 
     #[test]
     fn sync_anchor_encoding_is_bounded() {
-        let anchor = SyncAnchor {
-            version: 1,
-            domain_id: Uuid::new_v4(),
-            scope: "x".repeat(500),
-            epoch: Uuid::new_v4(),
-            sequence: 1,
-        };
-        assert_eq!(anchor.encode(), Err(ProtocolError::ValueTooLarge));
+        let anchor = SyncAnchor::new(Uuid::new_v4(), "x".repeat(500), Uuid::new_v4(), 1);
+        assert!(!opaque_continuation(&anchor.scope, 128));
+        assert_eq!(anchor.encode(), Err(ProtocolError::AnchorMismatch));
     }
 
     #[test]
     fn anchor_mismatch_is_explicit() {
-        let anchor = SyncAnchor {
-            version: 1,
-            domain_id: Uuid::new_v4(),
-            scope: "root".into(),
-            epoch: Uuid::new_v4(),
-            sequence: 5,
-        };
+        let anchor = SyncAnchor::new(Uuid::new_v4(), "root", Uuid::new_v4(), 5);
         let encoded = anchor.encode().unwrap();
         let decoded = SyncAnchor::decode(&encoded).unwrap();
         assert!(decoded

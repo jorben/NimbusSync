@@ -54,9 +54,10 @@ public struct ConflictCenterView: View {
     public let onKeepRemote: (ProductConflict) -> Void
     public let onOverwriteRemote: (ProductConflict) -> Void
     public let onKeepBoth: (ProductConflict) -> Void
+    public let onExportLocalCopy: (ProductConflict) -> Void
     public let selectedItemIdentifier: String?
     @State private var selectedID: UUID?
-    public init(conflicts: Binding<[ProductConflict]>, selectedItemIdentifier: String? = nil, onKeepRemote: @escaping (ProductConflict) -> Void, onOverwriteRemote: @escaping (ProductConflict) -> Void, onKeepBoth: @escaping (ProductConflict) -> Void) { _conflicts = conflicts; self.selectedItemIdentifier = selectedItemIdentifier; self.onKeepRemote = onKeepRemote; self.onOverwriteRemote = onOverwriteRemote; self.onKeepBoth = onKeepBoth; _selectedID = State(initialValue: conflicts.wrappedValue.first(where: { $0.itemIdentifier == selectedItemIdentifier })?.id) }
+    public init(conflicts: Binding<[ProductConflict]>, selectedItemIdentifier: String? = nil, onKeepRemote: @escaping (ProductConflict) -> Void, onOverwriteRemote: @escaping (ProductConflict) -> Void, onKeepBoth: @escaping (ProductConflict) -> Void, onExportLocalCopy: @escaping (ProductConflict) -> Void = { _ in }) { _conflicts = conflicts; self.selectedItemIdentifier = selectedItemIdentifier; self.onKeepRemote = onKeepRemote; self.onOverwriteRemote = onOverwriteRemote; self.onKeepBoth = onKeepBoth; self.onExportLocalCopy = onExportLocalCopy; _selectedID = State(initialValue: conflicts.wrappedValue.first(where: { $0.itemIdentifier == selectedItemIdentifier })?.id) }
     public var body: some View {
         NavigationSplitView {
             List(conflicts.filter { $0.state == "pending" }, selection: $selectedID) { conflict in
@@ -73,8 +74,11 @@ public struct ConflictCenterView: View {
                     Text("Remote: \(first.remoteSummary)")
                     HStack {
                         Button("Keep Remote") { onKeepRemote(first) }.buttonStyle(.bordered)
-                        Button("Overwrite Remote") { onOverwriteRemote(first) }.buttonStyle(.bordered)
-                        Button("Keep Both") { onKeepBoth(first) }.buttonStyle(.borderedProminent)
+                        Button("Overwrite Remote") { onOverwriteRemote(first) }.buttonStyle(.bordered).disabled(!first.sourceAvailable)
+                        Button("Keep Both") { onKeepBoth(first) }.buttonStyle(.borderedProminent).disabled(!first.sourceAvailable)
+                    }
+                    if first.localSourceKind != "user_export" {
+                        Button("Export Local Copy") { onExportLocalCopy(first) }.buttonStyle(.bordered)
                     }
                     Spacer()
                 }.padding(24)
