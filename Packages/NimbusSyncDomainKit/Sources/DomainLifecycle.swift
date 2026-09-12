@@ -155,6 +155,16 @@ public struct RegisteredDomainSnapshot: Equatable, Sendable {
     public init(identifier: String, displayName: String) { self.identifier = identifier; self.displayName = displayName }
 }
 
+/// Identifies system-registered File Provider domains that have no backing
+/// record in the app registry. Such orphans (for example after the app group
+/// identifier changed or a registry was reset) keep surfacing a permanently
+/// broken Finder location, so startup reconciliation removes them.
+public enum OrphanedDomainCleanupReducer {
+    public static func orphanedIdentifiers(systemDomains: [RegisteredDomainSnapshot], registryIdentifiers: Set<String>) -> Set<String> {
+        Set(systemDomains.map(\.identifier)).subtracting(registryIdentifiers)
+    }
+}
+
 public enum DomainProvisioningStep: String, Codable, Sendable {
     case prepared
     case credentialWritten = "credential_written"

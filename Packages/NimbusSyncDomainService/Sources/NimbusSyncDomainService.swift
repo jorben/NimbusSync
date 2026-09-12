@@ -237,6 +237,31 @@ public actor DomainRegistryService {
         }
     }
 
+    /// Fail-closed startup reconciliation: system File Provider domains with
+    /// no backing record in the app registry are removed so they stop
+    /// surfacing permanently broken Finder locations. Both the registry read
+    /// and the system listing must succeed before anything is removed, and
+    /// removal always preserves dirty user data (on macOS 14 and later; on
+    /// older systems it fails closed and leaves the domain registered).
+    @discardableResult
+    public func removeOrphanedSystemDomains() async -> [(identifier: String, preservedLocation: URL?)] {
+        guard let storedDomains = try? store.allDomains() else { return [] }
+        guard let systemDomains = try? await lifecycle.registeredDomains() else { return [] }
+        let registryIdentifiers = Set(storedDomains.map(\.identifier))
+        let orphanedIdentifiers = OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: registryIdentifiers)
+        var removed: [(identifier: String, preservedLocation: URL?)] = []
+        for snapshot in systemDomains where orphanedIdentifiers.contains(snapshot.identifier) {
+            let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(snapshot.identifier), displayName: snapshot.displayName)
+            do {
+                let preservedLocation = try await lifecycle.remove(domain, preserveDirtyData: true)
+                removed.append((snapshot.identifier, preservedLocation))
+            } catch {
+                // Fail-closed: leave this domain registered and continue with the rest.
+            }
+        }
+        return removed
+    }
+
     public func descriptors() throws -> [DomainDescriptor] {
         try store.allDomains().compactMap { stored in
             guard let scope = try? RemoteScope(origin: stored.origin, accountID: stored.accountID, rootURI: stored.rootURI) else { return nil }

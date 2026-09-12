@@ -494,6 +494,19 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(DomainRemovalPolicy().decision(hasDirtyOperations: true, pendingSetReliable: true, waitForChangesSucceeded: true), .preserveDirtyData)
     }
 
+    func testOrphanedSystemDomainsAreIdentifiedForStartupCleanup() {
+        let registryID = CloudreveIdentifier.domain()
+        let legacyOrphan = "nimbussync-legacy-" + UUID().uuidString.lowercased()
+        let systemDomains = [
+            RegisteredDomainSnapshot(identifier: registryID, displayName: "Cloudreve"),
+            RegisteredDomainSnapshot(identifier: legacyOrphan, displayName: "NimbusSync Legacy"),
+        ]
+        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: [registryID]), [legacyOrphan])
+        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: [registryID, legacyOrphan]), [])
+        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: []), [registryID, legacyOrphan])
+        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: [], registryIdentifiers: [registryID]), [])
+    }
+
     func testProvisioningErrorsAreLocalizedAndFileProviderDiagnosticsAreRetained() {
         let providerDescription = ErrorDescription("provider unavailable", domain: "NSFileProviderErrorDomain", code: -2001)
         XCTAssertEqual(providerDescription.diagnosticDescription, "file_provider_error:NSFileProviderErrorDomain:-2001")

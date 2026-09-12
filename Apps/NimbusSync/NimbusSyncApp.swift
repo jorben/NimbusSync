@@ -656,7 +656,7 @@ private final class NimbusSyncAppState: ObservableObject {
         }
         if let registry {
             let service = DomainRegistryService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
-            Task { await service.recoverProvisioning(); reload() }
+            Task { await service.recoverProvisioning(); await service.removeOrphanedSystemDomains(); reload() }
         }
     }
 
