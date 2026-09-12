@@ -85,6 +85,7 @@ Secrets.xcconfig
 *.provisionprofile
 
 # Editor-local files
+.pi/
 .idea/
 .fleet/
 *.swp
