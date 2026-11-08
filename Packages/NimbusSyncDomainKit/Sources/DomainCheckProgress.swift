@@ -17,12 +17,23 @@ public struct DomainCheckProgress: Equatable, Sendable {
     /// Items known before this check began; 0 when there is no estimate.
     public let expectedItems: Int
     public let startedAt: Date
+    /// The check's last sign of life; a running check reports at least once per server request.
+    public let updatedAt: Date
 
-    public init(phase: Phase, scannedItems: Int, expectedItems: Int, startedAt: Date) {
+    public init(phase: Phase, scannedItems: Int, expectedItems: Int, startedAt: Date, updatedAt: Date? = nil) {
         self.phase = phase
         self.scannedItems = max(0, scannedItems)
         self.expectedItems = max(0, expectedItems)
         self.startedAt = startedAt
+        self.updatedAt = updatedAt ?? startedAt
+    }
+
+    /// A check silent this long is no longer running (its process was killed or suspended).
+    /// Requests time out after 30 seconds, so a live check reports far more often.
+    public static let staleAfter: TimeInterval = 5 * 60
+
+    public func isStale(at now: Date = Date()) -> Bool {
+        now.timeIntervalSince(updatedAt) >= Self.staleAfter
     }
 
     /// The estimated share done, or nil when there is no estimate. It never claims completion:
@@ -38,7 +49,7 @@ public struct DomainCheckProgress: Equatable, Sendable {
 
     /// Short checks finish before a bar could mean anything; showing one would only flicker.
     public func isWorthShowing(at now: Date = Date()) -> Bool {
-        now.timeIntervalSince(startedAt) >= Self.minimumVisibleAge
+        now.timeIntervalSince(startedAt) >= Self.minimumVisibleAge && !isStale(at: now)
     }
 
     static let minimumVisibleAge: TimeInterval = 2

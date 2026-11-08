@@ -264,6 +264,9 @@ private struct ReconcileCursor: Codable {
     let page: Int
     let token: String?
     let usedTokens: [String]
+    /// Items checked up to this point, so a resumed check keeps counting instead of starting
+    /// over at zero. Absent in cursors written before it existed.
+    var scanned: Int? = nil
 }
 
 /// Performs a bounded, resumable normal-tree scan for a Domain. It never
@@ -289,11 +292,15 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
     public func reconcile(descriptor: DomainDescriptor, reason: String = "unspecified") async throws {
         let correlationID = UUID().uuidString.lowercased()
         logger.info("reconcile.started id=\(correlationID, privacy: .public) domain=\(descriptor.identifier, privacy: .public) reason=\(reason, privacy: .public)")
-        ActivityLog.shared.info("sync", "Full check started · reason=\(reason)")
         let activeRun = try store.activeReconcileRuns().first(where: { $0.scope == descriptor.currentRootURI })
         let runID = activeRun?.id ?? UUID()
         var savedCursor = activeRun?.cursor.flatMap { try? JSONDecoder().decode(ReconcileCursor.self, from: Data($0.utf8)) }
         if savedCursor?.current == nil && savedCursor?.queue.isEmpty == true { savedCursor = nil }
+        if let savedCursor {
+            ActivityLog.shared.info("sync", "Full check resumed · reason=\(reason) · \(savedCursor.scanned ?? 0) items already checked")
+        } else {
+            ActivityLog.shared.info("sync", "Full check started · reason=\(reason)")
+        }
         // A resumed cursor does not carry a complete proof of every item
         // observed before the previous process stopped. Finish the scan and
         // leave deletion for the next fresh generation instead of risking a
@@ -302,8 +309,11 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         if activeRun == nil {
             try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: UInt64(Date().timeIntervalSince1970), phase: "prepared", cursor: nil)
         } else {
-            try store.markReconcileAttempt(runID: runID)
+            try store.markReconcileAttempt(runID: runID, scannedItems: savedCursor?.scanned ?? 0)
         }
+        // The newest resumable position. Written to the store at most every few seconds; the
+        // exact one is written when the check fails, so a retry resumes where this one stopped.
+        var latestCursor: ReconcileCursor?
         var knownRemoteIDs = Set<String>()
         try store.updateSyncState(reconcileStatus: "scanning_normal")
         do {
@@ -336,11 +346,28 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         var seen = Set<String>([descriptor.rootRemoteID])
         // The previous check's item count is the estimate of how many this one will see.
         let expectedItems = knownRemoteIDs.count
-        func scanProgress() -> (scanned: Int, expected: Int) { (seen.count - 1, expectedItems) }
+        let resumedCount = savedCursor?.scanned ?? 0
+        func scanProgress() -> (scanned: Int, expected: Int) { (resumedCount + seen.count - 1, expectedItems) }
+        var lastCursorWrite = Date.distantPast
+        /// Records the resumable position. Writing the whole folder queue after every page made
+        /// large Domains slow, and the former 64 KiB cap threw the position away instead, so
+        /// every restart began again at the root. Rescanning a few folders after a resume is
+        /// harmless: every step is an idempotent upsert.
+        func saveCursor(queue: [ReconcileWork], current: ReconcileWork?, page: Int, token: String?, usedTokens: Set<String>, force: Bool = false) throws {
+            var cursor = ReconcileCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens.sorted())
+            cursor.scanned = scanProgress().scanned
+            latestCursor = cursor
+            if force || Date().timeIntervalSince(lastCursorWrite) >= Self.cursorWriteInterval {
+                try persistCursor(runID: runID, cursor: cursor, progress: scanProgress())
+                lastCursorWrite = Date()
+            } else {
+                try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningFiles.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
+            }
+        }
         if savedCursor == nil {
             try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: rootScope.rootURI, state: "active", progress: scanProgress())
         } else if let savedCursor {
-            try persistCursor(runID: runID, queue: savedCursor.queue, current: savedCursor.current, page: savedCursor.page, token: savedCursor.token, usedTokens: Set(savedCursor.usedTokens), progress: scanProgress())
+            try saveCursor(queue: savedCursor.queue, current: savedCursor.current, page: savedCursor.page, token: savedCursor.token, usedTokens: Set(savedCursor.usedTokens), force: true)
         }
         while currentWork != nil || !queue.isEmpty {
             let current = currentWork ?? queue.removeFirst()
@@ -352,7 +379,9 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 let requestUsedCursor = token != nil
                 let response = try await list(uri: current.uri, page: Int32(page), token: token)
                 logger.info("reconcile.page id=\(correlationID, privacy: .public) page=\(page, privacy: .public) token=\(token != nil, privacy: .public) items=\(response.files.count, privacy: .public)")
-                try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: token ?? "page:\(page)", state: "active", progress: scanProgress())
+                // Progress only: overwriting the cursor here with "page:N" lost the resumable
+                // position whenever the app stopped while a page was being applied.
+                try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningFiles.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
                 for file in response.files {
                     guard file.id != descriptor.rootRemoteID else { continue }
                     if !seen.contains(file.id) {
@@ -390,7 +419,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     }
                     guard !nextToken.isEmpty, usedTokens.insert(nextToken).inserted, usedTokens.count <= 2_000 else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
                     token = nextToken; page = 0
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
+                    try saveCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
                 } else if requestUsedCursor {
                     guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: true) else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
@@ -414,7 +443,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                         break
                     }
                     page = currentPage + 1; token = nil
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
+                    try saveCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
                 } else if response.files.count >= 500 {
                     // Without an explicit total/token, a full page is not
                     // proof that the scan is complete. Continue by page and
@@ -425,7 +454,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     }
                     page += 1
                     token = nil
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
+                    try saveCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
                 } else {
                     guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
@@ -437,12 +466,17 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             page = 1
             token = nil
             usedTokens.removeAll()
-            try persistCursor(runID: runID, queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens, progress: scanProgress())
+            try saveCursor(queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens)
         }
         if descriptor.capabilitySnapshot.canTrash && deletionSafe {
             try store.updateSyncState(reconcileStatus: "scanning_trash")
             try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
-            let trashFiles = try await listTrash(capability: descriptor.capabilitySnapshot)
+            let scannedBeforeTrash = scanProgress().scanned
+            let trashFiles = try await listTrash(capability: descriptor.capabilitySnapshot) { listed in
+                // The account-wide trash can take many pages; report each one so the check
+                // neither looks frozen nor goes silent long enough to be taken for dead.
+                try? self.store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scannedBeforeTrash + listed, expected: expectedItems)
+            }
             var unrepresentableTrash = 0
             for file in trashFiles {
                 guard file.id != descriptor.rootRemoteID else { continue }
@@ -483,7 +517,12 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 ActivityLog.shared.info("sync", "Skipped \(unrepresentableTrash) trash entries this client cannot address")
             }
             try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.applyingDeletions.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
+            var identitiesChecked = 0
             for identity in try store.remoteIdentities() {
+                identitiesChecked += 1
+                if identitiesChecked % 2_000 == 0 {
+                    try? store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.applyingDeletions.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
+                }
                 guard knownRemoteIDs.contains(identity.remoteID),
                       !seen.contains(identity.remoteID),
                       identity.remoteID != descriptor.rootRemoteID,
@@ -504,7 +543,9 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         ActivityLog.shared.info("sync", "Full check completed")
         } catch {
             var persistedCursor: String?
-            if let runs = try? store.activeReconcileRuns() {
+            if let latestCursor, let data = try? Self.encodeCursor(latestCursor) {
+                persistedCursor = String(data: data, encoding: .utf8)
+            } else if let runs = try? store.activeReconcileRuns() {
                 persistedCursor = runs.first(where: { $0.id == runID })?.cursor
             }
             try? store.updateReconcile(runID: runID, phase: "failed", cursor: persistedCursor, state: "failed")
@@ -516,13 +557,21 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         }
     }
 
-    private func persistCursor(runID: UUID, queue: [ReconcileWork], current: ReconcileWork?, page: Int, token: String?, usedTokens: Set<String>, progress: (scanned: Int, expected: Int)) throws {
-        let full = ReconcileCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens.sorted())
-        var data = try JSONEncoder().encode(full)
-        if data.count > 64 * 1024 {
-            let bounded = ReconcileCursor(queue: [], current: nil, page: 1, token: nil, usedTokens: [])
-            data = try JSONEncoder().encode(bounded)
+    static let cursorWriteInterval: TimeInterval = 10
+    /// Tens of thousands of queued folders fit; past this the position is dropped and the next
+    /// attempt starts over, rather than writing an unbounded row.
+    static let maximumCursorBytes = 16 * 1024 * 1024
+
+    private static func encodeCursor(_ cursor: ReconcileCursor) throws -> Data {
+        let data = try JSONEncoder().encode(cursor)
+        guard data.count <= maximumCursorBytes else {
+            return try JSONEncoder().encode(ReconcileCursor(queue: [], current: nil, page: 1, token: nil, usedTokens: []))
         }
+        return data
+    }
+
+    private func persistCursor(runID: UUID, cursor: ReconcileCursor, progress: (scanned: Int, expected: Int)) throws {
+        let data = try Self.encodeCursor(cursor)
         try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: String(data: data, encoding: .utf8), state: "active", progress: progress)
     }
 
@@ -539,7 +588,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         return value
     }
 
-    private func listTrash(capability: CapabilitySnapshot) async throws -> [EventFileDTO] {
+    private func listTrash(capability: CapabilitySnapshot, onPage: (Int) -> Void = { _ in }) async throws -> [EventFileDTO] {
         var page = 1
         var token: String?
         var result: [EventFileDTO] = []
@@ -559,6 +608,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
             }
             result.append(contentsOf: response.files)
+            onPage(result.count)
             guard result.count <= DomainScale.maximumItems else {
                 throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "trash_scan_bound"])
             }
@@ -945,6 +995,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     // MARK: - Deciding on full checks
 
     public func subscriptionConfirmed(resumed: Bool) async {
+        recoverAbandonedCheck()
         let hasCompletedCheck = hasCompletedFullCheck()
         if let reason = FullCheckPolicy.reasonAfterSubscription(resumed: resumed, hasCompletedCheck: hasCompletedCheck, initialCheckAttemptedThisSession: initialCheckAttempted) {
             if !hasCompletedCheck { initialCheckAttempted = true }
@@ -970,6 +1021,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     @discardableResult
     public func startFallbackCheckIfDue(interval: TimeInterval, now: Date = Date()) -> Bool {
         guard connectionState == .subscribed, !fullCheckInFlight else { return false }
+        recoverAbandonedCheck(now: now)
         let lastAttempt = (try? store.lastFullCheckAttemptAt()) ?? nil
         guard FullCheckPolicy.isFallbackDue(lastAttempt: lastAttempt, interval: interval, now: now) else { return false }
         startFullCheck(reason: "scheduled")
@@ -1002,6 +1054,35 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         } else {
             replay = current
         }
+    }
+
+    /// Cleans up after a check whose process died: its run stays "active" with frozen numbers
+    /// and the Domain stays "checking", because nothing else ever records the end. Only
+    /// silent runs are touched, so a check still running in the File Provider extension is
+    /// left alone.
+    @discardableResult
+    public func recoverAbandonedCheck(now: Date = Date()) -> Bool {
+        guard !fullCheckInFlight else { return false }
+        let abandoned = (try? store.failStaleReconcileRuns(silentFor: DomainCheckProgress.staleAfter, now: now)) ?? 0
+        if abandoned > 0 {
+            ActivityLog.shared.warning("sync", "Found \(abandoned) interrupted full check; it resumes with the next check")
+        }
+        let stuckChecking = (try? store.domain(identifier: domainIdentifier)?.status) == .reconciling
+            || (try? registry?.domain(identifier: domainIdentifier)?.status) == .reconciling
+        guard stuckChecking, (try? store.hasLiveReconcileRun(silentFor: DomainCheckProgress.staleAfter, now: now)) == false else {
+            return abandoned > 0
+        }
+        if hasCompletedFullCheck() {
+            let next: DomainStatus = (try? store.hasDirtyWork()) == true ? .syncing : .healthy
+            try? store.setDomainStatus(identifier: domainIdentifier, status: next)
+            try? registry?.setDomainStatus(identifier: domainIdentifier, status: next)
+        } else {
+            // Without one finished check there is nothing current to show; report the gap
+            // honestly until the first check succeeds.
+            try? store.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
+            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
+        }
+        return true
     }
 
     private func hasCompletedFullCheck() -> Bool {

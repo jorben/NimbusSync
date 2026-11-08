@@ -143,6 +143,53 @@ final class FullCheckTriggerTests: XCTestCase {
         XCTAssertFalse(started, "a failed check still counts as the last attempt")
     }
 
+    // MARK: - Abandoned checks
+
+    /// A check whose process was killed (an Xcode relaunch, a crash) never records its end. Its
+    /// run stayed "active" with frozen numbers and the Domain stayed "checking" indefinitely.
+    func testAbandonedCheckIsFailedAndTheDomainStopsChecking() async throws {
+        let (store, descriptor) = try makeDomain()
+        try store.updateSyncState(reconcileAt: Date().addingTimeInterval(-86_400), reconcileStatus: "completed")
+        let runID = UUID()
+        try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: 1, phase: "prepared", cursor: nil)
+        try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: "page:4", state: "active", progress: (scanned: 1_500, expected: 6_000))
+        try store.setDomainStatus(identifier: descriptor.identifier, status: .reconciling)
+        let runtime = try XCTUnwrap(DomainEventRuntime(descriptor: descriptor, store: store, vault: MemoryCredentialVault()))
+
+        var recovered = await runtime.recoverAbandonedCheck(now: Date())
+        XCTAssertFalse(recovered, "a check that reported moments ago may still be running elsewhere")
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .reconciling)
+
+        let later = Date().addingTimeInterval(DomainCheckProgress.staleAfter + 60)
+        recovered = await runtime.recoverAbandonedCheck(now: later)
+        XCTAssertTrue(recovered)
+        XCTAssertNil(try store.activeCheckProgress(), "the frozen progress is gone")
+        XCTAssertEqual(try store.activeReconcileRuns().first?.state, "failed")
+        XCTAssertEqual(try store.activeReconcileRuns().first?.cursor, "page:4", "the next check resumes where it stopped")
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .healthy)
+    }
+
+    func testAbandonedFirstCheckDoesNotClaimTheDomainIsCurrent() async throws {
+        let (store, descriptor) = try makeDomain()
+        let runID = UUID()
+        try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: 1, phase: "prepared", cursor: nil)
+        try store.setDomainStatus(identifier: descriptor.identifier, status: .reconciling)
+        let runtime = try XCTUnwrap(DomainEventRuntime(descriptor: descriptor, store: store, vault: MemoryCredentialVault()))
+        await runtime.recoverAbandonedCheck(now: Date().addingTimeInterval(DomainCheckProgress.staleAfter + 60))
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .eventDegraded)
+    }
+
+    func testResumedAttemptStartsCountingFromZero() throws {
+        let (store, descriptor) = try makeDomain()
+        let runID = UUID()
+        try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: 1, phase: "prepared", cursor: nil)
+        try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: "page:4", state: "failed", progress: (scanned: 1_500, expected: 6_000))
+        try store.markReconcileAttempt(runID: runID)
+        let progress = try XCTUnwrap(store.activeCheckProgress())
+        XCTAssertEqual(progress.scannedItems, 0, "the previous attempt's count must not carry over")
+        XCTAssertEqual(progress.expectedItems, 6_000)
+    }
+
     // MARK: - Store
 
     func testStoreTracksAttemptsAndItemCount() throws {

@@ -849,6 +849,8 @@ reconciliation 使用可恢复的 generation scan：
 
 建连、断流、reconnect-required、未知或格式错误事件、单个事件无法补全均不再触发全量检查。同一 Domain 同时只运行一次全量检查，运行中的请求直接丢弃。
 
+`reconcile_runs.updated_at` 是检查的存活信号：每页列表、trash 每页和删除确认每 2000 项都会刷新。超过 5 分钟无刷新的 active run 视为进程已被终止：主应用在订阅确认和每分钟的兜底巡检时将其标为 failed（保留 cursor，下次检查续扫），并把满在 `reconciling` 的 Domain 恢复为 healthy/syncing（从未完成检查时为 event_degraded）；UI 不显示已失活的进度。续扫位置（待扫目录队列 + 当前目录/页/token + 已检查数）最多每 10 秒写一次完整 cursor，其余时间只更新进度；失败时写入内存中的精确位置。cursor 上限 16 MiB（此前 64 KiB 上限与每页开始时写入的 `page:N` 会丢掉位置，使大 Domain 每次重启都从根目录重扫）。续扫从保存的已检查数继续计数；续扫后重复处理的少量目录是幂等 upsert。
+
 ### 10.3 重试和幂等语义
 
 | 请求类型 | 自动重试策略 |

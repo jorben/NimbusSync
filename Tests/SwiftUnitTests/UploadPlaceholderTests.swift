@@ -12,6 +12,19 @@ import CloudreveEventCoordinator
 /// remote item put a second item under the uploader's own name, so when the real upload landed
 /// Finder renamed the user's file "name 2" (273 times in one folder). Unknown placeholders are
 /// skipped everywhere a listing turns into items; items already in the store keep their handling.
+private final class RequestLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var values: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    func append(_ value: String) { lock.lock(); stored.append(value); lock.unlock() }
+    func reset() { lock.lock(); stored.removeAll(); lock.unlock() }
+}
+
+private final class FlagBox: @unchecked Sendable {
+    var value: Bool
+    init(_ value: Bool) { self.value = value }
+}
+
 private final class ProgressProbe: @unchecked Sendable {
     var duringListing: DomainCheckProgress?
     var duringTrash: DomainCheckProgress?
@@ -188,6 +201,96 @@ final class UploadPlaceholderTests: XCTestCase {
         XCTAssertNil(try store.activeCheckProgress(), "a completed check reports no progress")
     }
 
+    /// A check that stops part way resumes where it stopped. The folder queue used to be thrown
+    /// away past 64 KiB (and overwritten with "page:N" at every page), so for any real Domain a
+    /// restart began again at the root and the count started over at zero.
+    func testInterruptedCheckResumesWhereItStoppedAndKeepsCounting() async throws {
+        let store = try makeStore()
+        let requested = RequestLog()
+        let failFolderB = FlagBox(true)
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value ?? ""
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            requested.append(uri)
+            if uri.hasSuffix("/B") {
+                if failFolderB.value { return Data("not json".utf8) }
+                return Self.envelope(["files": [Self.file(id: "b1", name: "B/b1.txt", uploading: false)], "pagination": ["page": 1, "page_size": 500, "total_items": 1]])
+            }
+            if uri.hasSuffix("/A") {
+                return Self.envelope(["files": [Self.file(id: "a1", name: "A/a1.txt", uploading: false)], "pagination": ["page": 1, "page_size": 500, "total_items": 1]])
+            }
+            if uri.contains("trash") {
+                return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+            }
+            return Self.envelope(["files": [Self.folder(id: "dA", name: "A"), Self.folder(id: "dB", name: "B"), Self.file(id: "f1", name: "f1.txt", uploading: false)], "pagination": ["page": 1, "page_size": 500, "total_items": 3]])
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+
+        do {
+            try await service.reconcile(descriptor: descriptor, reason: "test")
+            XCTFail("listing B fails, so the first attempt must fail")
+        } catch {}
+        XCTAssertEqual(requested.values.count, 3, "root, A, then B")
+        let failed = try XCTUnwrap(store.activeReconcileRuns().first)
+        XCTAssertEqual(failed.state, "failed")
+        XCTAssertTrue(failed.cursor?.contains("/B") == true, "the exact position is kept when a check fails")
+
+        failFolderB.value = false
+        requested.reset()
+        let probe = ProgressProbe()
+        let previousResponder = PlaceholderWireURLProtocol.responder
+        PlaceholderWireURLProtocol.responder = { request in
+            if request.url?.query?.contains("%2FB") == true || request.url?.query?.contains("/B") == true {
+                probe.duringListing = try? store.activeCheckProgress()
+            }
+            return previousResponder?(request) ?? Data()
+        }
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+
+        XCTAssertEqual(requested.values.count, 1, "the resumed check lists only what was left: \(requested.values)")
+        XCTAssertTrue(requested.values.first?.hasSuffix("/B") == true)
+        XCTAssertEqual(probe.duringListing?.scannedItems, 4, "counting continues from A, B, f1 and a1 instead of restarting at zero")
+        XCTAssertNotNil(try store.itemIdentifier(forRemoteID: "b1"))
+        XCTAssertNil(try store.activeCheckProgress(), "the resumed check completed")
+    }
+
+    func testLargeFolderQueueSurvivesAnInterruption() async throws {
+        let store = try makeStore()
+        let requested = RequestLog()
+        let failFirst = FlagBox(true)
+        let longName = String(repeating: "folder-name-", count: 8)
+        let rootListing = Self.envelope(["files": (0..<800).map { Self.folder(id: "d\($0)", name: "\(longName)\($0)") }, "pagination": ["page": 1, "page_size": 1_000, "total_items": 800]])
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value ?? ""
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            requested.append(uri)
+            if uri.contains(longName) {
+                if uri.hasSuffix("\(longName)0") && failFirst.value { return Data("not json".utf8) }
+                return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+            }
+            return rootListing
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        do { try await service.reconcile(descriptor: descriptor, reason: "test"); XCTFail("the first folder fails") } catch {}
+        XCTAssertGreaterThan(try XCTUnwrap(store.activeReconcileRuns().first?.cursor).utf8.count, 64 * 1024, "the queue is larger than the old cap")
+
+        failFirst.value = false
+        requested.reset()
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+        XCTAssertEqual(requested.values.count, 800, "only the 800 queued folders, not the root again")
+        XCTAssertFalse(requested.values.contains { !$0.contains(longName) })
+    }
+
     // MARK: - Fixture
 
     private let origin = URL(string: "https://cloudreve.example")!
@@ -234,6 +337,11 @@ final class UploadPlaceholderTests: XCTestCase {
             file["primary_entity"] = "entity-\(id)"
         }
         return file
+    }
+
+    private static func folder(id: String, name: String) -> [String: Any] {
+        ["type": 1, "id": id, "name": name, "path": "cloudreve://my/\(name)", "size": 0, "capability": "rwd",
+         "created_at": "2026-11-08T11:35:32Z", "updated_at": "2026-11-08T11:35:32Z"]
     }
 
     private static func envelope(_ data: Any) -> Data {

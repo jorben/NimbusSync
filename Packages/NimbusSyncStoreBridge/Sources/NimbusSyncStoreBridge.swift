@@ -293,6 +293,8 @@ public final class SQLiteStateStore: @unchecked Sendable {
                 for (table, column, definition) in [
                     ("reconcile_runs", "scanned_items", "INTEGER NOT NULL DEFAULT 0"),
                     ("reconcile_runs", "expected_items", "INTEGER NOT NULL DEFAULT 0"),
+                    // 0 for rows written before liveness was tracked: they count as stale.
+                    ("reconcile_runs", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
                     ("sync_state", "last_event_at", "INTEGER"),
                     ("sync_state", "event_client_id", "TEXT"),
                     ("sync_state", "last_reconcile_at", "INTEGER"),
@@ -451,19 +453,21 @@ public final class SQLiteStateStore: @unchecked Sendable {
     }
 
     public func startReconcile(runID: UUID, scope: String, generation: UInt64, phase: String, cursor: String?) throws {
-        try withLock { try execute("INSERT OR REPLACE INTO reconcile_runs (run_id, scope, generation, phase, cursor, state, started_at) VALUES ('\(runID.uuidString)', '\(sql(scope))', \(generation), '\(sql(phase))', \(nullable(cursor)), 'active', unixepoch())") }
+        try withLock { try execute("INSERT OR REPLACE INTO reconcile_runs (run_id, scope, generation, phase, cursor, state, started_at, updated_at) VALUES ('\(runID.uuidString)', '\(sql(scope))', \(generation), '\(sql(phase))', \(nullable(cursor)), 'active', unixepoch(), unixepoch())") }
     }
 
     /// `progress` rides along with the cursor write the scan makes anyway; nil leaves it unchanged.
     public func updateReconcile(runID: UUID, phase: String, cursor: String?, state: String, progress: (scanned: Int, expected: Int)? = nil) throws {
         let progressAssignments = progress.map { ", scanned_items = \(max(0, $0.scanned)), expected_items = \(max(0, $0.expected))" } ?? ""
-        try withLock { try execute("UPDATE reconcile_runs SET phase = '\(sql(phase))', cursor = \(nullable(cursor)), state = '\(sql(state))', completed_at = \(state == "completed" || state == "failed" ? "unixepoch()" : "NULL")\(progressAssignments) WHERE run_id = '\(runID.uuidString)'") }
+        try withLock { try execute("UPDATE reconcile_runs SET phase = '\(sql(phase))', cursor = \(nullable(cursor)), state = '\(sql(state))', completed_at = \(state == "completed" || state == "failed" ? "unixepoch()" : "NULL"), updated_at = unixepoch()\(progressAssignments) WHERE run_id = '\(runID.uuidString)'") }
     }
 
     /// Restamps a resumed run as a fresh attempt, so attempt-based scheduling and the progress
     /// display both count from now rather than from when the run first began.
-    public func markReconcileAttempt(runID: UUID) throws {
-        try withLock { try execute("UPDATE reconcile_runs SET started_at = unixepoch(), state = 'active', completed_at = NULL WHERE run_id = '\(runID.uuidString)'") }
+    /// `scannedItems` is the count saved with the resumable position, so progress continues
+    /// from there; without a position the attempt starts over and counts from zero.
+    public func markReconcileAttempt(runID: UUID, scannedItems: Int = 0) throws {
+        try withLock { try execute("UPDATE reconcile_runs SET started_at = unixepoch(), updated_at = unixepoch(), state = 'active', completed_at = NULL, scanned_items = \(max(0, scannedItems)) WHERE run_id = '\(runID.uuidString)'") }
     }
 
     /// When the most recent full check started, successful or not; nil when none ever ran.
@@ -479,16 +483,35 @@ public final class SQLiteStateStore: @unchecked Sendable {
         try withLock { Int(try scalar("SELECT COUNT(*) FROM items WHERE tombstone = 0 AND remote_entity_id IS NOT NULL AND remote_entity_id <> ''") ?? "0") ?? 0 }
     }
 
+    /// Marks active checks that stopped reporting as failed, keeping their cursor so the next check
+    /// resumes them. A check whose process was killed never records its own end; left active, it
+    /// showed frozen progress and kept the Domain "checking" forever.
+    @discardableResult
+    public func failStaleReconcileRuns(silentFor seconds: TimeInterval, now: Date = Date()) throws -> Int {
+        try withLock {
+            let cutoff = Int64(now.timeIntervalSince1970 - seconds)
+            return try executeReturningChanges("UPDATE reconcile_runs SET state = 'failed', completed_at = unixepoch() WHERE state = 'active' AND updated_at < \(cutoff)")
+        }
+    }
+
+    /// Whether some process is still visibly working on a check.
+    public func hasLiveReconcileRun(silentFor seconds: TimeInterval, now: Date = Date()) throws -> Bool {
+        try withLock {
+            let cutoff = Int64(now.timeIntervalSince1970 - seconds)
+            return try scalar("SELECT 1 FROM reconcile_runs WHERE state = 'active' AND updated_at >= \(cutoff) LIMIT 1") != nil
+        }
+    }
+
     /// Moves an active check to a later phase without touching its resumable cursor.
     public func updateReconcileProgress(runID: UUID, phase: String, scanned: Int, expected: Int) throws {
-        try withLock { try execute("UPDATE reconcile_runs SET phase = '\(sql(phase))', scanned_items = \(max(0, scanned)), expected_items = \(max(0, expected)) WHERE run_id = '\(runID.uuidString)' AND state = 'active'") }
+        try withLock { try execute("UPDATE reconcile_runs SET phase = '\(sql(phase))', scanned_items = \(max(0, scanned)), expected_items = \(max(0, expected)), updated_at = unixepoch() WHERE run_id = '\(runID.uuidString)' AND state = 'active'") }
     }
 
     /// The newest active full check, for display. Nil when no check is running or it has not
     /// reached a phase that reports progress.
     public func activeCheckProgress() throws -> DomainCheckProgress? {
         try withLock {
-            let statement = try prepare("SELECT phase, scanned_items, expected_items, started_at FROM reconcile_runs WHERE state = 'active' ORDER BY started_at DESC LIMIT 1")
+            let statement = try prepare("SELECT phase, scanned_items, expected_items, started_at, updated_at FROM reconcile_runs WHERE state = 'active' ORDER BY started_at DESC LIMIT 1")
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_ROW,
                   let phase = DomainCheckProgress.Phase(rawValue: columnString(statement, 0) ?? "") else { return nil }
@@ -496,7 +519,8 @@ public final class SQLiteStateStore: @unchecked Sendable {
                 phase: phase,
                 scannedItems: Int(sqlite3_column_int64(statement, 1)),
                 expectedItems: Int(sqlite3_column_int64(statement, 2)),
-                startedAt: Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 3)))
+                startedAt: Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 3))),
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 4)))
             )
         }
     }
@@ -1523,7 +1547,7 @@ private enum Schema {
     CREATE TABLE IF NOT EXISTS upload_parts (operation_id TEXT NOT NULL, part_index INTEGER NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, source_hash BLOB, etag TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(operation_id, part_index));
     CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, operation_id TEXT, item_identifier TEXT, direction TEXT NOT NULL, state TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER, error_code TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
     CREATE TABLE IF NOT EXISTS conflicts (conflict_id TEXT PRIMARY KEY, item_uuid TEXT, kind TEXT NOT NULL, base_metadata TEXT NOT NULL, remote_metadata TEXT NOT NULL, local_metadata TEXT NOT NULL, pending_item_id TEXT, source_generation INTEGER NOT NULL, state TEXT NOT NULL, resolution TEXT, remote_version BLOB, local_source_kind TEXT, expected_base_version BLOB, expected_source_hash BLOB, expected_source_size INTEGER, resolution_intent TEXT, resolution_state TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
-    CREATE TABLE IF NOT EXISTS reconcile_runs (run_id TEXT PRIMARY KEY, scope TEXT NOT NULL, generation INTEGER NOT NULL, phase TEXT NOT NULL, cursor TEXT, state TEXT NOT NULL, started_at INTEGER NOT NULL DEFAULT (unixepoch()), completed_at INTEGER, scanned_items INTEGER NOT NULL DEFAULT 0, expected_items INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS reconcile_runs (run_id TEXT PRIMARY KEY, scope TEXT NOT NULL, generation INTEGER NOT NULL, phase TEXT NOT NULL, cursor TEXT, state TEXT NOT NULL, started_at INTEGER NOT NULL DEFAULT (unixepoch()), completed_at INTEGER, scanned_items INTEGER NOT NULL DEFAULT 0, expected_items INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS directory_snapshot_generations (snapshot_id TEXT PRIMARY KEY, domain_id TEXT NOT NULL, parent_uuid TEXT NOT NULL, generation INTEGER NOT NULL, server_snapshot_token BLOB, next_cursor BLOB, state TEXT NOT NULL, item_count INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()), expires_at INTEGER NOT NULL, UNIQUE(domain_id, parent_uuid, generation));
     CREATE TABLE IF NOT EXISTS directory_snapshot_items (snapshot_id TEXT NOT NULL, order_index INTEGER NOT NULL, item_uuid TEXT NOT NULL, item_payload BLOB NOT NULL, PRIMARY KEY(snapshot_id, order_index), UNIQUE(snapshot_id, item_uuid), FOREIGN KEY(snapshot_id) REFERENCES directory_snapshot_generations(snapshot_id) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS directory_snapshot_heads (domain_id TEXT NOT NULL, parent_uuid TEXT NOT NULL, current_snapshot_id TEXT NOT NULL, current_generation INTEGER NOT NULL, PRIMARY KEY(domain_id, parent_uuid), FOREIGN KEY(current_snapshot_id) REFERENCES directory_snapshot_generations(snapshot_id) ON DELETE RESTRICT);

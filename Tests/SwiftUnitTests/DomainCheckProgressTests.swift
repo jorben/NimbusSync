@@ -20,6 +20,12 @@ final class DomainCheckProgressTests: XCTestCase {
         XCTAssertTrue(progress.isWorthShowing(at: start.addingTimeInterval(2)))
     }
 
+    func testSilentCheckIsNoLongerShown() {
+        let progress = DomainCheckProgress(phase: .scanningFiles, scannedItems: 10, expectedItems: 100, startedAt: start, updatedAt: start.addingTimeInterval(60))
+        XCTAssertTrue(progress.isWorthShowing(at: start.addingTimeInterval(120)))
+        XCTAssertFalse(progress.isWorthShowing(at: start.addingTimeInterval(60 + DomainCheckProgress.staleAfter)), "frozen numbers from a dead check are hidden")
+    }
+
     func testVisibleProgressRequiresACheckingDomain() throws {
         let scope = try RemoteScope(origin: "https://example.com", accountID: "account", rootURI: "cloudreve://my/")
         var domain = DomainDescriptor(identifier: "crd-33333333-3333-4333-8333-333333333333", displayName: "Progress", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "ref")
@@ -61,5 +67,22 @@ final class DomainCheckProgressTests: XCTestCase {
 
         try store.updateReconcile(runID: runID, phase: "completed", cursor: nil, state: "completed")
         XCTAssertNil(try store.activeCheckProgress())
+    }
+
+    func testOnlySilentActiveRunsAreFailed() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-stale-\(UUID().uuidString).sqlite3")
+        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) } }
+        let store = try SQLiteStateStore(url: url)
+        let active = UUID(), done = UUID()
+        try store.startReconcile(runID: active, scope: "cloudreve://my", generation: 1, phase: "prepared", cursor: nil)
+        try store.startReconcile(runID: done, scope: "cloudreve://other", generation: 1, phase: "prepared", cursor: nil)
+        try store.updateReconcile(runID: done, phase: "completed", cursor: nil, state: "completed")
+
+        XCTAssertEqual(try store.failStaleReconcileRuns(silentFor: 300), 0)
+        XCTAssertTrue(try store.hasLiveReconcileRun(silentFor: 300))
+        let later = Date().addingTimeInterval(600)
+        XCTAssertFalse(try store.hasLiveReconcileRun(silentFor: 300, now: later))
+        XCTAssertEqual(try store.failStaleReconcileRuns(silentFor: 300, now: later), 1, "completed runs are left alone")
+        XCTAssertEqual(try store.activeReconcileRuns().map(\.state), ["failed"])
     }
 }
