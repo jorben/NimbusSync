@@ -161,7 +161,8 @@ public struct MenuBarPopoverView: View {
             title: "Conflicts need attention",
             detail: "Review the latest local and remote versions.",
             actionTitle: "Review",
-            action: onOpenConflicts
+            action: onOpenConflicts,
+            actionSymbol: "arrow.right"
         )
     }
 
@@ -579,10 +580,32 @@ public enum PopoverCheckProgressText {
     }
 }
 
+/// Fills for things drawn on the popover. The menu bar window is a translucent material whose
+/// colour follows the wallpaper behind it, so an opaque fill (controlBackgroundColor) reads as a
+/// light slab on a grey panel. These are thin white veils over the panel instead: they lift a
+/// surface a little above whatever the panel happens to be, in either appearance.
+enum PopoverSurface {
+    /// Cards: one step above the panel.
+    static func card(_ scheme: ColorScheme) -> Color {
+        .white.opacity(scheme == .dark ? 0.05 : 0.16)
+    }
+
+    /// A chosen segment: about as bright as a card, so it reads as the same material.
+    static func raised(_ scheme: ColorScheme) -> Color {
+        .white.opacity(scheme == .dark ? 0.12 : 0.22)
+    }
+
+    /// Hairline edges, which carry the separation the fills no longer shout.
+    static func edge(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? .white.opacity(0.09) : .black.opacity(0.07)
+    }
+}
+
 /// Two or three choices in a soft track; the chosen one sits on a raised chip.
 struct PopoverSegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     let segments: [(Value, String)]
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 2) {
@@ -597,8 +620,9 @@ struct PopoverSegmentedControl<Value: Hashable>: View {
                         .background {
                             if isSelected {
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .shadow(color: .black.opacity(0.12), radius: 1.5, y: 0.5)
+                                    .fill(PopoverSurface.raised(colorScheme))
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(PopoverSurface.edge(colorScheme))
                             }
                         }
                         .contentShape(Rectangle())
@@ -608,7 +632,7 @@ struct PopoverSegmentedControl<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.07)))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.06)))
         .fixedSize()
         .animation(.easeOut(duration: 0.15), value: selection)
     }
@@ -635,6 +659,7 @@ struct PopoverProgressBar: View {
 /// A rounded, lightly raised group of rows.
 struct PopoverCard<Content: View>: View {
     @ViewBuilder let content: Content
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -643,11 +668,11 @@ struct PopoverCard<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .fill(PopoverSurface.card(colorScheme))
         )
         .overlay(
             RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08))
+                .strokeBorder(PopoverSurface.edge(colorScheme))
         )
         .clipShape(RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous))
     }
@@ -660,6 +685,7 @@ struct PopoverBanner: View {
     let detail: String
     let actionTitle: String?
     let action: () -> Void
+    var actionSymbol = "arrow.clockwise"
     var tint: Color = .orange
 
     var body: some View {
@@ -687,8 +713,15 @@ struct PopoverBanner: View {
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
 
             if let actionTitle {
-                Button(actionTitle, action: action)
-                    .buttonStyle(PopoverBannerButtonStyle(tint: tint))
+                Button(action: action) {
+                    HStack(spacing: 5) {
+                        Image(systemName: actionSymbol)
+                            .foregroundStyle(tint)
+                            .accessibilityHidden(true)
+                        Text(actionTitle)
+                    }
+                }
+                .buttonStyle(PopoverBannerButtonStyle())
             }
         }
         .padding(NimbusSyncDesignTokens.spacing12)
@@ -703,24 +736,30 @@ struct PopoverBanner: View {
     }
 }
 
+/// The banner's action wears the same soft fill as the row buttons; only its glyph carries the
+/// banner's tint, so it is findable without a solid block of colour on a translucent panel.
 struct PopoverBannerButtonStyle: ButtonStyle {
-    let tint: Color
-
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(configuration.isPressed ? 0.4 : 0.8))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(tint.opacity(0.55))
-            )
-            .contentShape(Rectangle())
+        BannerButton(configuration: configuration)
+    }
+
+    private struct BannerButton: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Color.primary.opacity(0.85))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(configuration.isPressed ? 0.16 : (isHovered ? 0.11 : 0.07)))
+                )
+                .contentShape(Rectangle())
+                .onHover { isHovered = $0 }
+        }
     }
 }
 
