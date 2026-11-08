@@ -80,6 +80,38 @@ public final class SSEParser: @unchecked Sendable {
     private func withLock<T>(_ body: () throws -> T) rethrows -> T { lock.lock(); defer { lock.unlock() }; return try body() }
 }
 
+/// Feeds a raw byte stream to an `SSEParser` one line at a time.
+///
+/// Foundation's `AsyncBytes.lines` drops empty lines, and an empty line is what ends an SSE
+/// event, so a parser fed from `.lines` never dispatched anything: `subscribed`, `resumed`,
+/// keep-alives and every file change were lost while the connection looked healthy. The
+/// parser must see the bytes, newlines included.
+public struct SSEByteFeeder {
+    private let parser: SSEParser
+    private var pending = Data()
+    private let maximumLineBytes: Int
+
+    public init(parser: SSEParser = SSEParser(), maximumLineBytes: Int = 1024 * 1024) {
+        self.parser = parser
+        self.maximumLineBytes = maximumLineBytes
+    }
+
+    public mutating func append(_ byte: UInt8) throws -> [SSEEvent] {
+        pending.append(byte)
+        guard pending.count <= maximumLineBytes else { throw SSEParserError.frameTooLarge }
+        guard byte == 0x0A || byte == 0x0D else { return [] }
+        defer { pending.removeAll(keepingCapacity: true) }
+        return try parser.append(pending)
+    }
+
+    public mutating func finish() throws -> [SSEEvent] {
+        var events = pending.isEmpty ? [] : try parser.append(pending)
+        pending.removeAll()
+        events += try parser.finish()
+        return events
+    }
+}
+
 private struct LineEnd { let offset: Int; let newlineLength: Int }
 private func lineEnd(in data: [UInt8]) -> LineEnd? {
     for index in data.indices {

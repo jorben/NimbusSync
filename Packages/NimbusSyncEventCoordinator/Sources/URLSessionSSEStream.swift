@@ -112,12 +112,12 @@ private actor SSEStreamState {
                     logger.info("sse.connect.response endpoint=file/events status=\(http.statusCode, privacy: .public)")
                     if http.statusCode == 200 { ActivityLog.shared.info("live-updates", "Live updates connected") }
                     guard http.statusCode == 200, http.value(forHTTPHeaderField: "Content-Type")?.contains("text/event-stream") == true else { throw CoreFailure(code: .network, retryable: true) }
-                    let parser = SSEParser()
-                    for try await line in bytes.lines {
-                        let events = try parser.append(Data((line + "\n").utf8))
-                        for event in events { await channel.yield(event) }
+                    // Raw bytes, not `bytes.lines`: that drops the empty lines that end each event.
+                    var feeder = SSEByteFeeder()
+                    for try await byte in bytes {
+                        for event in try feeder.append(byte) { await channel.yield(event) }
                     }
-                    for event in try parser.finish() { await channel.yield(event) }
+                    for event in try feeder.finish() { await channel.yield(event) }
                     logger.info("sse.stream.ended endpoint=file/events lifetime_s=\(Int(Date().timeIntervalSince(startedAt)), privacy: .public)")
                     ActivityLog.shared.info("live-updates", "Live updates ended after \(Int(Date().timeIntervalSince(startedAt)))s")
                     await channel.finish()

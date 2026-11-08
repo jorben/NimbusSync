@@ -217,3 +217,28 @@ private actor ScriptedStreamFactory: EventStreamFactory {
         return ScriptedStream(events: scripts.isEmpty ? [] : scripts.removeFirst())
     }
 }
+
+/// What Cloudreve actually sends (gin's `c.SSEvent`), fed byte by byte as the stream reads it.
+final class SSEByteFeederTests: XCTestCase {
+    func testEventsAreDispatchedAtTheEmptyLineThatEndsThem() throws {
+        let wire = "event:resumed\ndata:null\n\nevent:event\ndata:{\"type\":\"create\",\"file_id\":\"a1\",\"from\":\"/x.txt\",\"to\":\"\"}\n\nevent:keep-alive\ndata:null\n\n"
+        var feeder = SSEByteFeeder()
+        var events: [SSEEvent] = []
+        for byte in Array(wire.utf8) { events += try feeder.append(byte) }
+        XCTAssertEqual(events.map(\.event), ["resumed", "event", "keep-alive"], "each event arrives as soon as its empty line does, not when the stream ends")
+        XCTAssertTrue(events[1].data.contains("\"file_id\":\"a1\""))
+        XCTAssertEqual(try feeder.finish(), [])
+    }
+
+    func testCarriageReturnLineEndingsAlsoEndEvents() throws {
+        var feeder = SSEByteFeeder()
+        var events: [SSEEvent] = []
+        for byte in Array("event:subscribed\r\ndata:null\r\n\r\n".utf8) { events += try feeder.append(byte) }
+        XCTAssertEqual(events.map(\.event), ["subscribed"])
+    }
+
+    func testAnEndlessLineIsRejected() {
+        var feeder = SSEByteFeeder(maximumLineBytes: 64)
+        XCTAssertThrowsError(try (0..<100).forEach { _ in _ = try feeder.append(UInt8(ascii: "x")) })
+    }
+}
