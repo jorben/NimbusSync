@@ -88,6 +88,9 @@ public struct StatusBadge: View {
     public var body: some View {
         Label(status.title, systemImage: status.symbol)
             .font(compact ? .caption2.weight(.medium) : .caption.weight(.medium))
+            .lineLimit(1)
+            // A badge never wraps; the Domain name beside it truncates instead.
+            .fixedSize()
             .foregroundStyle(status.tint)
             .padding(.horizontal, compact ? 6 : 8)
             .padding(.vertical, compact ? 3 : 4)
