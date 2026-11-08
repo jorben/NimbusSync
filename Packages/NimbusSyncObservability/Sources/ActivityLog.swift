@@ -117,9 +117,6 @@ public final class ActivityLog: @unchecked Sendable {
         return Array(lines.suffix(limit))
     }
 
-    /// Parses one raw line; nil when it is not in the current format.
-    public static func entry(fromLine line: String) -> ActivityEntry? { parse(line) }
-
     // MARK: - Writing
 
     private func append(_ line: String) {

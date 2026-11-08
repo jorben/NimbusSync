@@ -12,8 +12,6 @@ public struct MenuBarPopoverView: View {
     public let onOpenDomain: (DomainDescriptor) -> Void
     public let onCancelTask: (UUID) -> Void
     public let onRetryTask: (UUID) -> Void
-    public let recentLog: [LogEntryDisplay]
-    public let onOpenLogs: (() -> Void)?
     /// Server connection per Domain identifier; a Domain without an entry shows no indicator.
     public let connections: [String: ServerConnectionDisplay]
     /// Running full checks per Domain identifier.
@@ -38,8 +36,6 @@ public struct MenuBarPopoverView: View {
         onOpenDomain: @escaping (DomainDescriptor) -> Void = { _ in },
         onCancelTask: @escaping (UUID) -> Void = { _ in },
         onRetryTask: @escaping (UUID) -> Void = { _ in },
-        recentLog: [LogEntryDisplay] = [],
-        onOpenLogs: (() -> Void)? = nil,
         connections: [String: ServerConnectionDisplay] = [:],
         checkProgress: [String: DomainCheckProgress] = [:],
         checkableDomainIdentifiers: Set<String> = [],
@@ -55,8 +51,6 @@ public struct MenuBarPopoverView: View {
         self.onOpenDomain = onOpenDomain
         self.onCancelTask = onCancelTask
         self.onRetryTask = onRetryTask
-        self.recentLog = recentLog
-        self.onOpenLogs = onOpenLogs
         self.connections = connections
         self.checkProgress = checkProgress
         self.checkableDomainIdentifiers = checkableDomainIdentifiers
@@ -87,10 +81,6 @@ public struct MenuBarPopoverView: View {
 
                     if !recentTasks.isEmpty {
                         taskSection(title: "Recent activity", tasks: recentTasks)
-                    }
-
-                    if onOpenLogs != nil || !recentLog.isEmpty {
-                        logSection
                     }
                 }
                 .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
@@ -351,34 +341,4 @@ public struct MenuBarPopoverView: View {
     private var statusSummary: String { summary.headline }
 
     private var statusDetail: String { summary.detail }
-
-    /// The newest entries first; the popover is a glance, the folder has the rest.
-    static let visibleLogEntries = 8
-
-    private var logSection: some View {
-        VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
-            HStack {
-                Text("Recent log")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-                if let onOpenLogs {
-                    Button(action: onOpenLogs) {
-                        Label("Open Logs Folder", systemImage: "folder")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Show NimbusSync's log files in Finder")
-                }
-            }
-            if recentLog.isEmpty {
-                Text("No log entries yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(recentLog.suffix(Self.visibleLogEntries).reversed()) { entry in
-                    LogEntryRow(entry: entry)
-                }
-            }
-        }
-    }
 }

@@ -507,8 +507,6 @@ private struct StatusPopoverContent: View {
                 onOpenDomain: runtime.openFinder,
                 onCancelTask: runtime.cancelTask,
                 onRetryTask: runtime.retryTask,
-                recentLog: runtime.recentLog.map(\.display),
-                onOpenLogs: runtime.openLogsFolder,
                 connections: runtime.connectionDisplays,
                 checkProgress: runtime.snapshot.checkProgress,
                 checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
@@ -631,13 +629,9 @@ private final class NimbusSyncAppState: ObservableObject {
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
     /// The menu bar image; animates while `snapshot.isSyncing`.
     let menuBarIcon = MenuBarIconAnimator()
-    /// Newest activity-log entries from the app and the File Provider extension.
-    @Published private(set) var recentLog: [ActivityEntry] = []
-    /// The newest raw log lines, unparsed, for Settings.
+    /// The newest raw log lines from the app and the File Provider extension, for Settings.
     @Published private(set) var recentLogLines: [String] = []
-    /// Settings shows at most this many lines; the popover parses only the newest few.
     nonisolated static let settingsLogLineLimit = 100
-    nonisolated static let popoverLogEntryLimit = 30
     /// Each Domain's live-update connection, keyed by Domain identifier. Only Domains that
     /// currently have an event supervisor appear here.
     @Published private(set) var connectionStatuses: [String: DomainConnectionStatus] = [:]
@@ -721,10 +715,7 @@ private final class NimbusSyncAppState: ObservableObject {
             menuBarIcon.setSyncing(next.isSyncing)
             menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
             let lines = await Task.detached(priority: .utility) { ActivityLog.shared.recentLines(limit: Self.settingsLogLineLimit) }.value
-            if lines != recentLogLines {
-                recentLogLines = lines
-                recentLog = lines.suffix(Self.popoverLogEntryLimit).compactMap(ActivityLog.entry(fromLine:))
-            }
+            if lines != recentLogLines { recentLogLines = lines }
             syncEventSupervisors(for: next.domains)
             await notifyChanges(from: previous, to: next)
         }
@@ -2112,22 +2103,6 @@ private extension DomainStatus {
             true
         default:
             false
-        }
-    }
-}
-
-private extension ActivityEntry {
-    var display: LogEntryDisplay {
-        LogEntryDisplay(id: id, date: date, level: level.display, source: source, category: category, message: message)
-    }
-}
-
-private extension ActivityLevel {
-    var display: LogEntryDisplay.Level {
-        switch self {
-        case .info: .info
-        case .warning: .warning
-        case .error: .error
         }
     }
 }

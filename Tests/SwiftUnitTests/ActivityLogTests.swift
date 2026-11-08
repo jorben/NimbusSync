@@ -52,8 +52,6 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertTrue(lines[1].contains("\tERROR\tfileprovider\tfile-provider\t"), "lines are returned exactly as written")
         XCTAssertEqual(app.recentLines(limit: 2).count, 2)
         XCTAssertEqual(app.recentLines(limit: 2).first?.hasSuffix("third"), true)
-        XCTAssertEqual(ActivityLog.entry(fromLine: lines[0])?.message, "first")
-        XCTAssertNil(ActivityLog.entry(fromLine: lines[3]))
     }
 
     func testLinesStayParsableAndSecretsAreRedacted() throws {
