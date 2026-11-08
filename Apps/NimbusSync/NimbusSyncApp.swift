@@ -72,10 +72,13 @@ struct NimbusSyncApp: App {
             checkProgress: runtime.snapshot.checkProgress,
             checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
             onCheckNow: runtime.checkNow,
+            lastSyncedAt: runtime.snapshot.lastSyncedAt,
+            domainFolderPaths: runtime.domainFolderPaths,
+            finderIntegration: runtime.finderIntegration,
+            onRefreshFinderIntegration: runtime.refreshFinderIntegration,
             recentLogLines: runtime.recentLogLines,
             logsDirectoryPath: runtime.logsDirectoryPath,
             onOpenLogs: runtime.openLogsFolder,
-            onCopyLogsPath: runtime.copyLogsDirectoryPath,
             onRefresh: runtime.reload
         )
     }
@@ -154,6 +157,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
             return
         }
         UNUserNotificationCenter.current().delegate = self
+        AppAppearance.stored().apply()
         didFinishLaunching = true
         startRuntimeIfNeeded()
         drainPendingExternalURLs()
@@ -616,6 +620,10 @@ private final class NimbusSyncAppState: ObservableObject {
     /// Each Domain's live-update connection, keyed by Domain identifier. Only Domains that
     /// currently have an event supervisor appear here.
     @Published private(set) var connectionStatuses: [String: DomainConnectionStatus] = [:]
+    /// Whether Finder shows NimbusSync's locations, as macOS reports it; read when Settings opens.
+    @Published private(set) var finderIntegration: FinderIntegrationState = .unknown
+    /// Each Domain's folder as Finder shows it, home written as "~", keyed by Domain identifier.
+    @Published private(set) var domainFolderPaths: [String: String] = [:]
 
     private let factory = AppGroupStoreFactory()
     private let registry: SQLiteStateStore?
@@ -1131,12 +1139,6 @@ private final class NimbusSyncAppState: ObservableObject {
     /// container: ~/Library/Group Containers/group.ai.tiy.nimbussync/Logs.
     var logsDirectoryPath: String? { ActivityLog.shared.directory?.path }
 
-    func copyLogsDirectoryPath() {
-        guard let path = logsDirectoryPath else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(path, forType: .string)
-    }
-
     func openLogsFolder() {
         guard let directory = ActivityLog.shared.directory else { return }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1169,6 +1171,46 @@ private final class NimbusSyncAppState: ObservableObject {
             }
         }
     }
+
+    /// Reads which Domains macOS has registered and switched on, and where Finder shows each
+    /// one. Read-only: unlike opening Finder, it never adds, migrates or reconnects a domain.
+    func refreshFinderIntegration() {
+        let identifiers = Set(snapshot.domains.map(\.identifier))
+        Task { [weak self] in
+            guard let self else { return }
+            let registered: [FinderSystemDomainBox]
+            do {
+                registered = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[FinderSystemDomainBox], Error>) in
+                    NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(returning: domains.map(FinderSystemDomainBox.init))
+                        }
+                    }
+                }
+            } catch {
+                self.finderIntegration = .unknown
+                return
+            }
+            let ours = registered.filter { identifiers.contains($0.domain.identifier.rawValue) }
+            let enabled = ours.filter { $0.domain.userEnabled }
+            self.finderIntegration = ours.isEmpty ? .notSetUp : (enabled.isEmpty ? .off : .on)
+            var paths: [String: String] = [:]
+            for box in enabled {
+                guard let manager = NSFileProviderManager(for: box.domain),
+                      let url = try? await self.userVisibleURLOnce(for: manager) else { continue }
+                paths[box.domain.identifier.rawValue] = SettingsDomainText.displayPath(url.path, home: Self.userHomeDirectory)
+            }
+            if paths != self.domainFolderPaths { self.domainFolderPaths = paths }
+        }
+    }
+
+    /// The user's real home folder; a sandboxed app's NSHomeDirectory() is its container.
+    private static let userHomeDirectory: String = {
+        guard let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir else { return NSHomeDirectory() }
+        return String(cString: directory)
+    }()
 
     private func resolveSystemDomain(for descriptor: DomainDescriptor) async throws -> NSFileProviderDomain {
         let identifier = NSFileProviderDomainIdentifier(descriptor.identifier)
@@ -1502,7 +1544,6 @@ private final class NimbusSyncAppState: ObservableObject {
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case domains
     case general
-    case notifications
     case diagnostics
     case about
 
@@ -1512,21 +1553,49 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .domains: "Domains"
         case .general: "General"
-        case .notifications: "Notifications"
         case .diagnostics: "Diagnostics"
         case .about: "About"
         }
     }
 
+    var subtitle: String {
+        switch self {
+        case .domains: "Cloudreve servers synced to your Finder sidebar"
+        case .general: "Startup, background checks and notifications"
+        case .diagnostics: "Recent activity from NimbusSync and its Finder extension"
+        case .about: "NimbusSync keeps your Cloudreve files available in Finder"
+        }
+    }
+
     var symbol: String {
         switch self {
-        case .domains: "externaldrive"
+        case .domains: "cloud"
         case .general: "gearshape"
-        case .notifications: "bell"
-        case .diagnostics: "stethoscope"
+        case .diagnostics: "waveform.path.ecg"
         case .about: "info.circle"
         }
     }
+
+    /// ⌘1…⌘5 switch pages, as in other Mac settings windows with a sidebar.
+    var shortcut: KeyEquivalent {
+        KeyEquivalent(Character("\((Self.allCases.firstIndex(of: self) ?? 0) + 1)"))
+    }
+}
+
+/// Shared measurements for the Settings window, so every page lines up with the Domains page.
+private enum SettingsLayout {
+    static let sidebarWidth: CGFloat = 228
+    /// Room for the window's traffic lights above the sidebar's brand row.
+    static let titlebarInset: CGFloat = 52
+    static let pageInset: CGFloat = 28
+    static let pageTopInset: CGFloat = 40
+    static let maxContentWidth: CGFloat = 860
+}
+
+/// Where the About page points: the project and the license it ships under (see LICENSE).
+private enum SettingsLinks {
+    static let repository = URL(string: "https://github.com/tiylabs/nimbussync")!
+    static let license = URL(string: "https://github.com/tiylabs/nimbussync/blob/master/LICENSE")!
 }
 
 private struct SettingsView: View {
@@ -1551,19 +1620,23 @@ private struct SettingsView: View {
     let checkProgress: [String: DomainCheckProgress]
     let checkableDomainIdentifiers: Set<String>
     let onCheckNow: (DomainDescriptor) -> Void
+    let lastSyncedAt: [String: Date]
+    let domainFolderPaths: [String: String]
+    let finderIntegration: FinderIntegrationState
+    let onRefreshFinderIntegration: () -> Void
     let recentLogLines: [String]
     let logsDirectoryPath: String?
     let onOpenLogs: () -> Void
-    let onCopyLogsPath: () -> Void
     let onRefresh: () -> Void
-    @State private var selectedSection: SettingsSection? = .domains
+    @State private var selectedSection: SettingsSection = .domains
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var notificationPreferences: NotificationPreferences
     @State private var pendingRemoval: DomainDescriptor?
     @State private var editingExclusionsDomainIdentifier: String?
     @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
+    @AppStorage(AppAppearance.preferenceKey) private var appearance = AppAppearance.system.rawValue
 
-    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onCopyLogsPath: @escaping () -> Void, onRefresh: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
         self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
@@ -1585,27 +1658,21 @@ private struct SettingsView: View {
         self.checkProgress = checkProgress
         self.checkableDomainIdentifiers = checkableDomainIdentifiers
         self.onCheckNow = onCheckNow
+        self.lastSyncedAt = lastSyncedAt
+        self.domainFolderPaths = domainFolderPaths
+        self.finderIntegration = finderIntegration
+        self.onRefreshFinderIntegration = onRefreshFinderIntegration
         self.recentLogLines = recentLogLines
         self.logsDirectoryPath = logsDirectoryPath
         self.onOpenLogs = onOpenLogs
-        self.onCopyLogsPath = onCopyLogsPath
         self.onRefresh = onRefresh
         _notificationPreferences = State(initialValue: notificationPreferences)
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            SettingsSidebar(selectedSection: $selectedSection)
-                .frame(minWidth: 190, idealWidth: 210, maxWidth: 240)
-
-            Divider()
-
-            detailView
-                .id(selectedSection)
-        }
-        .frame(minWidth: 800, idealWidth: 940, minHeight: 560, idealHeight: 640)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .tint(NimbusSyncDesignTokens.brandColor)
+        windowContent
+        .onAppear(perform: onRefreshFinderIntegration)
+        .onChange(of: domains.map(\.identifier)) { _ in onRefreshFinderIntegration() }
         .onChange(of: persistedNotificationPreferences) { value in
             notificationPreferences = value
         }
@@ -1660,46 +1727,54 @@ private struct SettingsView: View {
         }
     }
 
+    /// The sidebar and the selected page, laid out under the transparent title bar.
+    private var windowContent: some View {
+        HStack(alignment: .top, spacing: 0) {
+            SettingsSidebar(
+                selectedSection: $selectedSection,
+                domainCount: domains.count,
+                finderIntegration: finderIntegration,
+                onOpenFileProviderSettings: onOpenFileProviderSettings
+            )
+            .frame(width: SettingsLayout.sidebarWidth)
+
+            Divider()
+
+            detailView
+                .id(selectedSection)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        // Without this SwiftUI turns the title bar opaque again as soon as a scroll view is on
+        // screen, covering the sidebar's top with a separate band.
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .background(SettingsWindowChrome())
+        .frame(minWidth: 820, idealWidth: 960, minHeight: 560, idealHeight: 660)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .tint(NimbusSyncDesignTokens.brandColor)
+    }
+
     @ViewBuilder
     private var detailView: some View {
-        switch selectedSection ?? .domains {
+        switch selectedSection {
         case .domains:
-            SettingsPage(title: "Domains", description: "Manage the Cloudreve locations available in Finder.", symbol: "externaldrive.fill") {
-                Section {
-                    SettingsSummaryStrip(
-                        connectedCount: domains.count,
-                        attentionCount: domains.filter { $0.status.needsAttention }.count
-                    )
-                }
-                Section("Connected domains") {
-                    if domains.isEmpty {
-                        HStack(alignment: .top, spacing: 16) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Label("No domains configured", systemImage: "externaldrive.badge.plus")
-                                    .font(.headline)
-                                Text("Add a Cloudreve domain to make it available in Finder.")
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-
-                            Spacer(minLength: 16)
-
-                            Button(action: onAddDomain) {
-                                Label("Add domain", systemImage: "plus")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+            domainsPage
+        case .general:
+            SettingsPage(section: .general) {
+                Section("Appearance") {
+                    Picker("Theme", selection: Binding(
+                        get: { AppAppearance(rawValue: appearance) ?? .system },
+                        set: { choice in
+                            appearance = choice.rawValue
+                            choice.apply()
                         }
-                        .padding(.vertical, 6)
-                    } else {
-                        ForEach(domains, id: \.identifier) { domain in
-                            domainRow(domain)
+                    )) {
+                        ForEach(AppAppearance.allCases) { choice in
+                            Text(choice.title).tag(choice)
                         }
                     }
+                    .pickerStyle(.segmented)
                 }
-            }
-        case .general:
-            SettingsPage(title: "General", description: "Control how NimbusSync starts and runs in the background.", symbol: "gearshape.fill") {
                 Section("Startup") {
                     Toggle("Launch NimbusSync at login", isOn: Binding(get: { launchAtLogin }, set: { enabled in
                         launchAtLogin = enabled
@@ -1721,54 +1796,33 @@ private struct SettingsView: View {
                 } header: {
                     Text("Full check")
                 } footer: {
-                    Text("Live updates keep your domains current. A full check compares every file with the server to catch anything live updates missed, and uses more network and battery. It runs at most this often while connected, counted from the last check whether or not it succeeded. To check a domain right away, choose Check Now from its menu.")
+                    Text("Live updates keep your domains current. A full check compares every file with the server to catch anything live updates missed, and uses more network and battery. It runs at most this often while connected, counted from the last check whether or not it succeeded. To check a domain right away, choose Check Now from its More menu on the Domains page.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            }
-        case .notifications:
-            SettingsPage(title: "Notifications", description: "Choose which sync events should notify you.", symbol: "bell.fill") {
-                Section("Delivery") {
+                Section {
                     Toggle("Allow notifications", isOn: notificationBinding(\.enabled))
+                    Group {
+                        Toggle("Authorization required", isOn: notificationBinding(\.authExpired))
+                        Toggle("Conflicts", isOn: notificationBinding(\.conflicts))
+                        Toggle("Permanent failures", isOn: notificationBinding(\.permanentFailures))
+                    }
+                    .padding(.leading, NimbusSyncDesignTokens.spacing16)
+                    .disabled(!notificationPreferences.enabled)
+                } header: {
+                    Text("Notifications")
+                } footer: {
                     Text("Notifications are delivered by macOS and can be adjusted in System Settings.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section("Alert types") {
-                    Toggle("Authorization required", isOn: notificationBinding(\.authExpired))
-                    Toggle("Conflicts", isOn: notificationBinding(\.conflicts))
-                    Toggle("Permanent failures", isOn: notificationBinding(\.permanentFailures))
-                }
-                .disabled(!notificationPreferences.enabled)
             }
             .onAppear { onNotificationsChanged(notificationPreferences) }
         case .diagnostics:
-            SettingsPage(title: "Diagnostics", description: "Review the current local integration state.", symbol: "stethoscope") {
-                Section("Status") {
-                    SettingsStatusRow(title: "Configured domains", value: "\(domains.count)", symbol: "externaldrive")
-                    SettingsStatusRow(title: "Application mode", value: "Menu bar", symbol: "menubar.rectangle")
-                    SettingsStatusRow(title: "File Provider", value: "Managed by macOS", symbol: "checkmark.circle")
-                }
+            SettingsPage(section: .diagnostics) {
                 Section {
-                    if domains.isEmpty {
-                        Text("No domains configured.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(domains, id: \.identifier) { domain in
-                            ServerConnectionRow(displayName: domain.displayName, origin: domain.scope.origin, connection: connection(for: domain))
-                        }
-                    }
-                } header: {
-                    Text("Server connections")
-                } footer: {
-                    Text("Live updates from each Cloudreve server. While disconnected, NimbusSync reconnects automatically and checks for changes once the connection is back.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Section {
-                    LogTextView(lines: recentLogLines)
+                    LogTextView(lines: recentLogLines, height: 400)
                     logLocationRow
                 } header: {
                     HStack {
@@ -1779,18 +1833,13 @@ private struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section("Support") {
-                    Text("Unsupported capabilities remain read-only until verified for this server and storage provider.")
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .onAppear(perform: onRefresh)
         case .about:
-            SettingsPage(title: "About", description: "NimbusSync keeps your Cloudreve files available in Finder.", symbol: "info.circle.fill") {
+            SettingsPage(section: .about) {
                 Section {
                     HStack(spacing: 12) {
-                        AppIconView(size: 40)
+                        AppIconView(size: 48)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("NimbusSync").font(.headline)
                             Text("Cloudreve for macOS").foregroundStyle(.secondary)
@@ -1801,83 +1850,93 @@ private struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Section("Build") {
+                Section {
                     LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown")
+                    LabeledContent("License") {
+                        Link("Apache License 2.0", destination: SettingsLinks.license)
+                            .help(SettingsLinks.license.absoluteString)
+                    }
+                    LabeledContent("GitHub") {
+                        Link("tiylabs/nimbussync", destination: SettingsLinks.repository)
+                            .help(SettingsLinks.repository.absoluteString)
+                    }
                 }
             }
         }
     }
 
-    @ViewBuilder
-    private func domainRow(_ domain: DomainDescriptor) -> some View {
-        HStack(spacing: 12) {
-            DomainIconView(size: 36)
+    // MARK: Domains page
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(domain.displayName)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                    ServerConnectionIndicator(connection: connection(for: domain))
-                        .fixedSize()
-                    Text(domain.scope.origin)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(domain.scope.origin)
+    private var domainsPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsPageHeader(section: .domains) {
+                Button(action: onAddDomain) {
+                    Label("Add Domain", systemImage: "plus")
+                        .font(.body.weight(.semibold))
+                        .padding(.horizontal, 4)
                 }
-                if let progress = DomainCheckProgress.visible(for: domain, in: checkProgress) {
-                    DomainCheckProgressView(progress: progress)
-                        .frame(maxWidth: 320, alignment: .leading)
-                        .padding(.top, 4)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut("n", modifiers: .command)
+                .help("Add a Cloudreve domain (⌘N)")
+            } below: {
+                if !domains.isEmpty {
+                    SettingsDomainsSummaryLine(summary: SettingsDomainsSummary(domains: domains))
+                        .padding(.top, NimbusSyncDesignTokens.spacing12)
                 }
             }
-            Spacer(minLength: 12)
-            StatusBadge(status: domain.status)
-            if removingDomainIdentifier == domain.identifier {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 28, height: 28)
-                    .accessibilityLabel(Text("Removing \(domain.displayName)"))
-            } else {
-                Button { onOpenFinder(domain) } label: {
-                    Label("Open in Finder", systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(removingDomainIdentifier != nil)
 
-                Menu {
-                    Button { onCheckNow(domain) } label: {
-                        Label("Check Now", systemImage: "arrow.triangle.2.circlepath")
+            ScrollView {
+                // Relative times such as "Last synced 2 min. ago" age while the window stays open.
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    VStack(alignment: .leading, spacing: 14) {
+                        if domains.isEmpty {
+                            SettingsDomainsEmptyState(onAddDomain: onAddDomain)
+                        } else {
+                            ForEach(domains, id: \.identifier) { domain in
+                                domainCard(domain)
+                            }
+                        }
                     }
-                    .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
-                    Button { onOpenWeb(domain) } label: {
-                        Label("Open Cloudreve", systemImage: "safari")
-                    }
-                    Button { onReauthorize(domain) } label: {
-                        Label("Reauthorize", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    Button { editingExclusionsDomainIdentifier = domain.identifier } label: {
-                        Label("Edit exclusions", systemImage: "line.3.horizontal.decrease.circle")
-                    }
-                    Divider()
-                    Button(role: .destructive) { pendingRemoval = domain } label: {
-                        Label(domain.status == .preservedRemoval ? "Finish removal" : "Remove domain", systemImage: "trash")
-                    }
-                    .disabled(removingDomainIdentifier != nil)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
+                    .frame(maxWidth: SettingsLayout.maxContentWidth, alignment: .leading)
+                    .padding(.horizontal, SettingsLayout.pageInset)
+                    .padding(.top, 4)
+                    .padding(.bottom, SettingsLayout.pageInset)
                 }
-                .menuStyle(.borderlessButton)
-                .accessibilityLabel(Text("More actions for \(domain.displayName)"))
-                .help("More actions")
             }
         }
-        .padding(.vertical, 6)
+    }
+
+    private func domainCard(_ domain: DomainDescriptor) -> some View {
+        SettingsDomainCard(
+            domain: domain,
+            connection: connection(for: domain),
+            progress: DomainCheckProgress.visible(for: domain, in: checkProgress),
+            localPath: domainFolderPaths[domain.identifier],
+            lastSyncedAt: lastSyncedAt[domain.identifier],
+            isRemoving: removingDomainIdentifier == domain.identifier,
+            actionsDisabled: removingDomainIdentifier != nil,
+            onOpenFinder: { onOpenFinder(domain) },
+            onOpenWeb: { onOpenWeb(domain) }
+        ) {
+            Button { onOpenWeb(domain) } label: {
+                Label("Open Cloudreve", systemImage: "safari")
+            }
+            Button { onReauthorize(domain) } label: {
+                Label("Reauthorize", systemImage: "person.crop.circle.badge.checkmark")
+            }
+            Button { onCheckNow(domain) } label: {
+                Label("Check Now", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
+            Button { editingExclusionsDomainIdentifier = domain.identifier } label: {
+                Label("Edit Exclusions…", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            Divider()
+            Button(role: .destructive) { pendingRemoval = domain } label: {
+                Label(domain.status == .preservedRemoval ? "Finish Removal…" : "Remove Domain…", systemImage: "trash")
+            }
+        }
     }
 
     private func connection(for domain: DomainDescriptor) -> ServerConnectionDisplay {
@@ -1886,7 +1945,7 @@ private struct SettingsView: View {
 
     private var logLocationRow: some View {
         HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing8) {
-            Image(systemName: "folder")
+            Image(systemName: "doc.text")
                 .foregroundStyle(NimbusSyncDesignTokens.brandColor)
                 .frame(width: 20)
                 .accessibilityHidden(true)
@@ -1901,18 +1960,12 @@ private struct SettingsView: View {
                     .help(logsDirectoryPath ?? "")
             }
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-            Button(action: onCopyLogsPath) {
-                Image(systemName: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .help("Copy path")
-            .accessibilityLabel(Text("Copy log folder path"))
-            .disabled(logsDirectoryPath == nil)
             Button(action: onOpenLogs) {
-                Label("Show in Finder", systemImage: "arrow.up.forward.app")
+                Image(systemName: "folder")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(SettingsIconButtonStyle(size: 30))
+            .help("Show in Finder")
+            .accessibilityLabel(Text("Show log files in Finder"))
             .disabled(logsDirectoryPath == nil)
         }
     }
@@ -1928,163 +1981,198 @@ private struct SettingsView: View {
     }
 }
 
-private struct SettingsSidebar: View {
-    @Binding var selectedSection: SettingsSection?
+/// Lets the content run under a transparent title bar, so the sidebar's material reaches the top
+/// edge and the traffic lights sit on it. The window keeps its title for Window menus,
+/// accessibility and `focusWindow(titled:)`; it is only not drawn.
+///
+/// SwiftUI's Settings scene shows the title again on every update that touches the window (a
+/// page switch, a refreshed snapshot), so the hidden title and transparent bar are held in place
+/// by observing them. The reset happens inside the same change, before anything is drawn, so
+/// the title never flashes. `toolbar(removing: .title)` would say this directly but needs macOS 15.
+private struct SettingsWindowChrome: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { WindowObserver() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                AppIconView(size: 30)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("NimbusSync")
-                        .font(.headline)
-                    Text("Settings")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
-            .padding(.top, NimbusSyncDesignTokens.spacing16)
-            .padding(.bottom, NimbusSyncDesignTokens.spacing8)
+    private final class WindowObserver: NSView {
+        private var observations: [NSKeyValueObservation] = []
 
-            List(selection: $selectedSection) {
-                ForEach(SettingsSection.allCases) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-
-            Divider()
-            HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                Image(systemName: "externaldrive.badge.checkmark")
-                    .foregroundStyle(NimbusSyncDesignTokens.brandColor)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Finder integration")
-                        .font(.caption.weight(.medium))
-                    Text("Managed by macOS")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
-            .padding(.vertical, NimbusSyncDesignTokens.spacing12)
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observations.removeAll()
+            guard let window else { return }
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.titlebarSeparatorStyle = .none
+            window.toolbar = nil
+            observations = [
+                window.observe(\.titleVisibility) { window, _ in
+                    if window.titleVisibility != .hidden { window.titleVisibility = .hidden }
+                },
+                window.observe(\.titlebarAppearsTransparent) { window, _ in
+                    if !window.titlebarAppearsTransparent { window.titlebarAppearsTransparent = true }
+                },
+            ]
         }
     }
 }
 
+private struct SettingsSidebar: View {
+    @Binding var selectedSection: SettingsSection
+    let domainCount: Int
+    let finderIntegration: FinderIntegrationState
+    let onOpenFileProviderSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                AppIconView(size: 36)
+                Text("NimbusSync")
+                    .font(.system(size: 18, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, SettingsLayout.titlebarInset)
+            .padding(.bottom, 20)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            VStack(spacing: 2) {
+                ForEach(SettingsSection.allCases) { section in
+                    SettingsSidebarItem(
+                        section: section,
+                        isSelected: selectedSection == section,
+                        badge: section == .domains && domainCount > 0 ? domainCount : nil
+                    ) {
+                        selectedSection = section
+                    }
+                    .keyboardShortcut(section.shortcut, modifiers: .command)
+                }
+            }
+            .padding(.horizontal, 10)
+
+            Spacer(minLength: NimbusSyncDesignTokens.spacing16)
+
+            Divider()
+                .padding(.horizontal, 18)
+            FinderIntegrationFooter(state: finderIntegration, onOpenSettings: onOpenFileProviderSettings)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(SettingsSidebarBackground())
+    }
+}
+
+private struct SettingsSidebarItem: View {
+    let section: SettingsSection
+    let isSelected: Bool
+    let badge: Int?
+    let action: () -> Void
+    @State private var isHovered = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 15, weight: .regular))
+                    .foregroundStyle(isSelected ? NimbusSyncDesignTokens.brandColor : Color.primary.opacity(0.75))
+                    .frame(width: 22)
+                    .accessibilityHidden(true)
+                Text(section.title)
+                    .font(.system(size: 14, weight: isSelected ? .medium : .regular))
+                    .foregroundStyle(Color.primary)
+                Spacer(minLength: 4)
+                if let badge {
+                    SidebarCountBadge(count: badge)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(background)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(Text(badge.map { "\(section.title), \($0)" } ?? section.title))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .help("\(section.title) (⌘\(String(section.shortcut.character)))")
+    }
+
+    private var background: Color {
+        if isSelected { return NimbusSyncDesignTokens.settingsSidebarSelection.opacity(colorScheme == .dark ? 0.26 : 0.2) }
+        return isHovered ? Color.primary.opacity(0.05) : .clear
+    }
+}
+
+/// A page's large title and one-line description, with an optional action on the right and
+/// optional content underneath. Every Settings page uses it, so they share one rhythm.
+private struct SettingsPageHeader<Trailing: View, Below: View>: View {
+    let section: SettingsSection
+    @ViewBuilder let trailing: () -> Trailing
+    @ViewBuilder let below: () -> Below
+
+    init(section: SettingsSection, @ViewBuilder trailing: @escaping () -> Trailing, @ViewBuilder below: @escaping () -> Below) {
+        self.section = section
+        self.trailing = trailing
+        self.below = below
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(section.title)
+                        .font(.system(size: 28, weight: .bold))
+                        .accessibilityAddTraits(.isHeader)
+                    Text(section.subtitle)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: NimbusSyncDesignTokens.spacing16)
+                trailing()
+            }
+            below()
+        }
+        .frame(maxWidth: SettingsLayout.maxContentWidth, alignment: .leading)
+        .padding(.horizontal, SettingsLayout.pageInset)
+        .padding(.top, SettingsLayout.pageTopInset)
+        .padding(.bottom, NimbusSyncDesignTokens.spacing16)
+    }
+}
+
+extension SettingsPageHeader where Trailing == EmptyView, Below == EmptyView {
+    init(section: SettingsSection) {
+        self.init(section: section, trailing: { EmptyView() }, below: { EmptyView() })
+    }
+}
+
 private struct SettingsPage<Content: View>: View {
-    let title: String
-    let description: String
-    let symbol: String
+    let section: SettingsSection
     @ViewBuilder let content: () -> Content
 
-    init(title: String, description: String, symbol: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.description = description
-        self.symbol = symbol
+    init(section: SettingsSection, @ViewBuilder content: @escaping () -> Content) {
+        self.section = section
         self.content = content
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: NimbusSyncDesignTokens.spacing12) {
-                Image(systemName: symbol)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(NimbusSyncDesignTokens.brandColor)
-                    .frame(width: 40, height: 40)
-                    .background(NimbusSyncDesignTokens.brandColor.opacity(0.12), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
-                    .accessibilityHidden(true)
+            SettingsPageHeader(section: section)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title2.weight(.semibold))
-                    Text(description)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .padding(.horizontal, 28)
-            .padding(.top, 24)
-            .padding(.bottom, 16)
-
-            Divider()
-
+            // The grouped form insets its sections by about 20 pt; this brings them in line with
+            // the header's 28 pt.
             Form(content: content)
                 .formStyle(.grouped)
                 .scrollContentBackground(.hidden)
-                .frame(maxWidth: .infinity, minHeight: 160, alignment: .topLeading)
+                .padding(.horizontal, SettingsLayout.pageInset - 20)
+                .frame(maxWidth: SettingsLayout.maxContentWidth + 2 * (SettingsLayout.pageInset - 20), minHeight: 160, alignment: .topLeading)
         }
-        .frame(maxWidth: 820, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-private struct SettingsSummaryStrip: View {
-    let connectedCount: Int
-    let attentionCount: Int
-
-    var body: some View {
-        HStack(spacing: 0) {
-            SettingsMetric(value: "\(connectedCount)", label: "Connected")
-            Divider()
-                .frame(height: 30)
-            SettingsMetric(value: "\(attentionCount)", label: "Needs attention", tint: attentionCount == 0 ? .green : .orange)
-        }
-        .padding(.vertical, 10)
-        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct SettingsMetric: View {
-    let value: String
-    let label: String
-    var tint: Color = .primary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value)
-                .font(.title3.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tint)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-    }
-}
-
-private struct SettingsStatusRow: View {
-    let title: String
-    let value: String
-    let symbol: String
-
-    var body: some View {
-        HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-            Image(systemName: symbol)
-                .foregroundStyle(NimbusSyncDesignTokens.brandColor)
-                .frame(width: 20)
-                .accessibilityHidden(true)
-            Text(title)
-            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-            Text(value)
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private extension DomainStatus {
-    var needsAttention: Bool {
-        switch self {
-        case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired, .preservedRemoval:
-            true
-        default:
-            false
-        }
     }
 }

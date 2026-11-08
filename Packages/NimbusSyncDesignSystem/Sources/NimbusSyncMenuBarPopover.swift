@@ -641,6 +641,7 @@ struct PopoverSegmentedControl<Value: Hashable>: View {
 /// A slim determinate bar in the brand colour.
 struct PopoverProgressBar: View {
     let fraction: Double
+    var height: CGFloat = 5
 
     var body: some View {
         GeometryReader { proxy in
@@ -648,10 +649,10 @@ struct PopoverProgressBar: View {
                 Capsule().fill(Color.primary.opacity(0.1))
                 Capsule()
                     .fill(NimbusSyncDesignTokens.brandColor)
-                    .frame(width: max(5, proxy.size.width * min(1, max(0, fraction))))
+                    .frame(width: max(height, proxy.size.width * min(1, max(0, fraction))))
             }
         }
-        .frame(height: 5)
+        .frame(height: height)
         .accessibilityHidden(true)
     }
 }

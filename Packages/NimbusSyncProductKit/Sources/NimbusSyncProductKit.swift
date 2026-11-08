@@ -80,7 +80,16 @@ public struct ProductSnapshot: Equatable, Sendable {
     public var exclusionRules: [String: String]
     /// Full-check progress keyed by Domain identifier, only for Domains currently checking.
     public var checkProgress: [String: DomainCheckProgress]
-    public init(domains: [DomainDescriptor] = [], tasks: [ProductTask] = [], conflicts: [ProductConflict] = [], metrics: ConsistencyMetrics = ConsistencyMetrics(), notificationPreferences: NotificationPreferences = NotificationPreferences(), exclusionRules: [String: String] = [:], checkProgress: [String: DomainCheckProgress] = [:]) { self.domains = domains; self.tasks = tasks; self.conflicts = conflicts; self.metrics = metrics; self.notificationPreferences = notificationPreferences; self.exclusionRules = exclusionRules; self.checkProgress = checkProgress }
+    /// When each Domain last took in a change, keyed by Domain identifier: the newest of a live
+    /// update, a finished full check and a finished transfer. Domains that never synced are absent.
+    public var lastSyncedAt: [String: Date]
+    public init(domains: [DomainDescriptor] = [], tasks: [ProductTask] = [], conflicts: [ProductConflict] = [], metrics: ConsistencyMetrics = ConsistencyMetrics(), notificationPreferences: NotificationPreferences = NotificationPreferences(), exclusionRules: [String: String] = [:], checkProgress: [String: DomainCheckProgress] = [:], lastSyncedAt: [String: Date] = [:]) { self.domains = domains; self.tasks = tasks; self.conflicts = conflicts; self.metrics = metrics; self.notificationPreferences = notificationPreferences; self.exclusionRules = exclusionRules; self.checkProgress = checkProgress; self.lastSyncedAt = lastSyncedAt }
+
+    /// The newest of the given moments, or nil when there are none.
+    public static func lastSynced(eventAt: Date?, reconcileAt: Date?, tasks: [ProductTask]) -> Date? {
+        let transferredAt = tasks.filter { $0.state == .succeeded }.map(\.updatedAt).max()
+        return [eventAt, reconcileAt, transferredAt].compactMap { $0 }.max()
+    }
     public var highestStatus: DomainStatus {
         domains.map(\.status).sorted { $0.priority > $1.priority }.first ?? .initializing
     }
@@ -127,6 +136,7 @@ public actor ProductStore {
         var conflicts: [ProductConflict] = []
         var exclusionRules: [String: String] = [:]
         var checkProgress: [String: DomainCheckProgress] = [:]
+        var lastSyncedAt: [String: Date] = [:]
         for domain in domains {
             let domainStore: SQLiteStateStore?
             if let storeFactory { domainStore = try? storeFactory.domainStore(identifier: domain.identifier) } else { domainStore = nil }
@@ -190,6 +200,10 @@ public actor ProductStore {
                     updatedAt: transfer.updatedAt
                 )
             })
+            let syncState = try? domainStore?.syncState()
+            if let date = ProductSnapshot.lastSynced(eventAt: syncState?.lastEventAt, reconcileAt: syncState?.lastReconcileAt, tasks: tasks.filter { $0.domainIdentifier == domain.identifier }) {
+                lastSyncedAt[domain.identifier] = date
+            }
             let storedConflicts: [ConflictProjection]
             if let domainStore { storedConflicts = (try? domainStore.pendingConflicts(limit: 100)) ?? [] } else { storedConflicts = [] }
             conflicts.append(contentsOf: storedConflicts.map { conflict in
@@ -201,7 +215,7 @@ public actor ProductStore {
             })
         }
         let preferences = userDefaults.data(forKey: notificationKey).flatMap { try? JSONDecoder().decode(NotificationPreferences.self, from: $0) } ?? NotificationPreferences()
-        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules, checkProgress: checkProgress)
+        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules, checkProgress: checkProgress, lastSyncedAt: lastSyncedAt)
     }
 
     public func saveNotificationPreferences(_ preferences: NotificationPreferences) throws {
