@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import CloudreveDomainKit
 
 public struct MenuBarPopoverView: View {
@@ -19,11 +20,22 @@ public struct MenuBarPopoverView: View {
     /// Domains that can start a full check now; nil hides the action.
     public let checkableDomainIdentifiers: Set<String>
     public let onCheckDomain: ((DomainDescriptor) -> Void)?
+    /// nil hides the Quit button.
+    public let onQuit: (() -> Void)?
     /// The scrolling content's natural height. The menu bar window sizes itself to the smallest
     /// height the popover accepts, and a flexible ScrollView accepts zero, so the scroll area
     /// is pinned to this measured height instead (capped, and scrolling beyond the cap).
     @State private var contentHeight: CGFloat = 0
-    static let maximumContentHeight: CGFloat = 520
+    /// nil follows the content: Issues while there are any, All otherwise.
+    @State private var activityFilter: ActivityFilter?
+    @State private var showsAllActivity = false
+    static let maximumContentHeight: CGFloat = 500
+    /// Activity rows shown before "Show N more".
+    static let activityRowLimit = 5
+
+    enum ActivityFilter: Hashable {
+        case issues, all
+    }
 
     public init(
         domains: [DomainDescriptor],
@@ -39,7 +51,8 @@ public struct MenuBarPopoverView: View {
         connections: [String: ServerConnectionDisplay] = [:],
         checkProgress: [String: DomainCheckProgress] = [:],
         checkableDomainIdentifiers: Set<String> = [],
-        onCheckDomain: ((DomainDescriptor) -> Void)? = nil
+        onCheckDomain: ((DomainDescriptor) -> Void)? = nil,
+        onQuit: (() -> Void)? = nil
     ) {
         self.domains = domains
         self.tasks = tasks
@@ -55,15 +68,21 @@ public struct MenuBarPopoverView: View {
         self.checkProgress = checkProgress
         self.checkableDomainIdentifiers = checkableDomainIdentifiers
         self.onCheckDomain = onCheckDomain
+        self.onQuit = onQuit
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing16) {
-                    statusOverview
+                    if !issues.isEmpty {
+                        issueBanner
+                    }
+
+                    if hasActionableConflicts {
+                        conflictBanner
+                    }
 
                     if domains.isEmpty {
                         emptyState
@@ -71,20 +90,13 @@ public struct MenuBarPopoverView: View {
                         domainsSection
                     }
 
-                    if hasActionableConflicts {
-                        conflictCallout
-                    }
-
-                    if !tasks.isEmpty {
-                        taskSection(title: "Active tasks", tasks: tasks)
-                    }
-
-                    if !recentTasks.isEmpty {
-                        taskSection(title: "Recent activity", tasks: recentTasks)
+                    if !allActivity.isEmpty {
+                        activitySection
                     }
                 }
                 .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
-                .padding(.vertical, NimbusSyncDesignTokens.spacing16)
+                .padding(.top, NimbusSyncDesignTokens.spacing4)
+                .padding(.bottom, NimbusSyncDesignTokens.spacing16)
                 .onGeometryChange(for: CGFloat.self) { proxy in
                     proxy.size.height
                 } action: { height in
@@ -92,254 +104,657 @@ public struct MenuBarPopoverView: View {
                 }
             }
             .frame(height: min(contentHeight, Self.maximumContentHeight))
+
+            Divider()
+                .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
+            footer
         }
         .frame(minWidth: 380, idealWidth: NimbusSyncDesignTokens.popoverWidth, maxWidth: 420)
         .tint(NimbusSyncDesignTokens.brandColor)
     }
 
+    // MARK: Header
+
     private var header: some View {
         HStack(spacing: NimbusSyncDesignTokens.spacing12) {
-            DomainIconView(iconURL: nil, size: 34)
+            AppIconView(size: 44)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("NimbusSync")
-                    .font(.headline)
-                Text("Cloudreve for Finder")
-                    .font(.caption)
+                    .font(.title3.weight(.semibold))
+                Text(summary.subtitle)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
+            .accessibilityElement(children: .combine)
 
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
 
-            HStack(spacing: NimbusSyncDesignTokens.spacing4) {
-                settingsButton
-
-                Button(action: onAddDomain) {
-                    Image(systemName: "plus")
-                        .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(Text("Add domain"))
-                .help("Add domain")
+            settingsLink(help: "Settings") {
+                Image(systemName: "gearshape")
             }
+            .buttonStyle(PopoverIconButtonStyle(size: 30))
+            .accessibilityLabel(Text("Settings"))
         }
         .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
-        .padding(.vertical, NimbusSyncDesignTokens.spacing12)
+        .padding(.top, NimbusSyncDesignTokens.spacing16)
+        .padding(.bottom, NimbusSyncDesignTokens.spacing12)
     }
 
-    @ViewBuilder
-    private var settingsButton: some View {
-        if #available(macOS 14.0, *) {
-            SettingsLink {
-                settingsButtonLabel
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(Text("Settings"))
-            .help("Settings")
-        } else {
-            Button(action: onOpenSettings) {
-                settingsButtonLabel
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(Text("Settings"))
-            .help("Settings")
+    // MARK: Banners
+
+    private var issueBanner: some View {
+        let retryable = issues.filter(\.canRetry)
+        return PopoverBanner(
+            symbol: "exclamationmark.triangle.fill",
+            title: Self.issueTitle(count: issues.count),
+            detail: Self.issueDetail(issues),
+            actionTitle: retryable.isEmpty ? nil : (retryable.count == 1 ? "Retry" : "Retry All"),
+            action: { retryable.forEach { onRetryTask($0.id) } }
+        )
+    }
+
+    private var conflictBanner: some View {
+        PopoverBanner(
+            symbol: "exclamationmark.2",
+            title: "Conflicts need attention",
+            detail: "Review the latest local and remote versions.",
+            actionTitle: "Review",
+            action: onOpenConflicts
+        )
+    }
+
+    static func issueTitle(count: Int) -> String {
+        "\(count) file\(count == 1 ? "" : "s") couldn't sync"
+    }
+
+    /// "data@cloud · Network error" when every issue shares a Domain and a reason.
+    static func issueDetail(_ issues: [TaskDisplay]) -> String {
+        let domainNames = Set(issues.compactMap(\.domainName))
+        let reasons = Set(issues.map(\.reason).filter { !$0.isEmpty })
+        let domainPart: String? = switch domainNames.count {
+        case 0: nil
+        case 1: domainNames.first
+        default: "\(domainNames.count) domains"
         }
+        let reasonPart: String? = reasons.count == 1 ? reasons.first : (reasons.isEmpty ? nil : "Several reasons")
+        return [domainPart, reasonPart].compactMap { $0 }.joined(separator: " · ")
     }
 
-    private var settingsButtonLabel: some View {
-        Image(systemName: "gearshape")
-            .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
-    }
-
-    private var statusOverview: some View {
-        HStack(spacing: NimbusSyncDesignTokens.spacing12) {
-            Image(systemName: overallStatus.symbol)
-                .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(overallStatus.tint)
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(statusSummary)
-                    .font(.subheadline.weight(.semibold))
-                Text(statusDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-            if !domains.isEmpty {
-                Text("\(domains.count)")
-                    .font(.title3.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(overallStatus.tint)
-                    .accessibilityLabel(Text("\(domains.count) connected domains"))
-            }
-        }
-        .padding(NimbusSyncDesignTokens.spacing12)
-        .background(overallStatus.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
-        .accessibilityElement(children: .combine)
-    }
+    // MARK: Domains
 
     private var domainsSection: some View {
         VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
-            sectionHeading("Domains", count: domains.count)
-            ForEach(domains, id: \.identifier) { domain in
-                domainRow(domain)
+            sectionHeading("Domains") {
+                Text("\(domains.count)")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(Text("\(domains.count) domains"))
+            }
+            PopoverCard {
+                ForEach(domains, id: \.identifier) { domain in
+                    domainRow(domain)
+                    if domain.identifier != domains.last?.identifier {
+                        Divider().padding(.leading, NimbusSyncDesignTokens.spacing12)
+                    }
+                }
             }
         }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: NimbusSyncDesignTokens.spacing8) {
-            Image(systemName: "externaldrive.badge.plus")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(NimbusSyncDesignTokens.brandColor)
-                .accessibilityHidden(true)
-            Text("Connect your first domain")
-                .font(.headline)
-            Text("Add a Cloudreve domain to make it available in Finder.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(action: onAddDomain) {
-                Label("Add domain", systemImage: "plus")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, NimbusSyncDesignTokens.spacing16)
     }
 
     private func domainRow(_ domain: DomainDescriptor) -> some View {
-        HStack(alignment: .top, spacing: NimbusSyncDesignTokens.spacing8) {
-            DomainIconView(iconURL: domain.iconURL, size: 30)
+        let progress = DomainCheckProgress.visible(for: domain, in: checkProgress)
+        return VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
+            HStack(spacing: NimbusSyncDesignTokens.spacing12) {
+                DomainIconView(size: 34)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                    Text(domain.displayName)
-                        .font(.subheadline.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: NimbusSyncDesignTokens.spacing4)
-                    StatusBadge(status: domain.status, compact: true)
-                }
-                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                    if let connection = connections[domain.identifier] {
-                        ServerConnectionIndicator(connection: connection)
-                            .fixedSize()
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                        Text(domain.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        StatusBadge(status: domain.status, compact: true)
                     }
-                    Text(Self.host(of: domain))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(domain.scope.origin)
+                    if progress == nil {
+                        HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                            if let connection = connections[domain.identifier] {
+                                ServerConnectionIndicator(connection: connection)
+                                    .fixedSize()
+                            }
+                            Text(Self.host(of: domain))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(domain.scope.origin)
+                        }
+                    }
                 }
-                if let progress = DomainCheckProgress.visible(for: domain, in: checkProgress) {
-                    DomainCheckProgressView(progress: progress)
-                        .padding(.top, 2)
+
+                Spacer(minLength: NimbusSyncDesignTokens.spacing4)
+
+                HStack(spacing: 6) {
+                    Button(action: { onOpenDomain(domain) }) {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(PopoverIconButtonStyle())
+                    .accessibilityLabel(Text("Open \(domain.displayName) in Finder"))
+                    .help("Open in Finder")
+
+                    if let onCheckDomain {
+                        Button(action: { onCheckDomain(domain) }) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(PopoverIconButtonStyle())
+                        .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
+                        .accessibilityLabel(Text("Check \(domain.displayName) now"))
+                        .help("Check Now: compare every file with the server")
+                    }
                 }
             }
 
-            if let onCheckDomain {
-                Button(action: { onCheckDomain(domain) }) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
-                .accessibilityLabel(Text("Check \(domain.displayName) now"))
-                .help("Check Now: compare every file with the server")
+            if let progress {
+                PopoverCheckProgressView(progress: progress)
             }
-
-            Button(action: { onOpenDomain(domain) }) {
-                Image(systemName: "folder")
-                    .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .accessibilityLabel(Text("Open \(domain.displayName) in Finder"))
-            .help("Open in Finder")
         }
-        .padding(NimbusSyncDesignTokens.spacing8)
-        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
+        .padding(NimbusSyncDesignTokens.spacing12)
     }
 
     static func host(of domain: DomainDescriptor) -> String {
         URL(string: domain.scope.origin)?.host ?? domain.scope.origin
     }
 
-    private var conflictCallout: some View {
-        Button(action: onOpenConflicts) {
-            HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+    private var emptyState: some View {
+        PopoverCard {
+            VStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                Image(systemName: "externaldrive.badge.plus")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(NimbusSyncDesignTokens.brandColor)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Conflicts need attention")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Review the latest local and remote versions.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                Text("Connect your first domain")
+                    .font(.headline)
+                Text("Add a Cloudreve domain to make it available in Finder.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: onAddDomain) {
+                    Label("Add Domain", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
-            .padding(NimbusSyncDesignTokens.spacing12)
-            .background(Color.orange.opacity(0.11), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, NimbusSyncDesignTokens.spacing20)
+            .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text("Review conflicts"))
     }
 
-    private func taskSection(title: String, tasks: [TaskDisplay]) -> some View {
-        VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
-            sectionHeading(title, count: tasks.count)
-            ForEach(tasks) { task in
-                TaskProgressRow(
-                    title: task.title,
-                    progress: task.progress,
-                    detail: task.detail,
-                    state: task.state,
-                    date: task.date,
-                    onCancel: { onCancelTask(task.id) },
-                    onRetry: { onRetryTask(task.id) }
+    // MARK: Activity
+
+    /// Active tasks first, then the rest, newest first.
+    private var allActivity: [TaskDisplay] {
+        tasks + recentTasks.filter { recent in !tasks.contains { $0.id == recent.id } }
+    }
+
+    private var issues: [TaskDisplay] {
+        allActivity.filter(\.isIssue)
+    }
+
+    private var effectiveFilter: ActivityFilter {
+        activityFilter ?? (issues.isEmpty ? .all : .issues)
+    }
+
+    private var activitySection: some View {
+        let rows = effectiveFilter == .issues ? issues : allActivity
+        let visible = showsAllActivity ? rows : Array(rows.prefix(Self.activityRowLimit))
+        let hidden = rows.count - visible.count
+        return VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
+            sectionHeading("Activity") {
+                PopoverSegmentedControl(
+                    selection: Binding(get: { effectiveFilter }, set: { activityFilter = $0 }),
+                    segments: [
+                        (ActivityFilter.issues, issues.isEmpty ? "Issues" : "Issues \(issues.count)"),
+                        (ActivityFilter.all, "All"),
+                    ]
                 )
-                if task.id != tasks.last?.id {
-                    Divider()
+            }
+
+            PopoverCard {
+                if rows.isEmpty {
+                    HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("No issues")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(NimbusSyncDesignTokens.spacing12)
+                } else {
+                    ForEach(Self.groupedByDay(visible), id: \.title) { group in
+                        dayHeader(group.title)
+                        ForEach(group.tasks) { task in
+                            activityRow(task)
+                            if task.id != group.tasks.last?.id {
+                                Divider().padding(.leading, 54)
+                            }
+                        }
+                    }
+                    if hidden > 0 || showsAllActivity && rows.count > Self.activityRowLimit {
+                        Divider()
+                        Button(hidden > 0 ? "Show \(hidden) more" : "Show less") {
+                            showsAllActivity.toggle()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, NimbusSyncDesignTokens.spacing8)
+                    }
                 }
             }
         }
     }
 
-    private func sectionHeading(_ title: String, count: Int) -> some View {
+    private func dayHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, NimbusSyncDesignTokens.spacing12)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.04))
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func activityRow(_ task: TaskDisplay) -> some View {
+        HStack(spacing: NimbusSyncDesignTokens.spacing12) {
+            FileKindTile(fileName: task.title, size: 30)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(task.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(task.title)
+                Text(task.activityCaption())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(task.date.map { $0.formatted(date: .complete, time: .standard) } ?? "")
+                if let progress = task.progress, task.canCancel {
+                    PopoverProgressBar(fraction: progress)
+                        .padding(.top, 2)
+                        .accessibilityValue(Text("\(Int(progress * 100)) percent"))
+                }
+            }
+
+            Spacer(minLength: NimbusSyncDesignTokens.spacing4)
+
+            if task.canRetry {
+                Button(action: { onRetryTask(task.id) }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(PopoverIconButtonStyle())
+                .help("Retry")
+                .accessibilityLabel(Text("Retry \(task.title)"))
+            } else if task.canCancel {
+                Button(action: { onCancelTask(task.id) }) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(PopoverIconButtonStyle())
+                .help("Cancel")
+                .accessibilityLabel(Text("Cancel \(task.title)"))
+            } else if task.state.lowercased() == "succeeded" {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityLabel(Text("Synced"))
+            }
+        }
+        .padding(.horizontal, NimbusSyncDesignTokens.spacing12)
+        .padding(.vertical, 9)
+    }
+
+    struct DayGroup {
+        let title: String
+        let tasks: [TaskDisplay]
+    }
+
+    /// Consecutive rows grouped under Today, Yesterday or Earlier, keeping their order.
+    static func groupedByDay(_ tasks: [TaskDisplay], now: Date = Date(), calendar: Calendar = .current) -> [DayGroup] {
+        var groups: [DayGroup] = []
+        for task in tasks {
+            let title: String
+            if let date = task.date, calendar.isDate(date, inSameDayAs: now) {
+                title = "Today"
+            } else if let date = task.date, calendar.isDateInYesterday(date) {
+                title = "Yesterday"
+            } else {
+                title = "Earlier"
+            }
+            if let last = groups.last, last.title == title {
+                groups[groups.count - 1] = DayGroup(title: title, tasks: last.tasks + [task])
+            } else if let index = groups.firstIndex(where: { $0.title == title }) {
+                groups[index] = DayGroup(title: title, tasks: groups[index].tasks + [task])
+            } else {
+                groups.append(DayGroup(title: title, tasks: [task]))
+            }
+        }
+        return groups
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: NimbusSyncDesignTokens.spacing12) {
+            Button(action: onAddDomain) {
+                Label("Add Domain", systemImage: "plus")
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            settingsLink(help: "Open Settings") {
+                Text("Settings…")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .keyboardShortcut(",", modifiers: .command)
+
+            if let onQuit {
+                Divider().frame(height: 14)
+                Button("Quit", action: onQuit)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .keyboardShortcut("q", modifiers: .command)
+                    .accessibilityLabel(Text("Quit NimbusSync"))
+                    .help("Quit NimbusSync")
+            }
+        }
+        .font(.callout)
+        .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
+        .padding(.vertical, NimbusSyncDesignTokens.spacing12)
+    }
+
+    // MARK: Shared pieces
+
+    @ViewBuilder
+    private func settingsLink<Label: View>(help: String, @ViewBuilder label: () -> Label) -> some View {
+        if #available(macOS 14.0, *) {
+            SettingsLink(label: label)
+                .help(help)
+        } else {
+            Button(action: onOpenSettings, label: label)
+                .help(help)
+        }
+    }
+
+    private func sectionHeading<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack {
             Text(title)
-                .font(.subheadline.weight(.semibold))
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-            Text("\(count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .accessibilityLabel(Text("\(count) items"))
+            trailing()
         }
-    }
-
-    private var overallStatus: DomainStatus {
-        domains.map(\.status).max { lhs, rhs in lhs.priority < rhs.priority } ?? .initializing
+        .padding(.horizontal, 2)
     }
 
     private var summary: MenuBarStatusSummary {
         MenuBarStatusSummary(domains: domains, activeTaskCount: tasks.count, hasActionableConflicts: hasActionableConflicts)
     }
+}
 
-    private var statusSummary: String { summary.headline }
+/// The popover's version of a running full check: what it is doing on the left, how far and how
+/// long on the right, and a bar underneath.
+struct PopoverCheckProgressView: View {
+    let progress: DomainCheckProgress
 
-    private var statusDetail: String { summary.detail }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                Text(PopoverCheckProgressText.activity(progress))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: NimbusSyncDesignTokens.spacing4)
+                if let trailing = PopoverCheckProgressText.estimate(progress) {
+                    Text(trailing)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            if let fraction = progress.estimatedFraction {
+                PopoverProgressBar(fraction: fraction)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Checking for updates"))
+        .accessibilityValue(Text(DomainCheckProgressView.summary(progress)))
+    }
+}
+
+public enum PopoverCheckProgressText {
+    /// "Checking files — 61,223 of about 150,200", or "Checking files — 42 items" on a first check.
+    public static func activity(_ progress: DomainCheckProgress) -> String {
+        switch progress.phase {
+        case .applyingDeletions:
+            return "Finishing up"
+        case .scanningFiles, .scanningTrash:
+            let phase = progress.phase == .scanningFiles ? "Checking files" : "Checking trash"
+            let scanned = progress.scannedItems.formatted()
+            guard progress.estimatedFraction != nil else { return "\(phase) — \(scanned) items" }
+            return "\(phase) — \(scanned) of about \(progress.expectedItems.formatted())"
+        }
+    }
+
+    /// "40% · about 3 min left", "40%" until a time estimate means something, nil without a total.
+    public static func estimate(_ progress: DomainCheckProgress, now: Date = Date()) -> String? {
+        guard let fraction = progress.estimatedFraction else { return nil }
+        let percent = "\(Int((fraction * 100).rounded(.down)))%"
+        guard let remaining = remainingTime(progress, now: now) else { return percent }
+        return "\(percent) · \(remaining)"
+    }
+
+    static func remainingTime(_ progress: DomainCheckProgress, now: Date) -> String? {
+        guard progress.phase == .scanningFiles, let fraction = progress.estimatedFraction, fraction >= 0.03, fraction < 0.99 else { return nil }
+        let elapsed = now.timeIntervalSince(progress.startedAt)
+        guard elapsed >= 10 else { return nil }
+        let seconds = elapsed * (1 - fraction) / fraction
+        if seconds < 60 { return "less than a minute left" }
+        let minutes = Int((seconds / 60).rounded(.up))
+        if minutes < 90 { return "about \(minutes) min left" }
+        let hours = Int((seconds / 3600).rounded())
+        return "about \(hours) hr left"
+    }
+}
+
+/// Two or three choices in a soft track; the chosen one sits on a raised chip.
+struct PopoverSegmentedControl<Value: Hashable>: View {
+    @Binding var selection: Value
+    let segments: [(Value, String)]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(segments, id: \.0) { value, title in
+                let isSelected = value == selection
+                Button(action: { selection = value }) {
+                    Text(title)
+                        .font(.callout.weight(isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 4)
+                        .background {
+                            if isSelected {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.12), radius: 1.5, y: 0.5)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(0.07)))
+        .fixedSize()
+        .animation(.easeOut(duration: 0.15), value: selection)
+    }
+}
+
+/// A slim determinate bar in the brand colour.
+struct PopoverProgressBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.1))
+                Capsule()
+                    .fill(NimbusSyncDesignTokens.brandColor)
+                    .frame(width: max(5, proxy.size.width * min(1, max(0, fraction))))
+            }
+        }
+        .frame(height: 5)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A rounded, lightly raised group of rows.
+struct PopoverCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous))
+    }
+}
+
+/// A tinted callout with one action on the right.
+struct PopoverBanner: View {
+    let symbol: String
+    let title: String
+    let detail: String
+    let actionTitle: String?
+    let action: () -> Void
+    var tint: Color = .orange
+
+    var body: some View {
+        HStack(spacing: NimbusSyncDesignTokens.spacing12) {
+            Image(systemName: symbol)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 26)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .accessibilityElement(children: .combine)
+
+            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
+
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .buttonStyle(PopoverBannerButtonStyle(tint: tint))
+            }
+        }
+        .padding(NimbusSyncDesignTokens.spacing12)
+        .background(
+            RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
+                .fill(tint.opacity(0.1))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.popoverCardRadius, style: .continuous)
+                .strokeBorder(tint.opacity(0.3))
+        )
+    }
+}
+
+struct PopoverBannerButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(configuration.isPressed ? 0.4 : 0.8))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(tint.opacity(0.55))
+            )
+            .contentShape(Rectangle())
+    }
+}
+
+/// A square, softly filled icon button, as used for row actions in the popover.
+struct PopoverIconButtonStyle: ButtonStyle {
+    var size: CGFloat = NimbusSyncDesignTokens.controlSize
+
+    func makeBody(configuration: Configuration) -> some View {
+        PopoverIconButton(configuration: configuration, size: size)
+    }
+
+    private struct PopoverIconButton: View {
+        let configuration: ButtonStyleConfiguration
+        let size: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: size * 0.46, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(isEnabled ? 0.75 : 0.3))
+                .frame(width: size, height: size)
+                .background(
+                    RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+                        .fill(Color.primary.opacity(fillOpacity))
+                )
+                .contentShape(Rectangle())
+                .onHover { isHovered = $0 }
+        }
+
+        private var fillOpacity: Double {
+            guard isEnabled else { return 0.04 }
+            if configuration.isPressed { return 0.16 }
+            return isHovered ? 0.11 : 0.07
+        }
+    }
 }

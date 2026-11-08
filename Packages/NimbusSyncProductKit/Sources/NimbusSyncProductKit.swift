@@ -147,6 +147,11 @@ public actor ProductStore {
             if domain.status == .reconciling, let progress = try? domainStore?.activeCheckProgress() {
                 checkProgress[domain.identifier] = progress
             }
+            // Tasks are keyed by item identifier; show the file's name where the store still knows it.
+            func itemName(_ identifier: String?) -> String? {
+                guard let identifier, let name = try? domainStore?.item(identifier: identifier)?.name, !name.isEmpty else { return nil }
+                return name
+            }
             let storedOperations = (try? domainStore?.operations(limit: 100) ?? []) ?? []
             tasks.append(contentsOf: storedOperations.map { stored in
                 let transfer: TransferTaskSnapshot?
@@ -162,7 +167,7 @@ public actor ProductStore {
                 case "auth_expired": errorCode = "authentication_required"
                 default: errorCode = transfer?.errorCode
                 }
-                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt)
+                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: itemName(stored.operation.itemIdentifier) ?? stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt)
             })
             let transferTasks: [TransferTaskSnapshot]
             if let domainStore {
@@ -176,7 +181,7 @@ public actor ProductStore {
                     id: transfer.taskID,
                     domainIdentifier: domain.identifier,
                     itemIdentifier: transfer.itemIdentifier,
-                    title: transfer.itemIdentifier ?? transfer.direction,
+                    title: itemName(transfer.itemIdentifier) ?? transfer.itemIdentifier ?? transfer.direction,
                     direction: transferDirection(for: transfer.direction),
                     state: transferTaskState(for: transfer.state),
                     processedBytes: transfer.bytes,

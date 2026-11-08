@@ -7,6 +7,7 @@ public enum NimbusSyncDesignTokens {
     public static let spacing16: CGFloat = 16
     public static let spacing20: CGFloat = 20
     public static let cornerRadius: CGFloat = 8
+    public static let popoverCardRadius: CGFloat = 10
     public static let iconTileSize: CGFloat = 32
     public static let controlSize: CGFloat = 28
     public static let popoverWidth: CGFloat = 400

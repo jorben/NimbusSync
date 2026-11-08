@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import CloudreveDomainKit
 
 public struct TaskDisplay: Identifiable, Sendable {
@@ -9,14 +10,72 @@ public struct TaskDisplay: Identifiable, Sendable {
     public let state: String
     /// When the task last changed: its completion time once it is done.
     public let date: Date?
+    /// The Domain the task belongs to, shown before the reason in the popover.
+    public let domainName: String?
 
-    public init(id: UUID, title: String, progress: Double?, detail: String, state: String, date: Date? = nil) {
+    public init(id: UUID, title: String, progress: Double?, detail: String, state: String, date: Date? = nil, domainName: String? = nil) {
         self.id = id
         self.title = title
         self.progress = progress
         self.detail = detail
         self.state = state
         self.date = date
+        self.domainName = domainName
+    }
+
+    /// A failed task, or one that needs the user before it can continue.
+    public var isIssue: Bool { ["failed", "action_required"].contains(state.lowercased()) }
+    public var canRetry: Bool { state.canRetry }
+    public var canCancel: Bool { state.canCancel }
+
+    /// Why the task stopped, or what it is doing, in words: "Network error", "Permission denied".
+    public var reason: String { Self.reason(for: detail) }
+
+    public static func reason(for code: String) -> String {
+        switch code.lowercased() {
+        case "": ""
+        case "network": "Network error"
+        case "authentication", "authentication_required": "Sign-in required"
+        case "permission_denied": "Permission denied"
+        case "not_found": "Not found on server"
+        case "quota_exceeded": "Storage full"
+        case "version_conflict": "Changed on both sides"
+        case "name_collision": "Name already in use"
+        case "invalid_name": "Name not allowed"
+        case "integrity_failure": "Integrity check failed"
+        case "unknown_outcome": "Outcome unknown"
+        case "unsupported_server": "Server not supported"
+        case "root_unavailable": "Remote root unavailable"
+        case "excluded_from_sync": "Excluded from sync"
+        case "directory_not_empty": "Folder not empty"
+        case "cannot_synchronize": "Can't sync right now"
+        case "queued": "Queued"
+        case "running": "Syncing"
+        case "retrying": "Retrying"
+        case "succeeded": "Synced"
+        case "failed": "Failed"
+        case "cancelled": "Cancelled"
+        default: {
+            let words = code.replacingOccurrences(of: "_", with: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
+        }()
+        }
+    }
+
+    /// The popover row's second line, for example "data@cloud · Network error · 2 min. ago".
+    public func activityCaption(relativeTo now: Date = Date()) -> String {
+        [domainName, reason.isEmpty ? nil : reason, date.map { Self.relativeTime($0, relativeTo: now) }]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
+    public static func relativeTime(_ date: Date, relativeTo now: Date = Date()) -> String {
+        if now.timeIntervalSince(date) < 60 { return "Just now" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        // Match the app's own language rather than mixing in the system's.
+        formatter.locale = Locale(identifier: Bundle.main.preferredLocalizations.first ?? "en")
+        return formatter.localizedString(for: date, relativeTo: now)
     }
 
     /// The row's second line, for example "14:32 · succeeded" or "Nov 7, 09:05 · failed".
@@ -40,39 +99,54 @@ public enum CompactTimestamp {
     }
 }
 
+/// Every Domain is a Cloudreve server, so each one wears Cloudreve's logo, drawn from the
+/// bundle (see Scripts/make-domain-icon.swift): crisp at any size, offline, and never a
+/// half-loaded site icon.
 public struct DomainIconView: View {
-    public let iconURL: URL?
     public let size: CGFloat
 
-    public init(iconURL: URL?, size: CGFloat = NimbusSyncDesignTokens.iconTileSize) {
-        self.iconURL = iconURL
+    public init(size: CGFloat = NimbusSyncDesignTokens.iconTileSize) {
         self.size = size
     }
 
+    @MainActor public static let logo: NSImage? = Bundle.module.image(forResource: "CloudreveLogo")
+
     public var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius - 2)
-                .fill(NimbusSyncDesignTokens.brandColor.opacity(0.12))
-            if let iconURL {
-                AsyncImage(url: iconURL) { phase in
-                    if case let .success(image) = phase {
-                        image.resizable().scaledToFit().padding(size * 0.2)
-                    } else {
-                        fallbackIcon
-                    }
-                }
+        Group {
+            if let logo = Self.logo {
+                Image(nsImage: logo)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
             } else {
-                fallbackIcon
+                ZStack {
+                    RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius - 2)
+                        .fill(NimbusSyncDesignTokens.brandColor.opacity(0.12))
+                    Image(systemName: "externaldrive.fill")
+                        .font(.system(size: size * 0.45, weight: .semibold))
+                        .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+                }
             }
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
     }
+}
 
-    private var fallbackIcon: some View {
-        Image(systemName: "externaldrive.fill")
-            .font(.system(size: size * 0.45, weight: .semibold))
-            .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+/// NimbusSync's own icon, for places that show the app rather than a Domain.
+public struct AppIconView: View {
+    public let size: CGFloat
+
+    public init(size: CGFloat = NimbusSyncDesignTokens.iconTileSize) {
+        self.size = size
+    }
+
+    public var body: some View {
+        Image(nsImage: NSApplication.shared.applicationIconImage)
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
 
@@ -86,7 +160,7 @@ public struct StatusBadge: View {
     }
 
     public var body: some View {
-        Label(status.title, systemImage: status.symbol)
+        Label(compact ? status.shortTitle : status.title, systemImage: status.symbol)
             .font(compact ? .caption2.weight(.medium) : .caption.weight(.medium))
             .lineLimit(1)
             // A badge never wraps; the Domain name beside it truncates instead.
@@ -97,6 +171,7 @@ public struct StatusBadge: View {
             .background(status.tint.opacity(0.12), in: Capsule())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(status.title))
+            .help(status.title)
     }
 }
 
@@ -212,6 +287,21 @@ extension DomainStatus {
         }
     }
 
+    /// For tight rows such as the popover's, where the Domain name must keep its room.
+    var shortTitle: String {
+        switch self {
+        case .reconciling: "Checking"
+        case .eventDegraded: "Live updates off"
+        case .appNotRunning: "Paused"
+        case .authExpired: "Sign in"
+        case .rootUnavailable: "Root missing"
+        case .scopeConflict: "Scope conflict"
+        case .conflict: "Conflicts"
+        case .repairRequired: "Repair"
+        default: title
+        }
+    }
+
     var symbol: String {
         switch self {
         case .healthy: "checkmark.circle"
@@ -246,6 +336,80 @@ extension DomainStatus {
         case .healthy: 10
         default: 0
         }
+    }
+}
+
+/// The file kind behind a row's tile, picked from the file extension.
+public enum FileKindIcon: Equatable, Sendable {
+    case pdf, image, video, audio, spreadsheet, presentation, document, archive, code, generic
+
+    public init(fileName: String) {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "pdf": self = .pdf
+        case "jpg", "jpeg", "png", "gif", "heic", "heif", "webp", "tif", "tiff", "bmp", "svg", "raw", "dng": self = .image
+        case "mp4", "mov", "m4v", "mkv", "avi", "webm", "wmv": self = .video
+        case "mp3", "m4a", "aac", "wav", "flac", "aiff", "ogg": self = .audio
+        case "xls", "xlsx", "csv", "tsv", "numbers": self = .spreadsheet
+        case "ppt", "pptx", "key": self = .presentation
+        case "doc", "docx", "pages", "txt", "md", "rtf", "odt": self = .document
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "dmg": self = .archive
+        case "swift", "js", "ts", "py", "go", "rs", "java", "json", "html", "css", "sh", "yml", "yaml": self = .code
+        default: self = .generic
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .pdf: "doc.richtext.fill"
+        case .image: "photo.fill"
+        case .video: "play.fill"
+        case .audio: "music.note"
+        case .spreadsheet: "tablecells.fill"
+        case .presentation: "rectangle.on.rectangle.angled.fill"
+        case .document: "doc.text.fill"
+        case .archive: "doc.zipper"
+        case .code: "chevron.left.forwardslash.chevron.right"
+        case .generic: "doc.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .pdf: .red
+        case .image: Color(red: 0.2, green: 0.56, blue: 0.96)
+        case .video: .purple
+        case .audio: .pink
+        case .spreadsheet: .green
+        case .presentation: .orange
+        case .document: NimbusSyncDesignTokens.brandColor
+        case .archive: .brown
+        case .code: .indigo
+        case .generic: .gray
+        }
+    }
+}
+
+/// A coloured tile showing what kind of file a row is about.
+public struct FileKindTile: View {
+    public let fileName: String
+    public let size: CGFloat
+
+    public init(fileName: String, size: CGFloat = 30) {
+        self.fileName = fileName
+        self.size = size
+    }
+
+    public var body: some View {
+        let kind = FileKindIcon(fileName: fileName)
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+            .fill(LinearGradient(colors: [kind.tint.opacity(0.82), kind.tint], startPoint: .top, endPoint: .bottom))
+            .overlay {
+                Image(systemName: kind.symbol)
+                    .font(.system(size: size * 0.44, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }
 

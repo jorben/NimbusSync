@@ -510,30 +510,11 @@ private struct StatusPopoverContent: View {
                 connections: runtime.connectionDisplays,
                 checkProgress: runtime.snapshot.checkProgress,
                 checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
-                onCheckDomain: runtime.checkNow
+                onCheckDomain: runtime.checkNow,
+                onQuit: runtime.quitApplication
             )
-            Divider()
-            HStack {
-                Button(action: onAddDomain) { Label("Add Domain", systemImage: "plus") }.buttonStyle(.borderless)
-                Spacer()
-                if !runtime.snapshot.actionableConflicts.isEmpty {
-                    Button(action: onOpenConflicts) {
-                        Label("Conflicts", systemImage: "exclamationmark.triangle")
-                    }
-                    .buttonStyle(.borderless)
-                }
-                Button(role: .destructive, action: runtime.quitApplication) {
-                    Image(systemName: "power")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.red)
-                .keyboardShortcut("q", modifiers: .command)
-                .accessibilityLabel("Quit NimbusSync")
-                .help("Quit NimbusSync")
-            }
-            .padding(12)
         }
-        .frame(width: 380)
+        .frame(width: NimbusSyncDesignTokens.popoverWidth)
     }
 }
 
@@ -1496,7 +1477,8 @@ private final class NimbusSyncAppState: ObservableObject {
 
     func taskDisplay(_ task: ProductTask) -> TaskDisplay {
         let state = task.errorCode == nil ? task.state.rawValue : (task.errorCode == "unknown_outcome" || task.errorCode == "version_conflict" || task.errorCode == "authentication_required" ? "action_required" : task.state.rawValue)
-        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt)
+        let domainName = snapshot.domains.first { $0.identifier == task.domainIdentifier }?.displayName
+        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt, domainName: domainName)
     }
 
     private func resetEventSupervisor(domainIdentifier: String) async {
@@ -1808,7 +1790,7 @@ private struct SettingsView: View {
             SettingsPage(title: "About", description: "NimbusSync keeps your Cloudreve files available in Finder.", symbol: "info.circle.fill") {
                 Section {
                     HStack(spacing: 12) {
-                        DomainIconView(iconURL: nil, size: 40)
+                        AppIconView(size: 40)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("NimbusSync").font(.headline)
                             Text("Cloudreve for macOS").foregroundStyle(.secondary)
@@ -1829,7 +1811,7 @@ private struct SettingsView: View {
     @ViewBuilder
     private func domainRow(_ domain: DomainDescriptor) -> some View {
         HStack(spacing: 12) {
-            DomainIconView(iconURL: domain.iconURL, size: 36)
+            DomainIconView(size: 36)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(domain.displayName)
@@ -1952,7 +1934,7 @@ private struct SettingsSidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: NimbusSyncDesignTokens.spacing8) {
-                DomainIconView(iconURL: nil, size: 30)
+                AppIconView(size: 30)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("NimbusSync")
                         .font(.headline)

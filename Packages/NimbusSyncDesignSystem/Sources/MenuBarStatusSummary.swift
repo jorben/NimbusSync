@@ -6,6 +6,8 @@ import CloudreveDomainKit
 public struct MenuBarStatusSummary: Sendable, Equatable {
     public let headline: String
     public let detail: String
+    /// One short line under the app name in the popover header, for example "Syncing 1 of 2 domains".
+    public let subtitle: String
     /// Multi-line text for the status item's tooltip: the headline, then one line per domain,
     /// transfers and conflicts.
     public let tooltip: String
@@ -38,6 +40,8 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
             }
         }
 
+        subtitle = Self.subtitle(domains: domains, attentionCount: attentionCount, activeTaskCount: activeTaskCount, overall: overall)
+
         var lines = ["NimbusSync — \(headline)"]
         if domains.isEmpty {
             lines.append(detail)
@@ -56,6 +60,25 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
             lines.append("Conflicts need review")
         }
         tooltip = lines.joined(separator: "\n")
+    }
+
+    private static func subtitle(domains: [DomainDescriptor], attentionCount: Int, activeTaskCount: Int, overall: DomainStatus) -> String {
+        let total = domains.count
+        let busy = domains.filter { $0.status == .syncing || $0.status == .reconciling }.count
+        if total == 0 { return "No domains connected" }
+        if attentionCount > 0 {
+            return total == 1 ? "Needs your attention" : "\(attentionCount) of \(total) domains need attention"
+        }
+        if busy > 0 {
+            return total == 1 ? "Syncing" : "Syncing \(busy) of \(total) domains"
+        }
+        if activeTaskCount > 0 {
+            return "Syncing \(activeTaskCount) file\(activeTaskCount == 1 ? "" : "s")"
+        }
+        if domains.allSatisfy({ $0.status == .healthy }) {
+            return total == 1 ? "Up to date" : "All \(total) domains up to date"
+        }
+        return overall.title
     }
 }
 
