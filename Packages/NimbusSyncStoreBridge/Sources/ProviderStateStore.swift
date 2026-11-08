@@ -452,6 +452,14 @@ public extension SQLiteStateStore {
         }
     }
 
+    /// Forgets a task that never became a transfer of its own, such as a request turned away
+    /// because the same item was already downloading.
+    func deleteTransferTask(taskID: UUID) throws {
+        try withLock {
+            try execute("DELETE FROM tasks WHERE task_id = '\(taskID.uuidString)'")
+        }
+    }
+
     func latestTransferTask(operationID: UUID) throws -> TransferTaskSnapshot? {
         try withLock {
             let statement = try prepare("SELECT task_id, operation_id, item_identifier, direction, state, bytes, total_bytes, error_code, updated_at FROM tasks WHERE operation_id = '\(operationID.uuidString)' ORDER BY updated_at DESC, rowid DESC LIMIT 1")

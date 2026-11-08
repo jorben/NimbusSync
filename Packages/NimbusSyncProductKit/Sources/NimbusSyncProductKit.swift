@@ -22,8 +22,29 @@ public struct ProductTask: Identifiable, Codable, Equatable, Sendable {
     public var speedBytesPerSecond: Int64?
     public var errorCode: String?
     public var updatedAt: Date
-    public init(id: UUID = UUID(), domainIdentifier: String, itemIdentifier: String? = nil, title: String, direction: ProductTaskDirection, state: ProductTaskState, processedBytes: Int64 = 0, totalBytes: Int64? = nil, speedBytesPerSecond: Int64? = nil, errorCode: String? = nil, updatedAt: Date = Date()) { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.title = title; self.direction = direction; self.state = state; self.processedBytes = processedBytes; self.totalBytes = totalBytes; self.speedBytesPerSecond = speedBytesPerSecond; self.errorCode = errorCode; self.updatedAt = updatedAt }
+    /// Whether `ProductStore.retryTask` can run it again. Only queued operations can; a download
+    /// is started by Finder, so a failed one is retried by opening the file again.
+    public let retryable: Bool
+    public init(id: UUID = UUID(), domainIdentifier: String, itemIdentifier: String? = nil, title: String, direction: ProductTaskDirection, state: ProductTaskState, processedBytes: Int64 = 0, totalBytes: Int64? = nil, speedBytesPerSecond: Int64? = nil, errorCode: String? = nil, updatedAt: Date = Date(), retryable: Bool = false) { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.title = title; self.direction = direction; self.state = state; self.processedBytes = processedBytes; self.totalBytes = totalBytes; self.speedBytesPerSecond = speedBytesPerSecond; self.errorCode = errorCode; self.updatedAt = updatedAt; self.retryable = retryable }
     public var progress: Double? { guard let totalBytes, totalBytes > 0 else { return nil }; return min(1, max(0, Double(processedBytes) / Double(totalBytes))) }
+
+    /// Drops failures nobody can retry once the same item later went through in the same
+    /// direction: a download that failed and then succeeded is one success, not an issue.
+    /// Retryable failures stay, since retrying them is still the user's call.
+    public static func droppingSupersededFailures(_ tasks: [ProductTask]) -> [ProductTask] {
+        struct Key: Hashable { let domain: String; let item: String; let direction: ProductTaskDirection }
+        var succeededAt: [Key: Date] = [:]
+        for task in tasks where task.state == .succeeded {
+            guard let item = task.itemIdentifier else { continue }
+            let key = Key(domain: task.domainIdentifier, item: item, direction: task.direction)
+            succeededAt[key] = max(succeededAt[key] ?? task.updatedAt, task.updatedAt)
+        }
+        return tasks.filter { task in
+            guard task.state == .failed, !task.retryable, let item = task.itemIdentifier,
+                  let success = succeededAt[Key(domain: task.domainIdentifier, item: item, direction: task.direction)] else { return true }
+            return success < task.updatedAt
+        }
+    }
 }
 
 public struct ProductTaskProjection: Sendable {
@@ -177,7 +198,7 @@ public actor ProductStore {
                 case "auth_expired": errorCode = "authentication_required"
                 default: errorCode = transfer?.errorCode
                 }
-                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: itemName(stored.operation.itemIdentifier) ?? stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt)
+                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: itemName(stored.operation.itemIdentifier) ?? stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt, retryable: true)
             })
             let transferTasks: [TransferTaskSnapshot]
             if let domainStore {
@@ -200,6 +221,7 @@ public actor ProductStore {
                     updatedAt: transfer.updatedAt
                 )
             })
+            tasks = ProductTask.droppingSupersededFailures(tasks)
             let syncState = try? domainStore?.syncState()
             if let date = ProductSnapshot.lastSynced(eventAt: syncState?.lastEventAt, reconcileAt: syncState?.lastReconcileAt, tasks: tasks.filter { $0.domainIdentifier == domain.identifier }) {
                 lastSyncedAt[domain.identifier] = date

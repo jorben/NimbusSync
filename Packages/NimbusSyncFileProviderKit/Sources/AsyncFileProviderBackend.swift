@@ -273,6 +273,14 @@ private final class RegisteredTaskGate<Value>: @unchecked Sendable {
 /// process-local admission gate as well so a retry cannot accidentally leave
 /// two active uploads/downloads for the same item. The system manager remains
 /// the cross-process authority.
+extension CoreFailure {
+    /// The limiter turned the request away because the same item already has one in flight.
+    /// That request answers the caller too, so this one is not a failure the user should see.
+    public var isAlreadyRegisteredTransfer: Bool {
+        code == .cannotSynchronize && redactedContext["stage"] == "task_already_registered"
+    }
+}
+
 private final class RegisteredTaskLimiter: @unchecked Sendable {
     static let shared = RegisteredTaskLimiter()
     private let lock = NSLock()

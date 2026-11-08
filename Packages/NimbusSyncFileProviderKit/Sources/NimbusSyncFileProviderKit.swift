@@ -979,9 +979,15 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 progress.completedUnitCount = 1
             } catch {
                 if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
-                try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .failed, error: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
-                if let transferTask {
-                    try? store?.updateTransferTask(taskID: transferTask.taskID, state: "failed", bytes: 0, totalBytes: transferTask.totalBytes, errorCode: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
+                if (error as? CoreFailure)?.isAlreadyRegisteredTransfer == true {
+                    // Finder asked for the same file twice at once. The download already running
+                    // owns the item's state and its own task; this attempt leaves no trace.
+                    if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
+                } else {
+                    try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .failed, error: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
+                    if let transferTask {
+                        try? store?.updateTransferTask(taskID: transferTask.taskID, state: "failed", bytes: 0, totalBytes: transferTask.totalBytes, errorCode: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
+                    }
                 }
                 cancellation.call(nil, nil, FileProviderErrorMapper.map(error))
             }

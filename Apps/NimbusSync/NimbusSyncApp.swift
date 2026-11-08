@@ -1520,7 +1520,7 @@ private final class NimbusSyncAppState: ObservableObject {
     func taskDisplay(_ task: ProductTask) -> TaskDisplay {
         let state = task.errorCode == nil ? task.state.rawValue : (task.errorCode == "unknown_outcome" || task.errorCode == "version_conflict" || task.errorCode == "authentication_required" ? "action_required" : task.state.rawValue)
         let domainName = snapshot.domains.first { $0.identifier == task.domainIdentifier }?.displayName
-        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt, domainName: domainName)
+        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt, domainName: domainName, retryable: task.retryable)
     }
 
     private func resetEventSupervisor(domainIdentifier: String) async {
