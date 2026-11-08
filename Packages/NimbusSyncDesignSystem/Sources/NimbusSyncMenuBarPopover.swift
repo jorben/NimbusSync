@@ -308,6 +308,7 @@ public struct MenuBarPopoverView: View {
                     progress: task.progress,
                     detail: task.detail,
                     state: task.state,
+                    date: task.date,
                     onCancel: { onCancelTask(task.id) },
                     onRetry: { onRetryTask(task.id) }
                 )

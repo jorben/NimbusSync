@@ -64,17 +64,11 @@ public struct ServerConnectionDisplay: Equatable, Sendable {
         switch kind {
         case .connected:
             guard let since else { return nil }
-            return "Since \(Self.format(since, relativeTo: now))"
+            return "Since \(CompactTimestamp.string(for: since, relativeTo: now))"
         case .connecting, .reconnecting, .offline, .authorizationRequired, .notConnected:
             guard let lastConnectedAt else { return nil }
-            return "Last connected \(Self.format(lastConnectedAt, relativeTo: now))"
+            return "Last connected \(CompactTimestamp.string(for: lastConnectedAt, relativeTo: now))"
         }
-    }
-
-    static func format(_ date: Date, relativeTo now: Date) -> String {
-        Calendar.current.isDate(date, inSameDayAs: now)
-            ? date.formatted(date: .omitted, time: .shortened)
-            : date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 

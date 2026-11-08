@@ -7,13 +7,36 @@ public struct TaskDisplay: Identifiable, Sendable {
     public let progress: Double?
     public let detail: String
     public let state: String
+    /// When the task last changed: its completion time once it is done.
+    public let date: Date?
 
-    public init(id: UUID, title: String, progress: Double?, detail: String, state: String) {
+    public init(id: UUID, title: String, progress: Double?, detail: String, state: String, date: Date? = nil) {
         self.id = id
         self.title = title
         self.progress = progress
         self.detail = detail
         self.state = state
+        self.date = date
+    }
+
+    /// The row's second line, for example "14:32 · succeeded" or "Nov 7, 09:05 · failed".
+    public func caption(relativeTo now: Date = Date()) -> String {
+        Self.caption(detail: detail, date: date, relativeTo: now)
+    }
+
+    public static func caption(detail: String, date: Date?, relativeTo now: Date = Date()) -> String {
+        [date.map { CompactTimestamp.string(for: $0, relativeTo: now) }, detail.isEmpty ? nil : detail]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+}
+
+/// Time only for today, date and time otherwise.
+public enum CompactTimestamp {
+    public static func string(for date: Date, relativeTo now: Date = Date()) -> String {
+        Calendar.current.isDate(date, inSameDayAs: now)
+            ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -79,6 +102,7 @@ public struct TaskProgressRow: View {
     public let progress: Double?
     public let detail: String
     public let state: String?
+    public let date: Date?
     public let onCancel: (() -> Void)?
     public let onRetry: (() -> Void)?
 
@@ -87,6 +111,7 @@ public struct TaskProgressRow: View {
         progress: Double?,
         detail: String,
         state: String? = nil,
+        date: Date? = nil,
         onCancel: (() -> Void)? = nil,
         onRetry: (() -> Void)? = nil
     ) {
@@ -94,6 +119,7 @@ public struct TaskProgressRow: View {
         self.progress = progress
         self.detail = detail
         self.state = state
+        self.date = date
         self.onCancel = onCancel
         self.onRetry = onRetry
     }
@@ -112,11 +138,13 @@ public struct TaskProgressRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(title)
-                    if !detail.isEmpty {
-                        Text(detail)
-                            .font(.caption)
+                    let caption = TaskDisplay.caption(detail: detail, date: date)
+                    if !caption.isEmpty {
+                        Text(caption)
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .help(date.map { $0.formatted(date: .complete, time: .standard) } ?? "")
                     }
                 }
 

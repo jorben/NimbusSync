@@ -46,3 +46,14 @@ final class MenuBarPopoverLayoutTests: XCTestCase {
         return controller.sizeThatFits(in: NSSize(width: 380, height: 0)).height
     }
 }
+
+final class TaskDisplayCaptionTests: XCTestCase {
+    func testCaptionShowsTimeTodayAndDateOtherwise() {
+        let now = Date()
+        let today = TaskDisplay(id: UUID(), title: "a.txt", progress: nil, detail: "succeeded", state: "succeeded", date: now)
+        XCTAssertEqual(today.caption(relativeTo: now), "\(now.formatted(date: .omitted, time: .shortened)) · succeeded")
+        let earlier = now.addingTimeInterval(-3 * 24 * 3600)
+        XCTAssertEqual(TaskDisplay.caption(detail: "failed", date: earlier, relativeTo: now), "\(earlier.formatted(date: .abbreviated, time: .shortened)) · failed")
+        XCTAssertEqual(TaskDisplay.caption(detail: "queued", date: nil, relativeTo: now), "queued")
+    }
+}
