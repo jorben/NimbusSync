@@ -38,15 +38,16 @@ Provider Domain，Finder 可以浏览远端 metadata、按需下载文件内容�
 | Swift Store/Auth/File Provider/Event/Product 模块 | 本地已验证 | Swift Package 测试及 Xcode Debug 构建 |
 | 菜单栏 App 和扩展 Target 结构 | 本地已实现 | `NimbusSync`、`NimbusSyncFileProvider`、`NimbusSyncFileProviderUI` |
 | 真实 Cloudreve root/item identity 与条件写 | 未验证 | 需要受控的 Cloudreve contract 环境 |
-| Provider 上传完成与断点恢复矩阵 | 未验证 | 由 capability gate 控制，代码本身不能升级支持级别 |
+| Provider 上传完成与断点恢复矩阵 | 未验证 | 已按 Cloudreve v4 基线开放，仍需真实服务端矩阵验证 |
 | 签名 Finder callback replay 与 File Provider E2E | 未验证 | 需要签名扩展和真实 Finder 证据 |
 | Developer ID、公证、Gatekeeper、干净机器升级 | 未验证 | 需要发布凭据和测试机器 |
 | 1.0 Release Candidate | No-Go | 见 [`phase-4-release-readiness.md`](docs/archive/reports/phase-4-release-readiness.md) |
 
-当前实现使用 `verified` / `unsupported` / `unverified` 三态 capability 模型。
-代码路径存在并不代表写能力已经开放：stable item identity、stable root identity、
-conditional content write、idempotent create 必须先验证；选中的存储 Provider
-还必须验证 write、resumable 和 zero-byte 行为。
+每个 Domain 仍保存 `verified` / `unsupported` / `unverified` 三态 capability
+snapshot。新建 Domain 直接使用文档化的 Cloudreve v4 基线
+（`CapabilitySnapshot.cloudreveV4`）；旧版本持久化的"全默认、从未探测"快照会在
+读取时自动升级。存储策略按每次上传会话实际返回的类型校验，因此不同目录使用不同
+Cloudreve 存储策略时都可以写入。
 
 ## 为什么做 NimbusSync
 
@@ -61,8 +62,9 @@ Finder 边界上最容易造成数据损坏的故障设计：
   change journal、signal outbox 和 reconciliation 共同构成最终收敛路径。
 - **稳定且不透明的 identity**：本地 Domain/item identifier 不暴露 origin、账号、
   远端路径或文件名；远端对象身份也不会仅由路径推断。
-- **Fail-closed**：不完整扫描不会生成 tombstone，结果未知的写入不会盲目重试，
-  未验证能力保持只读或不支持。
+- **可恢复的写入**：不完整扫描不会生成 tombstone；临时失败的写入保持可重放
+  （上传从持久化的 upload session 续传），基于过期版本的编辑会保存为同目录的
+  冲突副本，而不是让该文件永久卡住。
 
 ## 当前已经具备的内容
 
@@ -255,6 +257,8 @@ Packages/                           共享 Swift 模块
 Config/                             Entitlement、Info.plist、Debug/Release 设置
 Scripts/build.sh                    构建前检查、App 构建和打包
 Tests/SwiftUnitTests/               Swift unit/invariant tests
+Tests/FileProviderUnitTests/        File Provider 与线协议测试
+Tests/schema-manifest.json          SQLite schema 黄金快照
 docs/                               产品、架构、阶段计划、退出报告
 ```
 

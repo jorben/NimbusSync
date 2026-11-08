@@ -54,18 +54,122 @@ final class RemoteProviderWireTests: XCTestCase {
         )
         let context = FileProviderOperationContext(itemIdentifier: .rootContainer, progress: Progress(totalUnitCount: 1), registrar: NoopURLSessionTaskRegistrar(), cancellation: CancellationToken())
 
-        do {
-            _ = try await backend!.childrenPage(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, cursor: nil, context: context)
-            XCTFail("the first remote page must remain private until the snapshot is complete")
-        } catch let failure as CoreFailure {
-            XCTAssertEqual(failure.code, .cannotSynchronize)
-        }
-
+        // A single enumeration callback hydrates every remote page and only
+        // then publishes the snapshot; earlier builds failed each callback
+        // until the system had retried once per remote page.
         let page = try await backend!.childrenPage(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, cursor: nil, context: context)
-        backend = nil
         XCTAssertTrue(page.complete)
         XCTAssertEqual(page.items.map(\.remoteID), ["remote-page-1", "remote-page-2"])
         XCTAssertEqual(state.requestedQueries, expectedQueries)
+
+        // A fresh complete snapshot is served locally without new requests.
+        let cached = try await backend!.childrenPage(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, cursor: nil, context: context)
+        backend = nil
+        XCTAssertEqual(cached.items.map(\.remoteID), ["remote-page-1", "remote-page-2"])
+        XCTAssertEqual(state.requestedQueries, expectedQueries)
+    }
+
+    /// A file an upload session is still writing (Cloudreve's 0-byte placeholder) must not be
+    /// listed: next to the local item being uploaded under the same name it made Finder rename the
+    /// real file "name 2" when the upload landed. An item the store already knows stays listed.
+    func testDirectoryListingSkipsUnknownUploadPlaceholders() async throws {
+        let storeURL = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-placeholder-wire-\(UUID().uuidString).sqlite3")
+        defer {
+            DirectoryPageWireURLProtocol.clear()
+            for suffix in ["", "-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(at: URL(fileURLWithPath: storeURL.path + suffix)) }
+        }
+        let store = try SQLiteStateStore(url: storeURL)
+        let vault = MemoryCredentialVault()
+        let domainIdentifier = CloudreveIdentifier.domain()
+        let rootURI = try CloudreveRemoteURI.canonical("/", accountID: "account")
+        let capabilities = CapabilitySnapshot(completePagination: .verified, cursorPagination: .verified, snapshotSafePagination: .verified)
+        let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
+        try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Placeholder Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: capabilities))
+        try vault.write(Credential(accessToken: "test-access", refreshToken: "test-refresh", accessExpiry: Date().addingTimeInterval(3_600)), reference: "credential")
+        try store.insertItem(RemoteItem(remoteID: "remote-known-uploading", parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: "known.bin", uri: try CloudreveRemoteURI.append(rootURI, name: "known.bin"), kind: .file, contentType: "public.data", size: 3, version: ItemVersion(content: Data("k".utf8), metadata: Data("k".utf8))))
+        func uploading(_ id: String, _ name: String) -> [String: Any] {
+            ["type": 0, "id": id, "name": name, "path": "/\(name)", "size": 0, "permission": "r", "capability": "rwd",
+             "created_at": "2026-11-08T11:35:32Z", "updated_at": "2026-11-08T11:35:32Z",
+             "metadata": ["sys:upload_session_id": "session-\(id)", "thumb:disabled": 1] as [String: Any]]
+        }
+        let state = DirectoryPageWireURLProtocol.State(mode: .page, extraFiles: [uploading("remote-new-uploading", "page-1.txt"), uploading("remote-known-uploading", "known.bin")])
+        DirectoryPageWireURLProtocol.install(state)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DirectoryPageWireURLProtocol.self]
+        var backend: NimbusSyncRemoteBackend? = NimbusSyncRemoteBackend(origin: URL(string: "https://cloudreve.example")!, rootURI: rootURI, store: store, vault: vault, credentialReference: "credential", capabilitySnapshot: capabilities, providerName: "unverified", secretVault: MemoryOpaqueSecretVault(), domainIdentifier: domainIdentifier, urlSessionConfiguration: configuration)
+        let context = FileProviderOperationContext(itemIdentifier: .rootContainer, progress: Progress(totalUnitCount: 1), registrar: NoopURLSessionTaskRegistrar(), cancellation: CancellationToken())
+        let page = try await backend!.childrenPage(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, cursor: nil, context: context)
+        backend = nil
+
+        XCTAssertEqual(Set(page.items.compactMap(\.remoteID)), ["remote-page-1", "remote-known-uploading", "remote-page-2"])
+        XCTAssertNil(try store.itemIdentifier(forRemoteID: "remote-new-uploading"))
+        XCTAssertEqual(state.requestedQueries, ["page=1", "page=2"])
+    }
+
+    /// The account-wide trash names entries by their trash path, which used to make every Trash
+    /// enumeration fail with -2005. Unaddressable entries are left out; pagination still follows
+    /// what the server listed.
+    func testTrashListingSkipsTrashPathEntriesWithoutFailing() async throws {
+        let storeURL = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-trash-wire-\(UUID().uuidString).sqlite3")
+        defer {
+            DirectoryPageWireURLProtocol.clear()
+            for suffix in ["", "-wal", "-shm", "-journal"] { try? FileManager.default.removeItem(at: URL(fileURLWithPath: storeURL.path + suffix)) }
+        }
+        let store = try SQLiteStateStore(url: storeURL)
+        let vault = MemoryCredentialVault()
+        let domainIdentifier = CloudreveIdentifier.domain()
+        let rootURI = try CloudreveRemoteURI.canonical("/", accountID: "account")
+        let capabilities = CapabilitySnapshot.cloudreveV4(serverVersion: nil)
+        let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
+        try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Trash Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: capabilities))
+        try vault.write(Credential(accessToken: "test-access", refreshToken: "test-refresh", accessExpiry: Date().addingTimeInterval(3_600)), reference: "credential")
+        let trashEntry: [String: Any] = [
+            "type": 0, "id": "remote-in-trash", "name": "old.txt", "path": "cloudreve://trash/old.txt", "size": 3,
+            "permission": "r", "capability": "rwd", "created_at": "2026-11-08T00:00:00Z", "updated_at": "2026-11-08T00:00:00Z",
+            "metadata": ["sys:restore_uri": "cloudreve://my/old.txt"] as [String: Any]
+        ]
+        let state = DirectoryPageWireURLProtocol.State(mode: .page, extraFiles: [trashEntry])
+        DirectoryPageWireURLProtocol.install(state)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DirectoryPageWireURLProtocol.self]
+        var backend: NimbusSyncRemoteBackend? = NimbusSyncRemoteBackend(origin: URL(string: "https://cloudreve.example")!, rootURI: rootURI, store: store, vault: vault, credentialReference: "credential", capabilitySnapshot: capabilities, providerName: "local", secretVault: MemoryOpaqueSecretVault(), domainIdentifier: domainIdentifier, urlSessionConfiguration: configuration)
+        let context = FileProviderOperationContext(itemIdentifier: .trashContainer, progress: Progress(totalUnitCount: 1), registrar: NoopURLSessionTaskRegistrar(), cancellation: CancellationToken())
+        let items = try await backend!.trashItems(context: context)
+        backend = nil
+
+        XCTAssertFalse(items.contains { $0.remoteID == "remote-in-trash" })
+        XCTAssertTrue(items.allSatisfy(\.trashed))
+        // Page 1 already carried two listed entries against a total of two: no further request.
+        XCTAssertEqual(state.requestedQueries, ["page=1"])
+    }
+
+    /// The pre-download refresh looks the item up by path. When another object now lives there
+    /// (the item's own object was deleted or replaced), the stale item must be reported as gone
+    /// rather than re-bound to that object, which collided with the item that owns it.
+    func testDownloadRefusesToRebindItemToAnotherObjectAtTheSamePath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        try store.insertItem(stale)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-stale-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        do {
+            _ = try await backend!.fetchContent(identifier: stale.itemIdentifier, expectedVersion: nil, destination: destination, context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+            XCTFail("the path now belongs to another object")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.code, .notFound)
+            XCTAssertEqual(failure.redactedContext["stage"], "remote_identity_changed")
+        }
+        backend = nil
+
+        XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.remoteID, "remote-deleted-placeholder", "the stale item keeps its own identity")
+        XCTAssertNil(try store.itemIdentifier(forRemoteID: "remote-wire-remote"))
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file/url" }, "nothing is downloaded for a gone item")
+        XCTAssertEqual(FileProviderErrorMapper.map(CoreFailure(code: .notFound, retryable: false)).code, NSFileProviderError.noSuchItem.rawValue)
     }
 
     func testQiniuAsyncUploadUsesOneBasedPartsAndUpTokenOnStorageOnly() async throws {
@@ -170,6 +274,90 @@ final class RemoteProviderWireTests: XCTestCase {
         XCTAssertTrue(remoteRequests.allSatisfy { $0.authorization == "remote-token" })
         XCTAssertTrue(remoteRequests.allSatisfy { $0.authorization?.hasPrefix("Bearer ") == false })
     }
+
+    /// Local storage policies commonly chunk at 25 MiB; an 8 MiB client ceiling rejected every
+    /// upload before a byte was sent.
+    func testCloudreveChunkSizeAboveEightMiBIsAccepted() async throws {
+        let chunkSize: Int64 = 25 * 1024 * 1024
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: chunkSize)
+        defer { fixture.cleanup() }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10, chunkSize: chunkSize)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        let result = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: source, replayKey: "wire-large-chunk"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertEqual(result.remoteID, "remote-wire-remote")
+        XCTAssertEqual(protocolState.requests.filter { $0.url.path == "/remote/upload" }.map(\.body), [Data("0123456789".utf8)])
+        XCTAssertFalse(protocolState.requests.contains { $0.method == "DELETE" })
+    }
+
+    /// A session the client refuses still exists on the server, with a placeholder file that
+    /// makes every retry fail with 40004 until Cloudreve expires it. It must be cancelled.
+    func testRejectedUploadSessionIsCancelledOnServer() async throws {
+        let chunkSize: Int64 = 2 << 30
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: chunkSize)
+        defer { fixture.cleanup() }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10, chunkSize: chunkSize)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: fixture.template, contents: source, replayKey: "wire-rejected"),
+                context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+            )
+            XCTFail("an out-of-range chunk size must be refused")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.redactedContext["stage"], "chunk_size")
+        }
+        backend = nil
+
+        let sessionCalls = protocolState.requests.filter { $0.url.path == "/api/v4/file/upload" }
+        XCTAssertEqual(sessionCalls.map(\.method), ["PUT", "DELETE"])
+        let cancel = try XCTUnwrap(sessionCalls.last?.body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(cancel["id"] as? String, "session-remote-1")
+        XCTAssertEqual((cancel["uri"] as? String)?.hasSuffix("payload.bin"), true)
+        XCTAssertTrue(protocolState.requests.filter { $0.url.path == "/remote/upload" }.isEmpty)
+    }
+
+    /// Earlier builds wrote a session's credentials, then failed before recording the session.
+    /// The retry of the same item and content finds those credentials under its operation's
+    /// reference and cancels the orphan before asking for a new session.
+    func testRetryCancelsSessionAnEarlierAttemptNeverRecorded() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.storageStatus = 500
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: fixture.template, contents: source, replayKey: "wire-orphan"),
+                context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+            )
+            XCTFail("the storage endpoint is failing")
+        } catch {}
+        backend = nil
+        XCTAssertFalse(protocolState.requests.contains { $0.method == "DELETE" }, "a transient failure keeps the session so the upload can resume")
+
+        try fixture.resetStore()
+        protocolState.storageStatus = 200
+        backend = fixture.makeBackend(protocolState: protocolState)
+        let result = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: source, replayKey: "wire-orphan"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertEqual(result.remoteID, "remote-wire-remote")
+        let sessionCalls = protocolState.requests.filter { $0.url.path == "/api/v4/file/upload" }
+        XCTAssertEqual(sessionCalls.map(\.method), ["PUT", "DELETE", "PUT"])
+        let cancel = try XCTUnwrap(sessionCalls[1].body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(cancel["id"] as? String, "session-remote-1")
+    }
 }
 
 private final class DirectoryPageWireURLProtocol: URLProtocol {
@@ -180,11 +368,14 @@ private final class DirectoryPageWireURLProtocol: URLProtocol {
 
     final class State: @unchecked Sendable {
         let mode: Mode
+        /// Extra entries served on the first page after the regular one.
+        let extraFiles: [[String: Any]]
         private let lock = NSLock()
         private var queries: [String] = []
 
-        init(mode: Mode) {
+        init(mode: Mode, extraFiles: [[String: Any]] = []) {
             self.mode = mode
+            self.extraFiles = extraFiles
         }
 
         var requestedQueries: [String] {
@@ -247,7 +438,7 @@ private final class DirectoryPageWireURLProtocol: URLProtocol {
         let body: [String: Any] = [
             "code": 0,
             "data": [
-                "files": [[
+                "files": (page == 1 ? state.extraFiles : []) + [[
                     "type": 0,
                     "id": "remote-page-\(page)",
                     "name": "page-\(page).txt",
@@ -258,7 +449,7 @@ private final class DirectoryPageWireURLProtocol: URLProtocol {
                     "permission": "r",
                     "capability": "r",
                     "primary_entity": "entity-\(page)"
-                ]],
+                ] as [String: Any]],
                 "pagination": pagination
             ]
         ]
@@ -309,6 +500,17 @@ private final class UploadWireFixture {
         let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
         try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: capabilities))
         try credentialVault.write(Credential(accessToken: "unit-token", refreshToken: "refresh-token", accessExpiry: Date().addingTimeInterval(3_600)), reference: "credential")
+    }
+
+    /// Swaps in an empty state store for the same domain while keeping the secret vault: what an
+    /// earlier build left behind when it created a server session but never recorded it.
+    func resetStore() throws {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: storeURL.path + suffix))
+        }
+        let store = try SQLiteStateStore(url: storeURL)
+        let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
+        try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: Self.capabilities(provider: provider)))
     }
 
     func makeSource(_ data: Data) throws -> URL {
@@ -398,13 +600,31 @@ private final class UploadWireURLProtocol: URLProtocol {
         let provider: String
         let sourceSize: Int
         let mimeType: String
+        let chunkSize: Int64
         private let lock = NSLock()
         private var recordedRequests: [Request] = []
+        private var sessionsCreated = 0
+        private var storageStatusValue = 200
 
-        init(provider: String, sourceSize: Int, mimeType: String = "text/plain") {
+        init(provider: String, sourceSize: Int, mimeType: String = "text/plain", chunkSize: Int64 = 4) {
             self.provider = provider
             self.sourceSize = sourceSize
             self.mimeType = mimeType
+            self.chunkSize = chunkSize
+        }
+
+        /// HTTP status the storage endpoint answers with; 500 simulates a transient failure.
+        var storageStatus: Int {
+            get { lock.lock(); defer { lock.unlock() }; return storageStatusValue }
+            set { lock.lock(); storageStatusValue = newValue; lock.unlock() }
+        }
+
+        /// Each `PUT file/upload` gets its own session ID so tests can tell which one was cancelled.
+        func nextSessionID() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            sessionsCreated += 1
+            return "session-\(provider)-\(sessionsCreated)"
         }
 
         var requests: [Request] {
@@ -491,6 +711,9 @@ private final class UploadWireURLProtocol: URLProtocol {
 
     private static func cloudreveResponse(for request: URLRequest, state: State) -> (Int, Data) {
         let path = request.url?.path ?? ""
+        if path == "/api/v4/file/upload", request.httpMethod == "DELETE" {
+            return (200, Data(#"{"code":0}"#.utf8))
+        }
         if path == "/api/v4/file/upload" {
             let uploadURL: String
             switch state.provider {
@@ -507,9 +730,9 @@ private final class UploadWireURLProtocol: URLProtocol {
             let policy: [String: Any] = [
                 "code": 0,
                 "data": [
-                    "session_id": "session-\(state.provider)",
+                    "session_id": state.nextSessionID(),
                     "expires": Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
-                    "chunk_size": 4,
+                    "chunk_size": state.chunkSize,
                     "credential": credential,
                     "upload_policy": state.provider == "upyun" ? "upyun-policy" : NSNull(),
                     "mime_type": state.mimeType,
@@ -555,7 +778,8 @@ private final class UploadWireURLProtocol: URLProtocol {
             return (204, Data())
         }
         if state.provider == "remote", path == "/remote/upload" {
-            return (200, Data(#"{"code":0}"#.utf8))
+            let status = state.storageStatus
+            return (status, status == 200 ? Data(#"{"code":0}"#.utf8) : Data())
         }
         return (404, Data())
     }

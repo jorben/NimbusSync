@@ -38,7 +38,7 @@ let package = Package(
         ),
         .target(
             name: "CloudreveEventCoordinator",
-            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit"],
+            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit", "CloudreveObservability"],
             path: "Packages/NimbusSyncEventCoordinator/Sources"
         ),
         .target(

@@ -42,16 +42,17 @@ evidence:
 | Swift Store/Auth/File Provider/Event/Product modules | Verified locally | Swift package tests and Xcode Debug builds |
 | Menu-bar app and extension target structure | Implemented locally | `NimbusSync`, `NimbusSyncFileProvider`, `NimbusSyncFileProviderUI` |
 | Real Cloudreve root/item identity and conditional writes | Unverified | Requires a controlled Cloudreve contract environment |
-| Provider upload completion and resume matrix | Unverified | Capability-gated; no provider is promoted by code alone |
+| Provider upload completion and resume matrix | Unverified | Enabled by the Cloudreve v4 baseline; still needs a real-server matrix |
 | Signed Finder callback replay and File Provider E2E | Unverified | Requires signed extensions and real Finder evidence |
 | Developer ID, notarization, Gatekeeper, clean-machine upgrade | Unverified | Release credentials and test machines are still required |
 | 1.0 release candidate | No-Go | See [`phase-4-release-readiness.md`](docs/archive/reports/phase-4-release-readiness.md) |
 
-The implementation uses a `verified` / `unsupported` / `unverified`
-capability model. Write access is not enabled merely because a code path exists:
-stable item identity, stable root identity, conditional content writes, and
-idempotent creation must be verified first; the selected storage provider must
-also have verified write, resumable, and zero-byte behavior.
+The implementation keeps a `verified` / `unsupported` / `unverified`
+capability model per Domain. New Domains are provisioned with the documented
+Cloudreve v4 baseline (`CapabilitySnapshot.cloudreveV4`), and snapshots that
+earlier builds persisted in the all-default, never-probed state are upgraded on
+load. The storage policy is resolved per upload session, so folders backed by
+different Cloudreve storage policies are all writable.
 
 ## Why NimbusSync
 
@@ -70,9 +71,10 @@ boundary:
 - **Stable and opaque identities**: local Domain and item identifiers do not
   expose origins, accounts, remote paths, or file names, and remote identity is
   not inferred from a path alone.
-- **Fail-closed behavior**: incomplete scans do not create tombstones, unknown
-  write outcomes are not blindly retried, and unverified capabilities remain
-  read-only or unsupported.
+- **Recoverable writes**: incomplete scans do not create tombstones; transient
+  write failures stay replayable (uploads resume from their durable upload
+  session), and a stale-base edit is preserved as a sibling conflict copy
+  instead of blocking the item.
 
 ## What Exists Today
 
@@ -288,6 +290,8 @@ Packages/                           Shared Swift modules
 Config/                             Entitlements, Info.plists, Debug/Release settings
 Scripts/build.sh                    Pre-build checks, app build, and packaging
 Tests/SwiftUnitTests/               Swift unit and invariant tests
+Tests/FileProviderUnitTests/        File Provider and wire-protocol tests
+Tests/schema-manifest.json          Golden SQLite schema snapshot
 docs/                               Product, architecture, phase plans, exit reports
 ```
 

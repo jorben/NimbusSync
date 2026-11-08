@@ -2,6 +2,7 @@ import Foundation
 import OSLog
 import CloudreveAuthKit
 import CloudreveDomainKit
+import CloudreveObservability
 
 /// URLSession-backed SSE stream. The Authorization header is attached only to
 /// the configured Cloudreve origin; signed storage URLs are never used here.
@@ -59,12 +60,19 @@ private actor SSEStreamState {
     private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "remote-events")
     private var started = false
     private var task: Task<Void, Never>?
+    static let idleTimeout: TimeInterval = 90
 
     init(origin: URL, uri: String, clientID: String, vault: CredentialVault, credentialReference: String) {
         self.origin = origin; self.uri = uri; self.clientID = clientID; self.vault = vault; self.credentialReference = credentialReference
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 60
+        // An event stream is open-ended. timeoutIntervalForResource caps the
+        // *whole* response, so the former 60 s made the client cancel every
+        // stream after one minute (both proxies logged `context canceled` at
+        // exactly those instants) and each reconnect forced a full reconcile.
+        // The request timeout stays as an idle bound so a silently dead
+        // connection is still detected.
+        configuration.timeoutIntervalForRequest = Self.idleTimeout
+        configuration.timeoutIntervalForResource = 7 * 24 * 3_600
         self.session = URLSession(configuration: configuration, delegate: SameOriginRedirectPolicy(), delegateQueue: nil)
         self.credentialRefresh = CredentialRefreshService(vault: vault)
     }
@@ -83,12 +91,13 @@ private actor SSEStreamState {
     private func start() {
         let channel = self.channel
         task = Task {
+                let startedAt = Date()
                 do {
                     var credential = try await credentialRefresh.credential(origin: origin, reference: credentialReference)
                     var components = URLComponents(url: origin.appendingPathComponent("api/v4/file/events"), resolvingAgainstBaseURL: false)
-                    components?.queryItems = [URLQueryItem(name: "uri", value: uri)]
+                    components?.setCloudreveQueryItems([URLQueryItem(name: "uri", value: uri)])
                     guard let url = components?.url else { throw CoreFailure(code: .network, retryable: false) }
-                    var request = URLRequest(url: url, timeoutInterval: 60)
+                    var request = URLRequest(url: url, timeoutInterval: Self.idleTimeout)
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.setValue(clientID, forHTTPHeaderField: "X-Cr-Client-Id")
                     request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
@@ -101,6 +110,7 @@ private actor SSEStreamState {
                     }
                     guard let http = response as? HTTPURLResponse else { throw CoreFailure(code: .network, retryable: true) }
                     logger.info("sse.connect.response endpoint=file/events status=\(http.statusCode, privacy: .public)")
+                    if http.statusCode == 200 { ActivityLog.shared.info("live-updates", "Live updates connected") }
                     guard http.statusCode == 200, http.value(forHTTPHeaderField: "Content-Type")?.contains("text/event-stream") == true else { throw CoreFailure(code: .network, retryable: true) }
                     let parser = SSEParser()
                     for try await line in bytes.lines {
@@ -108,10 +118,17 @@ private actor SSEStreamState {
                         for event in events { await channel.yield(event) }
                     }
                     for event in try parser.finish() { await channel.yield(event) }
-                    logger.info("sse.stream.ended endpoint=file/events")
+                    logger.info("sse.stream.ended endpoint=file/events lifetime_s=\(Int(Date().timeIntervalSince(startedAt)), privacy: .public)")
+                    ActivityLog.shared.info("live-updates", "Live updates ended after \(Int(Date().timeIntervalSince(startedAt)))s")
                     await channel.finish()
                 } catch {
-                    logger.error("sse.stream.failed endpoint=file/events")
+                    let reason: String
+                    if let urlError = error as? URLError { reason = "url:\(urlError.code.rawValue)" }
+                    else if let failure = error as? CoreFailure { reason = "core:\(failure.code.rawValue)" }
+                    else if error is CancellationError { reason = "cancelled" }
+                    else { reason = String(describing: type(of: error)) }
+                    logger.error("sse.stream.failed endpoint=file/events reason=\(reason, privacy: .public) lifetime_s=\(Int(Date().timeIntervalSince(startedAt)), privacy: .public)")
+                    ActivityLog.shared.warning("live-updates", "Live updates disconnected · reason=\(reason) after \(Int(Date().timeIntervalSince(startedAt)))s")
                     await channel.finish(error)
                 }
         }

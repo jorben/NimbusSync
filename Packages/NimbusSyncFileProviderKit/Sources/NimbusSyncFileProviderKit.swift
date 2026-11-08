@@ -8,6 +8,7 @@ import CloudreveDomainKit
 import CloudreveStoreBridge
 import CloudreveAuthKit
 import CloudreveEventCoordinator
+import CloudreveObservability
 
 public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorating {
     public let model: RemoteItem
@@ -55,10 +56,20 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
         var itemCapabilities: NSFileProviderItemCapabilities = []
         if model.canRead { itemCapabilities.insert(.allowsReading) }
         if model.canWrite { itemCapabilities.insert(.allowsWriting) }
-        if metadataMoveAllowed { itemCapabilities.insert(.allowsRenaming); itemCapabilities.insert(.allowsReparenting) }
         if model.canAddChildren { itemCapabilities.insert(.allowsAddingSubItems) }
-        if model.canDelete && model.trashed { itemCapabilities.insert(.allowsDeleting) }
-        if model.canTrash && !model.trashed { itemCapabilities.insert(.allowsTrashing) }
+        if !isRoot {
+            if metadataMoveAllowed { itemCapabilities.insert(.allowsRenaming); itemCapabilities.insert(.allowsReparenting) }
+            if model.trashed {
+                if model.canDelete { itemCapabilities.insert(.allowsDeleting) }
+            } else if model.canTrash {
+                // `rm` and application temp-file cleanup arrive as deletes, not
+                // trash moves. Without .allowsDeleting the system rejects them
+                // with EPERM; the backend maps such deletes to the Cloudreve
+                // trash so they remain recoverable.
+                itemCapabilities.insert(.allowsTrashing)
+                itemCapabilities.insert(.allowsDeleting)
+            }
+        }
         self.capabilities = itemCapabilities
         if model.canRead && !model.tombstone {
             switch explicitKeepPolicy {
@@ -77,17 +88,17 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
         let projectedUploaded = projection?.isUploaded ?? (model.remoteID != nil && !model.tombstone)
         let canManageDownloadPolicy = !isRoot && model.canRead && !model.tombstone && !projectedConflict && !uploadPending && projectedUploaded
         let canEvict = projectedDownloaded && effectiveKeepPolicy != .keepDownloaded && !uploadPending && !downloadPending && !projectedConflict && projectedUploaded
+        // The metadata version describes remote metadata plus durable,
+        // user-visible policy only. Transient local transfer state
+        // (downloaded/uploading/child counts) is still projected on the item
+        // and applied by the system without a version bump; folding it in
+        // turned every completed download into a journaled metadata change.
         let projectionBoundary = VersionHasher.digest([
             Data(String(ProjectionSchema.currentRevision).utf8),
             Data(explicitKeepPolicy.rawValue.utf8),
             Data(effectiveKeepPolicy.rawValue.utf8),
             Data((metadataMoveAllowed ? "metadata-move" : "metadata-fixed").utf8),
             Data((projectedConflict ? "conflict" : "normal").utf8),
-            Data((projectedDownloaded ? "downloaded" : "dataless").utf8),
-            Data((uploadPending ? "uploading" : "upload-idle").utf8),
-            Data((downloadPending ? "downloading" : "download-idle").utf8),
-            Data((projection?.childItemCount.map(String.init) ?? "unknown").utf8),
-            Data((projection?.isUploaded == false ? "not-uploaded" : "uploaded").utf8),
             Data(([model.canRead, model.canWrite, model.canAddChildren, model.canTrash, model.canDelete, model.trashed, model.tombstone].map { $0 ? "1" : "0" }.joined()).utf8),
         ])
         self.itemVersion = NSFileProviderItemVersion(contentVersion: model.version.content, metadataVersion: VersionHasher.digest([model.version.metadata, projectionBoundary]))
@@ -104,7 +115,7 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
             "canEvict": canEvict,
             "canManageDownloadPolicy": canManageDownloadPolicy
         ]
-        self.fileSystemFlags = []
+        self.fileSystemFlags = Self.fileSystemFlags(for: model)
         self.isUploaded = projectedUploaded
         self.isUploading = uploadPending
         self.uploadingError = Self.error(for: projection?.localState.uploadError)
@@ -123,6 +134,24 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
 
     public convenience init(projection: ItemProjection) {
         self.init(model: projection.item, projection: projection)
+    }
+
+    /// POSIX permission bits shown on disk. Implementing this property and
+    /// returning `[]` strips every user bit (folders surfaced as mode 0100,
+    /// so Finder showed a no-access badge and refused to open them).
+    /// Capabilities still gate each File Provider operation; these bits only
+    /// have to stay consistent with them.
+    public static func fileSystemFlags(for model: RemoteItem) -> NSFileProviderFileSystemFlags {
+        var flags: NSFileProviderFileSystemFlags = []
+        if model.canRead { flags.insert(.userReadable) }
+        switch model.kind {
+        case .folder:
+            flags.insert(.userExecutable)
+            if model.canAddChildren || model.canWrite { flags.insert(.userWritable) }
+        case .file, .symlink, .unsupported:
+            if model.canWrite { flags.insert(.userWritable) }
+        }
+        return flags
     }
 
     private static func error(for message: String?) -> Error? {
@@ -512,10 +541,11 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
             } catch {
                 throw StoreBridgeError.pageTokenInvalid
             }
-            let currentRevision = try store.workingSetRevision()
-            guard pageToken.workingSetRevision == currentRevision else {
-                throw StoreBridgeError.pageTokenInvalid
-            }
+            // Keyset pagination over item_uuid is stable under concurrent
+            // writes, and anything that changes mid-enumeration is delivered
+            // by enumerateChanges from the anchor captured before the first
+            // page. Rejecting tokens on every working-set revision bump (each
+            // visit, download or pending flip) livelocked large initial syncs.
         }
         let limit = boundedPageSize(observer.suggestedPageSize)
         let items = try store.workingSetItems(afterIdentifier: pageToken?.lastItemIdentifier, limit: limit)
@@ -799,8 +829,6 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         self.store = resolvedStore
         self.backend = resolvedBackend
         if let resolvedStore {
-            try? resolvedStore.compactJournal()
-            try? resolvedStore.compactTransferState()
             self.systemSetCoordinator = SystemSetCoordinator(store: resolvedStore, manager: NSFileProviderManager(for: domain), domainIdentifier: domain.identifier.rawValue)
             self.cacheRefreshCoordinator = FrameworkCacheRefreshCoordinator(store: resolvedStore, manager: NSFileProviderManager(for: domain), domainIdentifier: domain.identifier.rawValue)
         }
@@ -810,7 +838,11 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
             self.stateProjection = DomainStateProjection(authenticated: authenticated)
         }
         super.init()
-        backgroundTask = Task { [weak self] in
+        backgroundTask = Task(priority: .utility) { [weak self] in
+            // Journal/transfer compaction scans whole tables; keep it off the
+            // extension launch path that every Finder callback waits on.
+            try? self?.store?.compactJournal()
+            try? self?.store?.compactTransferState()
             await self?.systemSetCoordinator?.drainRequiredRefreshes()
             guard let coordinator = self?.cacheRefreshCoordinator else { return }
             while !Task.isCancelled {
@@ -1032,10 +1064,15 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 let registrar: any URLSessionTaskRegistrar = FileProviderManagerTaskRegistrar(manager: manager)
                 let context = FileProviderOperationContext(itemIdentifier: NSFileProviderItemIdentifier(itemIdentifier), progress: progress, registrar: registrar, cancellation: token)
                 let asyncBackend: any CloudreveAsyncBackend = (backend as? any CloudreveAsyncBackend) ?? LegacyAsyncFileProviderBackendAdapter(backend: backend)
-                let updated = try await AsyncFileProviderMutationCoordinator(store: self.store, backend: asyncBackend).modify(item: model, baseVersion: baseContentVersion, fields: changedFields, contents: newContents, options: options, context: context)
+                let outcome = try await AsyncFileProviderMutationCoordinator(store: self.store, backend: asyncBackend).modifyResolvingConflicts(item: model, baseVersion: baseContentVersion, fields: changedFields, contents: newContents, options: options, context: context)
+                let updated = outcome.item
                 self.advanceDomainState()
                 let projection = try self.store?.itemProjection(identifier: updated.itemIdentifier)
-                completion.call(NimbusSyncFileProviderItem(model: updated, projection: projection), self.unsupportedFields(changedFields), false, nil)
+                completion.call(NimbusSyncFileProviderItem(model: updated, projection: projection), self.unsupportedFields(changedFields), outcome.shouldFetchContent, nil)
+                if outcome.conflictCopy != nil {
+                    // Surface the preserved local copy next to the original.
+                    try? await manager.signalEnumerator(for: .workingSet)
+                }
                 progress.completedUnitCount = 1
             } catch { completion.call(nil, changedFields, false, FileProviderErrorMapper.mapModifyError(error, options: options)) }
         }
@@ -1154,6 +1191,27 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                     let registrar: any URLSessionTaskRegistrar = FileProviderManagerTaskRegistrar(manager: manager)
                     for identifier in itemIdentifiers {
                         try token.throwIfCancelled()
+                        let serverContext = FileProviderOperationContext(itemIdentifier: identifier, progress: Progress(totalUnitCount: 1), registrar: registrar, cancellation: token)
+                        let serverThumbnail: ThumbnailFetchResult
+                        do {
+                            serverThumbnail = try await asyncBackend.thumbnail(identifier: identifier.rawValue, context: serverContext)
+                        } catch let failure as CoreFailure where failure.code == .cancelled {
+                            throw failure
+                        } catch {
+                            serverThumbnail = .unavailable
+                        }
+                        switch serverThumbnail {
+                        case .image(let data):
+                            thumbnailCompletion.call(identifier, makeThumbnail(data: data, size: size) ?? data, nil)
+                            progress.completedUnitCount += 1
+                            continue
+                        case .unavailable:
+                            thumbnailCompletion.call(identifier, nil, nil)
+                            progress.completedUnitCount += 1
+                            continue
+                        case .unsupported:
+                            break
+                        }
                         guard let item = try backend.item(identifier: identifier.rawValue),
                               item.kind == .file,
                               item.size <= 8 * 1024 * 1024 else {
@@ -1245,9 +1303,12 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                         _ = try store.setKeepDownloadedPolicyAndJournal(identifier: identifier.rawValue, policy: policy)
                     }
                     self.advanceDomainState()
+                    // The policy change is journaled with a new metadata version;
+                    // the working-set delta carries the new contentPolicy and
+                    // the system schedules the download itself. reimportItems
+                    // is a recovery tool that re-imports whole subtrees.
                     if let manager = NSFileProviderManager(for: self.domain) {
                         try? await manager.signalEnumerator(for: .workingSet)
-                        for identifier in itemIdentifiers { try? await manager.reimportItems(below: identifier) }
                     }
                     progress.completedUnitCount = 1
                     completion.call(nil)
@@ -1263,7 +1324,6 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                         }
                         try await self.evict(identifier: identifier, manager: manager)
                         try? self.store?.setMaterialized(identifier.rawValue, materialized: false)
-                        try? await manager.reimportItems(below: identifier)
                     }
                     try? await manager.signalEnumerator(for: .workingSet)
                     progress.completedUnitCount = 1
@@ -1336,7 +1396,12 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         let storedRoot: StoredDomain?
         if let store { storedRoot = try? store.domain(identifier: domain.identifier.rawValue) } else { storedRoot = nil }
         let rootURI = storedRoot?.rootURI ?? "/"
-        let root = RemoteItem(itemIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: domain.displayName, uri: rootURI, kind: .folder, contentType: UTType.folder.identifier, version: ItemVersion(content: Data("root".utf8), metadata: Data(domain.identifier.rawValue.utf8)), canRead: authenticated, canWrite: false, canAddChildren: false, canTrash: false, canDelete: false)
+        // The domain root itself is never renamed, moved or deleted (the
+        // item projection strips those capabilities for the root), but users
+        // must be able to create and drop items into it. The server still
+        // enforces permissions on the scoped root folder.
+        let rootWritable = authenticated && (storedRoot?.capabilitySnapshot.allowsCreate ?? false)
+        let root = RemoteItem(itemIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: domain.displayName, uri: rootURI, kind: .folder, contentType: UTType.folder.identifier, version: ItemVersion(content: Data("root".utf8), metadata: Data(domain.identifier.rawValue.utf8)), canRead: authenticated, canWrite: rootWritable, canAddChildren: rootWritable, canTrash: false, canDelete: false)
         let childCount = try? store?.completeChildItemCount(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue)
         let projection = ItemProjection(item: root, localState: ItemLocalState(), childItemCount: childCount ?? nil)
         return NimbusSyncFileProviderItem(projection: projection)
@@ -1378,8 +1443,12 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         return RemoteItem(itemIdentifier: CloudreveIdentifier.item(forTemplate: template.itemIdentifier.rawValue), parentIdentifier: parentIdentifier, name: template.filename, uri: uri, kind: kind, contentType: type.identifier, size: size, version: ItemVersion(content: Data(), metadata: Data()), canRead: true, canWrite: true, canAddChildren: kind == .folder, canTrash: true, canDelete: false)
     }
 
+    /// Fields Cloudreve does not store are reported back as still pending.
+    /// When that set equals the requested set the system treats the fields as
+    /// unsupported and stops sending them, and it never overwrites the local
+    /// values (e.g. a `touch`ed mtime) with the server's.
     private func unsupportedFields(_ fields: NSFileProviderItemFields) -> NSFileProviderItemFields {
-        fields.subtracting([.contents, .filename, .parentItemIdentifier, .creationDate, .contentModificationDate])
+        fields.subtracting(AsyncFileProviderMutationCoordinator.remoteModifyFields)
     }
 
     private func persistDomainState() {
@@ -1531,7 +1600,57 @@ public enum FileProviderErrorMapper {
         return map(error)
     }
 
+    private static let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "file-provider-error")
+
+    /// Redacted, enum-only description of an error before it collapses into
+    /// a File Provider code. Never includes messages, URIs, names or SQL.
+    public static func diagnosticSummary(_ error: Error) -> String {
+        if let failure = error as? CoreFailure {
+            return "core:\(failure.code.rawValue) stage=\(failure.redactedContext["stage"] ?? "-")"
+        }
+        if let storeError = error as? StoreBridgeError {
+            switch storeError {
+            case .openFailed: return "store:open_failed"
+            case .sql: return "store:sql"
+            case .schemaFenced: return "store:schema_fenced"
+            case .anchorExpired: return "store:anchor_expired"
+            case .pageTokenInvalid: return "store:page_token_invalid"
+            case .snapshotExpired: return "store:snapshot_expired"
+            case .generationFenced: return "store:generation_fenced"
+            case .corrupted: return "store:corrupted"
+            case .unknownDomain: return "store:unknown_domain"
+            }
+        }
+        if let decoding = error as? DecodingError {
+            let kind: String
+            let context: DecodingError.Context?
+            switch decoding {
+            case .typeMismatch(_, let value): kind = "type_mismatch"; context = value
+            case .valueNotFound(_, let value): kind = "value_not_found"; context = value
+            case .keyNotFound(let key, let value): kind = "key_not_found:\(key.stringValue)"; context = value
+            case .dataCorrupted(let value): kind = "data_corrupted"; context = value
+            @unknown default: kind = "unknown"; context = nil
+            }
+            let path = context?.codingPath.map { key in key.intValue.map { "[\($0)]" } ?? key.stringValue }.joined(separator: ".") ?? ""
+            return "decoding:\(kind) path=\(path)"
+        }
+        if let urlError = error as? URLError { return "url:\(urlError.code.rawValue)" }
+        if error is AnchorValidationError { return "anchor_validation" }
+        let nsError = error as NSError
+        return "\(String(describing: type(of: error))):\(nsError.domain):\(nsError.code)"
+    }
+
     public static func map(_ error: Error) -> NSError {
+        let mapped = mapWithoutLogging(error)
+        if mapped.domain == NSFileProviderErrorDomain, (error as NSError).domain != NSFileProviderErrorDomain {
+            let correlation = (mapped.userInfo["correlationID"] as? String) ?? "-"
+            logger.error("fp.error.mapped fp_code=\(mapped.code, privacy: .public) source=\(diagnosticSummary(error), privacy: .public) correlationID=\(correlation, privacy: .public)")
+            ActivityLog.shared.error("file-provider", "File Provider error \(mapped.code) · \(diagnosticSummary(error))")
+        }
+        return mapped
+    }
+
+    private static func mapWithoutLogging(_ error: Error) -> NSError {
         let nsError = error as NSError
         if nsError.domain == NSFileProviderErrorDomain || nsError.domain == NSCocoaErrorDomain { return nsError }
         let code: Int
@@ -1564,7 +1683,10 @@ public enum FileProviderErrorMapper {
                 code = NSFileProviderError.syncAnchorExpired.rawValue
                 context = ["reason": "anchor_expired"]
             case .pageTokenInvalid, .snapshotExpired:
-                code = NSFileProviderError.cannotSynchronize.rawValue
+                // pageExpired makes the system restart the enumeration from
+                // the initial page; cannotSynchronize only backs off and
+                // retries the same dead token.
+                code = NSFileProviderError.pageExpired.rawValue
                 context = ["reason": "page_snapshot_invalid"]
             case .generationFenced:
                 code = NSFileProviderError.cannotSynchronize.rawValue

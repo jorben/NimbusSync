@@ -503,7 +503,9 @@ final class NimbusSyncTests: XCTestCase {
         ]
         XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: [registryID]), [legacyOrphan])
         XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: [registryID, legacyOrphan]), [])
-        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: []), [registryID, legacyOrphan])
+        // An empty registry (reset/recreated database) must never remove
+        // every registered location.
+        XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: []), [])
         XCTAssertEqual(OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: [], registryIdentifiers: [registryID]), [])
     }
 
@@ -1042,9 +1044,9 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertTrue(try store.acquireOperationLease(operationID: operation.operationID, owner: UUID()))
     }
 
-    func testCreateSourceReplayMismatchDoesNotStartSecondRemoteWrite() async throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-source-mismatch-\(UUID().uuidString).sqlite3")
-        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-source-mismatch-\(UUID().uuidString).txt")
+    func testCreateWithNewSourceSupersedesUnfinishedAttempt() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-source-supersede-\(UUID().uuidString).sqlite3")
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-source-supersede-\(UUID().uuidString).txt")
         defer {
             try? FileManager.default.removeItem(at: url)
             try? FileManager.default.removeItem(at: sourceURL)
@@ -1055,14 +1057,39 @@ final class NimbusSyncTests: XCTestCase {
         let previous = PendingOperation(replayKey: "create|previous-source", kind: "create", itemIdentifier: itemIdentifier, state: "awaiting_source_replay")
         _ = try store.upsertOperation(previous)
         try Data("new-source".utf8).write(to: sourceURL, options: .atomic)
+        let memory = MemoryFileProviderBackend()
+        let backend = LegacyAsyncFileProviderBackendAdapter(backend: memory)
+        let context = FileProviderOperationContext(itemIdentifier: NSFileProviderItemIdentifier(itemIdentifier), progress: Progress(totalUnitCount: 1), registrar: NoopURLSessionTaskRegistrar(), cancellation: CancellationToken())
+
+        let created = try await AsyncFileProviderMutationCoordinator(store: store, backend: backend).create(template: template, contents: sourceURL, fields: [.contents], options: [], context: context)
+
+        XCTAssertEqual(created.itemIdentifier, itemIdentifier)
+        XCTAssertEqual(try memory.content(identifier: itemIdentifier, expectedVersion: nil), Data("new-source".utf8))
+        XCTAssertEqual(try store.operation(replayKey: "create|previous-source")?.operation.state, "cancelled")
+        XCTAssertNil(try store.activeOperation(itemIdentifier: itemIdentifier))
+    }
+
+    func testCommittedCreateIsNotRepeatedForADifferentSource() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-committed-\(UUID().uuidString).sqlite3")
+        let sourceURL = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-create-committed-\(UUID().uuidString).txt")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+        let store = try SQLiteStateStore(url: url)
+        let itemIdentifier = CloudreveIdentifier.item()
+        let template = RemoteItem(itemIdentifier: itemIdentifier, parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: "new.txt", uri: "/new.txt", kind: .file, contentType: "public.data", version: ItemVersion(content: Data(), metadata: Data()), canRead: true, canWrite: true)
+        let previous = PendingOperation(replayKey: "create|previous-source", kind: "create", itemIdentifier: itemIdentifier, state: "committed")
+        _ = try store.upsertOperation(previous)
+        try Data("new-source".utf8).write(to: sourceURL, options: .atomic)
         let backend = LegacyAsyncFileProviderBackendAdapter(backend: MemoryFileProviderBackend())
         let context = FileProviderOperationContext(itemIdentifier: NSFileProviderItemIdentifier(itemIdentifier), progress: Progress(totalUnitCount: 1), registrar: NoopURLSessionTaskRegistrar(), cancellation: CancellationToken())
 
         do {
             _ = try await AsyncFileProviderMutationCoordinator(store: store, backend: backend).create(template: template, contents: sourceURL, fields: [.contents], options: [], context: context)
-            XCTFail("source mismatch must not start a second create")
+            XCTFail("a committed create must not be repeated with a different source")
         } catch let failure as CoreFailure {
-            XCTAssertEqual(failure.code, .awaitingSourceReplay)
+            XCTAssertEqual(failure.code, .unknownOutcome)
         }
     }
 
@@ -1183,7 +1210,7 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertTrue(Set(observer.items.map(\.itemIdentifier)).isDisjoint(with: Set(secondObserver.items.map(\.itemIdentifier))))
     }
 
-    func testWorkingSetPageRejectsRevisionChangeInsteadOfSilentlySkipping() async throws {
+    func testWorkingSetPageSurvivesConcurrentChangeWithoutSkipping() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-working-revision-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: url) }
         let store = try SQLiteStateStore(url: url)
@@ -1204,11 +1231,23 @@ final class NimbusSyncTests: XCTestCase {
         let newItem = RemoteItem(remoteID: "remote-revision-new", parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: "new.txt", uri: "/new.txt", kind: .file, contentType: "public.data", version: ItemVersion(content: Data("new".utf8), metadata: Data("new".utf8)), canRead: true)
         _ = try store.commitProviderChange(item: newItem, oldParentIdentifier: newItem.parentIdentifier, newParentIdentifier: newItem.parentIdentifier, kind: "created", origin: "test")
 
-        let secondObserver = RecordingEnumerationObserver(suggestedPageSize: 2)
-        WorkingSetEnumerator(domainIdentifier: domainID, store: store, backend: MemoryFileProviderBackend()).enumerateItems(for: secondObserver, startingAt: nextPage)
-        await secondObserver.wait()
-        XCTAssertTrue(secondObserver.items.isEmpty)
-        XCTAssertNotNil(secondObserver.error)
+        // Keyset pagination is stable under concurrent writes; the change
+        // itself is delivered by enumerateChanges. Rejecting the token on
+        // every working-set revision bump livelocked large initial syncs.
+        var seen = Set(firstObserver.items.map(\.itemIdentifier.rawValue))
+        var page: NSFileProviderPage? = nextPage
+        var pages = 0
+        while let current = page, pages < 10 {
+            pages += 1
+            let observer = RecordingEnumerationObserver(suggestedPageSize: 2)
+            WorkingSetEnumerator(domainIdentifier: domainID, store: store, backend: MemoryFileProviderBackend()).enumerateItems(for: observer, startingAt: current)
+            await observer.wait()
+            XCTAssertNil(observer.error)
+            seen.formUnion(observer.items.map(\.itemIdentifier.rawValue))
+            page = observer.nextPage
+        }
+        let originals = try (0..<3).map { index in try XCTUnwrap(store.itemIdentifier(forRemoteID: "remote-revision-\(index)")) }
+        XCTAssertTrue(Set(originals).isSubset(of: seen), "no pre-existing item may be skipped")
     }
 
     func testURLSessionTaskRegistrationRequiresSuspendedTaskBeforeResume() async throws {
@@ -1408,7 +1447,7 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertThrowsError(try anchor.encoded())
     }
 
-    func testPageTokenValidationRejectsCrossContainerShapeAsCannotSynchronize() throws {
+    func testPageTokenValidationRejectsCrossContainerShapeAsPageExpired() throws {
         let domainID = CloudreveIdentifier.domain()
         let malformedWorkingSet = PageToken(
             domainIdentifier: domainID,
@@ -1419,9 +1458,12 @@ final class NimbusSyncTests: XCTestCase {
             workingSetRevision: 4
         )
         XCTAssertThrowsError(try malformedWorkingSet.validate(domainIdentifier: domainID, parentIdentifier: NSFileProviderItemIdentifier.workingSet.rawValue))
+        // pageExpired restarts enumeration from the initial page;
+        // cannotSynchronize would only retry the same dead token.
         let mapped = FileProviderErrorMapper.map(StoreBridgeError.pageTokenInvalid)
         XCTAssertEqual(mapped.domain, NSFileProviderErrorDomain)
-        XCTAssertEqual(mapped.code, NSFileProviderError.cannotSynchronize.rawValue)
+        XCTAssertEqual(mapped.code, NSFileProviderError.pageExpired.rawValue)
+        XCTAssertEqual(FileProviderErrorMapper.map(StoreBridgeError.snapshotExpired).code, NSFileProviderError.pageExpired.rawValue)
     }
 
     func testAsyncConflictSourceReplayCompletesConflictAndPendingState() async throws {
@@ -1511,7 +1553,9 @@ final class NimbusSyncTests: XCTestCase {
         let state = try store.localItemState(identifier: itemIdentifier)
         XCTAssertEqual(state.uploadState, .failed)
         XCTAssertEqual(state.uploadError, CoreErrorCode.network.rawValue)
-        XCTAssertEqual(try store.latestOperation(itemIdentifier: itemIdentifier)?.operation.state, "unknown_outcome")
+        // A transient (retryable) failure must stay replayable rather than
+        // wedging the item in a terminal unknown_outcome state.
+        XCTAssertEqual(try store.latestOperation(itemIdentifier: itemIdentifier)?.operation.state, "retry_pending")
     }
 
     func testFinalizePreservedRemovalDeletesCredentialAndDomainRecord() async throws {

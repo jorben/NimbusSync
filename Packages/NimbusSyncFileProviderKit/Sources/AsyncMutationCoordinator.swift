@@ -4,6 +4,34 @@ import CryptoKit
 import CloudreveDomainKit
 import CloudreveStoreBridge
 
+public struct ModifyOutcome: Sendable {
+    public let item: RemoteItem
+    /// The returned item's content differs from the local bytes (the local
+    /// edit was preserved as a conflict copy); the system must re-download.
+    public let shouldFetchContent: Bool
+    public let conflictCopy: RemoteItem?
+    public init(item: RemoteItem, shouldFetchContent: Bool = false, conflictCopy: RemoteItem? = nil) {
+        self.item = item
+        self.shouldFetchContent = shouldFetchContent
+        self.conflictCopy = conflictCopy
+    }
+}
+
+/// "report.docx" → "report (Conflict 2026-11-08 172233).docx"
+public enum ConflictCopyNaming {
+    public static func name(for original: String, date: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HHmmss"
+        let stamp = formatter.string(from: date)
+        let ns = original as NSString
+        let ext = ns.pathExtension
+        let base = ext.isEmpty ? original : ns.deletingPathExtension
+        let suffix = " (Conflict \(stamp))"
+        return ext.isEmpty ? base + suffix : base + suffix + "." + ext
+    }
+}
+
 public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
     private let store: SQLiteStateStore?
     private let backend: any CloudreveAsyncBackend
@@ -43,7 +71,11 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         }
         let sourceKey = sourceFingerprint.map { "|\($0.hash.base64EncodedString())|\($0.size)" } ?? "|no-source"
         let replayKey = "create|\(template.itemIdentifier)|\(fields.rawValue)|\(options.rawValue)\(sourceKey)"
-        if let existing = try store.latestOperation(itemIdentifier: template.itemIdentifier), existing.operation.replayKey != replayKey {
+        // A different source for the same template means the file changed
+        // before an earlier attempt finished; the newest source wins. Only a
+        // create that already committed must not be repeated.
+        try store.supersedeStaleOperations(itemIdentifier: template.itemIdentifier, exceptReplayKey: replayKey)
+        if let existing = try store.latestOperation(itemIdentifier: template.itemIdentifier), existing.operation.replayKey != replayKey, existing.operation.state != "cancelled" {
             throw operationMismatchFailure(existing.operation.state, stage: "create_source_replay_mismatch")
         }
         let operationID = stableOperationID(replayKey)
@@ -52,7 +84,7 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         try ensureLease(operation)
         try store.insertItem(template)
         try store.setPending(template.itemIdentifier, templateIdentifier: template.itemIdentifier)
-        let task = try store.createTransferTask(operationID: operationID, itemIdentifier: template.itemIdentifier, direction: "upload", totalBytes: contents.flatMap { try? FileProviderSourceFingerprint.digest(url: $0).size })
+        let task = try store.createTransferTask(operationID: operationID, itemIdentifier: template.itemIdentifier, direction: "upload", totalBytes: sourceFingerprint?.size)
         do {
             let item = try await backend.create(CreateRequest(template: template, contents: contents, replayKey: replayKey), context: context)
             let committed = try commitRemoteResult(operationID: operationID, item: item, context: context)
@@ -67,22 +99,34 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
     }
 
     public func modify(item: RemoteItem, baseVersion: Data, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> RemoteItem {
+        try await modifyResolvingConflicts(item: item, baseVersion: baseVersion, fields: fields, contents: contents, options: options, context: context).item
+    }
+
+    /// Fields that are actually carried to Cloudreve. Everything else
+    /// (xattrs, tags, dates, flags) stays local.
+    public static let remoteModifyFields: NSFileProviderItemFields = [.contents, .filename, .parentItemIdentifier]
+
+    public func modifyResolvingConflicts(item: RemoteItem, baseVersion: Data, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> ModifyOutcome {
         try context.cancellation.throwIfCancelled()
         guard let store else {
-            return try await backend.modify(ModifyRequest(item: item, expectedVersion: baseVersion, changedFields: fields, contents: contents, options: options, replayKey: item.itemIdentifier), context: context)
+            return ModifyOutcome(item: try await backend.modify(ModifyRequest(item: item, expectedVersion: baseVersion, changedFields: fields, contents: contents, options: options, replayKey: item.itemIdentifier), context: context))
         }
         try store.assertProcessUsable()
         guard let stored = try store.item(identifier: item.itemIdentifier) else { throw CoreFailure(code: .notFound, retryable: false) }
-        if fields.contains(.lastUsedDate) && fields.subtracting([.lastUsedDate]).isEmpty {
-            var state = try store.localItemState(identifier: stored.itemIdentifier)
-            state.lastUsedAt = Date()
-            try store.setLocalItemState(identifier: stored.itemIdentifier, state: state)
-            return stored
+        if fields.intersection(Self.remoteModifyFields).isEmpty {
+            // Local-only metadata (last-used date, xattrs, tags, dates): no
+            // remote round trip, no operation record, no permission check.
+            if fields.contains(.lastUsedDate) {
+                var state = try store.localItemState(identifier: stored.itemIdentifier)
+                state.lastUsedAt = Date()
+                try store.setLocalItemState(identifier: stored.itemIdentifier, state: state)
+            }
+            return ModifyOutcome(item: stored)
         }
         try validateSource(contents, item: item, store: store)
         try guardNotExcluded(item: item, kind: .localCreate, store: store)
         if fields.contains(.contents), let pending = try store.pendingConflictResolution(itemIdentifier: item.itemIdentifier) {
-            return try await resolvePendingConflict(item: item, baseVersion: baseVersion, contents: contents, options: options, pending: pending, context: context)
+            return ModifyOutcome(item: try await resolvePendingConflict(item: item, baseVersion: baseVersion, contents: contents, options: options, pending: pending, context: context))
         }
         let fingerprint: (hash: Data, size: Int64)
         if let contents {
@@ -91,16 +135,17 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
             fingerprint = (Data(), 0)
         }
         let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.hash.base64EncodedString())|\(fingerprint.size)"
+        try store.supersedeStaleOperations(itemIdentifier: item.itemIdentifier, exceptReplayKey: replayKey)
         if let existing = try store.activeOperation(itemIdentifier: item.itemIdentifier), existing.operation.replayKey != replayKey {
             throw operationMismatchFailure(existing.operation.state, stage: "item_operation_in_flight")
         }
         let operationID = stableOperationID(replayKey)
         let previousParent = stored.parentIdentifier
         let operation = try begin(operationID: operationID, replayKey: replayKey, kind: "modify", itemIdentifier: item.itemIdentifier, expectedVersion: baseVersion, changedFields: String(fields.rawValue))
-        if let result = try committedResult(operation) { return result }
+        if let result = try committedResult(operation) { return ModifyOutcome(item: result) }
         try ensureLease(operation)
         try store.setPending(item.itemIdentifier, templateIdentifier: nil)
-        let task = try store.createTransferTask(operationID: operationID, itemIdentifier: item.itemIdentifier, direction: "upload", totalBytes: contents.flatMap { try? FileProviderSourceFingerprint.digest(url: $0).size })
+        let task = try store.createTransferTask(operationID: operationID, itemIdentifier: item.itemIdentifier, direction: "upload", totalBytes: contents == nil ? nil : fingerprint.size)
         do {
             let updated: RemoteItem
             if fields.contains(.parentItemIdentifier) && item.parentIdentifier == NSFileProviderItemIdentifier.trashContainer.rawValue {
@@ -112,8 +157,21 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
             }
             let committed = try commitRemoteResult(operationID: operationID, item: updated, context: context, oldParentIdentifier: previousParent)
             try store.updateTransferTask(taskID: task.taskID, state: "succeeded", bytes: task.totalBytes ?? 0, totalBytes: task.totalBytes)
-            return committed
+            return ModifyOutcome(item: committed)
         } catch {
+            if let failure = error as? CoreFailure, failure.code == .versionConflict, fields.contains(.contents), let contents {
+                // The server moved on while this edit was pending. Keep both:
+                // the local bytes become a sibling conflict copy, and the
+                // original item tracks the server version again.
+                do {
+                    let resolved = try await resolveWithConflictCopy(stored: stored, contents: contents, operationID: operationID, previousParent: previousParent, context: context)
+                    try? store.updateTransferTask(taskID: task.taskID, state: "succeeded", bytes: task.totalBytes ?? 0, totalBytes: task.totalBytes)
+                    return resolved
+                } catch {
+                    // Fall through: record the conflict for the Conflict
+                    // Center so no local bytes are dropped.
+                }
+            }
             try? store.updateTransferTask(taskID: task.taskID, state: "failed", bytes: 0, totalBytes: task.totalBytes, errorCode: (error as? CoreFailure)?.code.rawValue)
             persistUploadFailure(store: store, itemIdentifier: item.itemIdentifier, error: error)
             if let failure = error as? CoreFailure, failure.code == .versionConflict {
@@ -166,6 +224,7 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         try store.assertProcessUsable()
         guard let item = try store.item(identifier: itemIdentifier) else { return }
         let replayKey = "delete|\(itemIdentifier)|\(baseVersion.base64EncodedString())|\(recursive)"
+        try store.supersedeStaleOperations(itemIdentifier: itemIdentifier, exceptReplayKey: replayKey)
         if let existing = try store.activeOperation(itemIdentifier: itemIdentifier), existing.operation.replayKey != replayKey {
             throw operationMismatchFailure(existing.operation.state, stage: "item_operation_in_flight")
         }
@@ -265,9 +324,36 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         }
     }
 
+    private func resolveWithConflictCopy(stored: RemoteItem, contents: URL, operationID: UUID, previousParent: String?, context: FileProviderOperationContext) async throws -> ModifyOutcome {
+        guard let store else { throw CoreFailure(code: .database, retryable: false) }
+        guard let remote = try await backend.refreshItem(identifier: stored.itemIdentifier, context: context), !remote.tombstone, !remote.trashed else {
+            throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true)
+        }
+        let copyName = ConflictCopyNaming.name(for: stored.name)
+        let template = RemoteItem(
+            parentIdentifier: remote.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue,
+            name: copyName,
+            uri: remote.uri,
+            kind: .file,
+            contentType: CloudreveItemMapper.contentType(kind: .file, name: copyName),
+            size: PartialDownloadStore.size(of: contents),
+            version: ItemVersion(content: Data(), metadata: Data()),
+            canRead: true,
+            canWrite: true,
+            canTrash: true
+        )
+        let copy = try await backend.create(CreateRequest(template: template, contents: contents, replayKey: "conflict-copy|\(operationID.uuidString)"), context: context)
+        _ = try store.commitProviderChange(item: copy, oldParentIdentifier: nil, newParentIdentifier: copy.parentIdentifier, kind: "created", origin: "conflict_copy")
+        let committed = try commitRemoteResult(operationID: operationID, item: remote, context: context, oldParentIdentifier: previousParent)
+        return ModifyOutcome(item: committed, shouldFetchContent: true, conflictCopy: copy)
+    }
+
     private func begin(operationID: UUID, replayKey: String, kind: String, itemIdentifier: String, expectedVersion: Data? = nil, changedFields: String? = nil) throws -> StoredOperation {
         guard let store else { throw CoreFailure(code: .database, retryable: false) }
         _ = try store.upsertOperation(PendingOperation(operationID: operationID, replayKey: replayKey, kind: kind, itemIdentifier: itemIdentifier, sourceGeneration: 1, expectedVersion: expectedVersion, changedFields: changedFields))
+        // The system replaying the identical callback is the retry signal.
+        // Transient failures must not turn into a permanent wedge.
+        try store.reopenOperation(replayKey: replayKey)
         guard let operation = try store.operation(replayKey: replayKey) else { throw CoreFailure(code: .database, retryable: false) }
         return operation
     }
@@ -312,7 +398,7 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
             case .authentication: state = "auth_expired"
             case .awaitingSourceReplay: state = "awaiting_source_replay"
             case .cancelled: state = "cancelled"
-            default: state = "unknown_outcome"
+            default: state = failure.retryable ? "retry_pending" : "unknown_outcome"
             }
         } else {
             state = "unknown_outcome"

@@ -408,7 +408,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
             let snapshotData = Data((columnString(statement, 9) ?? "{}").utf8)
-			return StoredDomain(identifier: columnString(statement, 0) ?? identifier, displayName: columnString(statement, 1) ?? "NimbusSync", origin: columnString(statement, 2) ?? "", accountID: columnString(statement, 3) ?? "", rootRemoteID: columnString(statement, 4) ?? "", rootURI: columnString(statement, 5) ?? "/", scopeKey: columnString(statement, 6) ?? "", status: DomainStatus(rawValue: columnString(statement, 7) ?? "initializing") ?? .initializing, secretReference: columnString(statement, 8) ?? "", capabilitySnapshot: (try? JSONDecoder().decode(CapabilitySnapshot.self, from: snapshotData)) ?? CapabilitySnapshot(), iconURL: columnString(statement, 10).flatMap(URL.init(string:)))
+			return StoredDomain(identifier: columnString(statement, 0) ?? identifier, displayName: columnString(statement, 1) ?? "NimbusSync", origin: columnString(statement, 2) ?? "", accountID: columnString(statement, 3) ?? "", rootRemoteID: columnString(statement, 4) ?? "", rootURI: columnString(statement, 5) ?? "/", scopeKey: columnString(statement, 6) ?? "", status: DomainStatus(rawValue: columnString(statement, 7) ?? "initializing") ?? .initializing, secretReference: columnString(statement, 8) ?? "", capabilitySnapshot: decodeCapabilitySnapshot(snapshotData), iconURL: columnString(statement, 10).flatMap(URL.init(string:)))
         }
     }
 
@@ -419,7 +419,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
             var domains: [StoredDomain] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 let snapshotData = Data((columnString(statement, 9) ?? "{}").utf8)
-				domains.append(StoredDomain(identifier: columnString(statement, 0) ?? "", displayName: columnString(statement, 1) ?? "NimbusSync", origin: columnString(statement, 2) ?? "", accountID: columnString(statement, 3) ?? "", rootRemoteID: columnString(statement, 4) ?? "", rootURI: columnString(statement, 5) ?? "/", scopeKey: columnString(statement, 6) ?? "", status: DomainStatus(rawValue: columnString(statement, 7) ?? "initializing") ?? .initializing, secretReference: columnString(statement, 8) ?? "", capabilitySnapshot: (try? JSONDecoder().decode(CapabilitySnapshot.self, from: snapshotData)) ?? CapabilitySnapshot(), iconURL: columnString(statement, 10).flatMap(URL.init(string:))))
+				domains.append(StoredDomain(identifier: columnString(statement, 0) ?? "", displayName: columnString(statement, 1) ?? "NimbusSync", origin: columnString(statement, 2) ?? "", accountID: columnString(statement, 3) ?? "", rootRemoteID: columnString(statement, 4) ?? "", rootURI: columnString(statement, 5) ?? "/", scopeKey: columnString(statement, 6) ?? "", status: DomainStatus(rawValue: columnString(statement, 7) ?? "initializing") ?? .initializing, secretReference: columnString(statement, 8) ?? "", capabilitySnapshot: decodeCapabilitySnapshot(snapshotData), iconURL: columnString(statement, 10).flatMap(URL.init(string:))))
             }
             return domains
         }
@@ -603,7 +603,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
                 let previous = try itemUnlocked(identifier: item.itemIdentifier)
                 if item.tombstone, item.kind == .folder {
                     let refreshed = try tombstoneDescendantsUnlocked(rootIdentifier: item.itemIdentifier, oldURI: previous?.uri ?? item.uri)
-                    if refreshed >= 100_000 {
+                    if refreshed >= DomainScale.maximumItems {
                         try execute("UPDATE sync_state SET reconcile_status = 'required:recursive_delete' WHERE singleton = 1")
                     }
                 }
@@ -1241,6 +1241,29 @@ public final class SQLiteStateStore: @unchecked Sendable {
         try withLock { try execute("UPDATE operations SET cancel_requested = 1, updated_at = unixepoch() WHERE operation_id = '\(operationID.uuidString)'") }
     }
 
+    /// States after which the same callback may safely run again. Uploads
+    /// resume through their durable upload session, deletes are idempotent
+    /// and stale bases surface as version conflicts, so none of these states
+    /// may permanently wedge an item.
+    static let reopenableOperationStates = "'retry_pending', 'unknown_outcome', 'awaiting_source_replay', 'cancelled', 'conflict', 'auth_expired'"
+
+    /// Re-arms an operation when the system replays the identical callback.
+    public func reopenOperation(replayKey: String) throws {
+        try withLock {
+            try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, outcome = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch() WHERE replay_key = '\(sql(replayKey))' AND state IN (\(Self.reopenableOperationStates))")
+        }
+    }
+
+    /// A newer callback for the same item (new contents, new base) supersedes
+    /// failed or abandoned attempts. Only an attempt that still holds a live
+    /// lease keeps blocking.
+    public func supersedeStaleOperations(itemIdentifier: String, exceptReplayKey: String, now: Date = Date()) throws {
+        try withLock {
+            let nowSeconds = Int64(now.timeIntervalSince1970)
+            try execute("UPDATE operations SET state = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch() WHERE item_uuid = '\(sql(itemIdentifier))' AND replay_key != '\(sql(exceptReplayKey))' AND state NOT IN ('committed', 'cancelled', 'permanently_failed', 'resolved') AND (state IN (\(Self.reopenableOperationStates)) OR lease_expires_at IS NULL OR lease_expires_at <= \(nowSeconds))")
+        }
+    }
+
     public func retryOperation(operationID: UUID) throws {
         try withLock {
             try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL, outcome = NULL, updated_at = unixepoch() WHERE operation_id = '\(operationID.uuidString)' AND state IN ('retry_wait', 'cancelled', 'permanently_failed')")
@@ -1398,7 +1421,13 @@ public final class SQLiteStateStore: @unchecked Sendable {
         return Data(bytes: value, count: Int(sqlite3_column_bytes(statement, index)))
     }
 
-    func sql(_ value: String) -> String { value.replacingOccurrences(of: "'", with: "''") }
+    func decodeCapabilitySnapshot(_ data: Data) -> CapabilitySnapshot {
+        ((try? JSONDecoder().decode(CapabilitySnapshot.self, from: data)) ?? CapabilitySnapshot()).upgradedToCloudreveV4Baseline()
+    }
+    /// SQLite string literals only need quote doubling, but an embedded NUL
+    /// would truncate the statement at the C boundary. Strip it so remote or
+    /// local names can never cut a statement short.
+    func sql(_ value: String) -> String { value.replacingOccurrences(of: "\u{0}", with: "").replacingOccurrences(of: "'", with: "''") }
     func nullable(_ value: String?) -> String { value.map { "'\(sql($0))'" } ?? "NULL" }
 
     func itemFromStatement(_ statement: OpaquePointer) -> RemoteItem {

@@ -160,8 +160,11 @@ public struct RegisteredDomainSnapshot: Equatable, Sendable {
 /// identifier changed or a registry was reset) keep surfacing a permanently
 /// broken Finder location, so startup reconciliation removes them.
 public enum OrphanedDomainCleanupReducer {
+    /// An empty registry is treated as "unknown", never as "remove all":
+    /// a reset or recreated App Group database must not wipe every location.
     public static func orphanedIdentifiers(systemDomains: [RegisteredDomainSnapshot], registryIdentifiers: Set<String>) -> Set<String> {
-        Set(systemDomains.map(\.identifier)).subtracting(registryIdentifiers)
+        guard !registryIdentifiers.isEmpty else { return [] }
+        return Set(systemDomains.map(\.identifier)).subtracting(registryIdentifiers)
     }
 }
 

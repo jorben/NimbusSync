@@ -176,9 +176,26 @@ public protocol CloudreveAsyncBackend: Sendable {
     func trash(_ request: TrashRequest, context: FileProviderOperationContext) async throws -> RemoteItem
     func restore(_ request: RestoreRequest, context: FileProviderOperationContext) async throws -> RemoteItem
     func delete(_ request: DeleteRequest, context: FileProviderOperationContext) async throws
+    /// Reads the current server state of an item (not the local cache).
+    func refreshItem(identifier: String, context: FileProviderOperationContext) async throws -> RemoteItem?
+    /// Server-generated thumbnail. `.unsupported` makes the caller fall back
+    /// to rendering from file contents.
+    func thumbnail(identifier: String, context: FileProviderOperationContext) async throws -> ThumbnailFetchResult
+}
+
+public enum ThumbnailFetchResult: Sendable, Equatable {
+    case image(Data)
+    case unavailable
+    case unsupported
 }
 
 public extension CloudreveAsyncBackend {
+    func thumbnail(identifier: String, context: FileProviderOperationContext) async throws -> ThumbnailFetchResult { .unsupported }
+
+    func refreshItem(identifier: String, context: FileProviderOperationContext) async throws -> RemoteItem? {
+        try await item(identifier: identifier)
+    }
+
     func childrenPage(parentIdentifier: String, cursor: PageCursor?, context: FileProviderOperationContext) async throws -> RemotePage {
         try await childrenPage(parentIdentifier: parentIdentifier, cursor: cursor)
     }
@@ -279,6 +296,7 @@ private final class RegisteredTaskLimiter: @unchecked Sendable {
 /// content downloads use the download-to-file path below.
 public final class RegisteredURLSessionTransport: @unchecked Sendable {
     private let session: URLSession
+    fileprivate var sessionForStreaming: URLSession { session }
 
     public init(session: URLSession = .shared) {
         self.session = session
@@ -395,6 +413,182 @@ public final class RegisteredURLSessionTransport: @unchecked Sendable {
     }
 }
 
+/// Streams a registered data task into a partial file so an interrupted
+/// transfer keeps every byte already received. A completion-handler download
+/// task discards its temporary file on failure, which made large downloads
+/// restart from zero on every retry.
+extension RegisteredURLSessionTransport {
+    public func streamDownload(appendingTo partialURL: URL, resumeOffset: Int64, request: URLRequest, itemIdentifier: NSFileProviderItemIdentifier, context: FileProviderOperationContext) async throws -> HTTPURLResponse {
+        try context.cancellation.throwIfCancelled()
+        guard RegisteredTaskLimiter.shared.acquire(itemIdentifier: itemIdentifier) else {
+            throw CoreFailure(code: .cannotSynchronize, retryable: true, userActionRequired: true, redactedContext: ["stage": "task_already_registered"])
+        }
+        defer { RegisteredTaskLimiter.shared.release(itemIdentifier: itemIdentifier) }
+        let gate = RegisteredTaskGate<HTTPURLResponse>()
+        let delegate = StreamingDownloadDelegate(fileURL: partialURL, resumeOffset: resumeOffset, gate: gate)
+        let task = sessionForStreaming.dataTask(with: request)
+        task.delegate = delegate
+        context.progress.addChild(task.progress, withPendingUnitCount: 1)
+        context.cancellation.onCancel { task.cancel() }
+        return try await withTaskCancellationHandler(operation: {
+            do {
+                try await context.registrar.registerSuspended(task, for: itemIdentifier)
+                try context.cancellation.throwIfCancelled()
+                task.resume()
+            } catch {
+                task.cancel()
+                gate.resolve(.failure(error))
+            }
+            return try await gate.wait()
+        }, onCancel: {
+            context.cancellation.cancel()
+            task.cancel()
+            gate.resolve(.failure(CoreFailure(code: .cancelled, retryable: false)))
+        })
+    }
+}
+
+private final class StreamingDownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let fileURL: URL
+    private let resumeOffset: Int64
+    private let gate: RegisteredTaskGate<HTTPURLResponse>
+    private let lock = NSLock()
+    private var handle: FileHandle?
+    private var response: HTTPURLResponse?
+    private var failure: Error?
+    private var discardedNonSuccess = false
+
+    init(fileURL: URL, resumeOffset: Int64, gate: RegisteredTaskGate<HTTPURLResponse>) {
+        self.fileURL = fileURL
+        self.resumeOffset = resumeOffset
+        self.gate = gate
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let http = response as? HTTPURLResponse else {
+            failure = CoreFailure(code: .network, retryable: true)
+            completionHandler(.cancel)
+            return
+        }
+        self.response = http
+        do {
+            switch http.statusCode {
+            case 206 where resumeOffset > 0 && Self.contentRangeStart(http) == resumeOffset:
+                let output = try FileHandle(forWritingTo: fileURL)
+                try output.seekToEnd()
+                handle = output
+                completionHandler(.allow)
+            case 200:
+                // The server ignored the range (or none was sent): restart.
+                guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+                    throw CoreFailure(code: .network, retryable: true)
+                }
+                handle = try FileHandle(forWritingTo: fileURL)
+                completionHandler(.allow)
+            case 206:
+                // A range we did not ask for cannot be appended safely.
+                try? FileManager.default.removeItem(at: fileURL)
+                failure = CoreFailure(code: .integrityFailure, retryable: true, redactedContext: ["stage": "content_range_mismatch"])
+                completionHandler(.cancel)
+            default:
+                // Error status: keep the partial file, report the status.
+                discardedNonSuccess = true
+                completionHandler(.cancel)
+            }
+        } catch {
+            failure = error
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard failure == nil, let handle else { return }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            failure = error
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        try? handle?.synchronize()
+        try? handle?.close()
+        handle = nil
+        let response = self.response
+        let failure = self.failure
+        let discardedNonSuccess = self.discardedNonSuccess
+        lock.unlock()
+        if let failure {
+            gate.resolve(.failure(failure))
+        } else if discardedNonSuccess, let response {
+            gate.resolve(.success(response))
+        } else if let error {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                gate.resolve(.failure(CoreFailure(code: .cancelled, retryable: false)))
+            } else {
+                gate.resolve(.failure(CoreFailure(code: .network, retryable: true, redactedContext: ["error": "url_session"])))
+            }
+        } else if let response {
+            gate.resolve(.success(response))
+        } else {
+            gate.resolve(.failure(CoreFailure(code: .network, retryable: true)))
+        }
+    }
+
+    /// Parses the first byte offset of `Content-Range: bytes <start>-<end>/<total>`.
+    static func contentRangeStart(_ response: HTTPURLResponse) -> Int64? {
+        guard let value = response.value(forHTTPHeaderField: "Content-Range")?.trimmingCharacters(in: .whitespaces).lowercased(),
+              value.hasPrefix("bytes ") else { return nil }
+        let range = value.dropFirst("bytes ".count)
+        guard let dash = range.firstIndex(of: "-") else { return nil }
+        return Int64(range[range.startIndex..<dash])
+    }
+}
+
+/// Version-keyed partial downloads kept in the extension's own (sandboxed)
+/// caches directory. The key covers the content version, so a remote change
+/// can never be resumed on top of stale bytes.
+public enum PartialDownloadStore {
+    static let staleAfter: TimeInterval = 7 * 24 * 3_600
+
+    public static func url(itemIdentifier: String, contentVersion: Data, fileManager: FileManager = .default) -> URL? {
+        guard let directory = directory(fileManager: fileManager) else { return nil }
+        let key = VersionHasher.digest([Data(itemIdentifier.utf8), contentVersion]).map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent("\(key).partial")
+    }
+
+    public static func size(of url: URL, fileManager: FileManager = .default) -> Int64 {
+        ((try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    public static func purgeStale(now: Date = Date(), fileManager: FileManager = .default) {
+        guard let directory = directory(fileManager: fileManager),
+              let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for entry in entries {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(modified) > staleAfter { try? fileManager.removeItem(at: entry) }
+        }
+    }
+
+    private static func directory(fileManager: FileManager) -> URL? {
+        guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let directory = caches.appendingPathComponent("NimbusSyncPartialDownloads", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            return directory
+        } catch {
+            return nil
+        }
+    }
+}
+
 /// Adapter used by unit tests and by deliberately read-only fallback paths.
 /// Production callbacks use a native CloudreveAsyncBackend implementation.
 public final class LegacyAsyncFileProviderBackendAdapter: CloudreveAsyncBackend, @unchecked Sendable {
@@ -480,7 +674,20 @@ public final class LegacyAsyncFileProviderBackendAdapter: CloudreveAsyncBackend,
 }
 
 public enum FileProviderSourceFingerprint {
+    private static let cache = FingerprintCache()
+
+    /// The coordinator (replay key) and the backend (upload session) both
+    /// need the whole-file hash of the same callback source. Cache it by file
+    /// identity so a multi-GB upload is hashed once, not once per layer.
     public static func digest(url: URL) throws -> (hash: Data, size: Int64) {
+        guard let key = FingerprintCache.key(for: url) else { return try computeDigest(url: url) }
+        if let cached = cache.value(for: key) { return cached }
+        let result = try computeDigest(url: url)
+        cache.store(result, for: key)
+        return result
+    }
+
+    private static func computeDigest(url: URL) throws -> (hash: Data, size: Int64) {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -490,6 +697,31 @@ public enum FileProviderSourceFingerprint {
             size += Int64(chunk.count)
         }
         return (Data(hasher.finalize()), size)
+    }
+}
+
+private final class FingerprintCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: (hash: Data, size: Int64)] = [:]
+    private var order: [String] = []
+    private let capacity = 32
+
+    static func key(for url: URL) -> String? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return "\(url.path)|\(info.st_dev)|\(info.st_ino)|\(info.st_size)|\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec)|\(info.st_ctimespec.tv_sec).\(info.st_ctimespec.tv_nsec)"
+    }
+
+    func value(for key: String) -> (hash: Data, size: Int64)? {
+        lock.lock(); defer { lock.unlock() }
+        return entries[key]
+    }
+
+    func store(_ value: (hash: Data, size: Int64), for key: String) {
+        lock.lock(); defer { lock.unlock() }
+        if entries[key] == nil { order.append(key) }
+        entries[key] = value
+        while order.count > capacity { entries.removeValue(forKey: order.removeFirst()) }
     }
 }
 

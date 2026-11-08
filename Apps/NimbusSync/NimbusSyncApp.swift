@@ -761,6 +761,22 @@ private final class NimbusSyncAppState: ObservableObject {
         }
     }
 
+    /// Remote changes only reach Finder while the menu-bar app holds the
+    /// event stream. Register the login item once, when the first location
+    /// is added; a later explicit opt-out in Settings is respected.
+    private func enableLaunchAtLoginOnce() {
+        let key = "loginItem.autoEnabledOnce"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        guard SMAppService.mainApp.status != .enabled else { return }
+        do {
+            try SMAppService.mainApp.register()
+            lifecycleLogger.info("login_item.registered")
+        } catch {
+            lifecycleLogger.error("login_item.register_failed")
+        }
+    }
+
     func addDomain(origin rawOrigin: String) {
         guard !isAuthorizing, !isProvisioningDomain else { return }
         let correlationID = UUID()
@@ -834,7 +850,7 @@ private final class NimbusSyncAppState: ObservableObject {
                     displayName: setup.displayName,
                     scope: setup.scope,
                     credential: setup.credential,
-                    capabilitySnapshot: CapabilitySnapshot(serverVersion: setup.serverVersion),
+                    capabilitySnapshot: .cloudreveV4(serverVersion: setup.serverVersion),
                     iconURL: setup.iconURL,
                     resolveIdentity: {
                         try await resolver.resolve(origin: setup.origin, credential: setup.credential, rootURI: rootURI)
@@ -844,6 +860,7 @@ private final class NimbusSyncAppState: ObservableObject {
                     }
                 )
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.provisioning_succeeded")
+                enableLaunchAtLoginOnce()
                 pendingDomainSetup = nil
                 reload()
                 onDomainProvisioned?(descriptor)
@@ -1033,7 +1050,7 @@ private final class NimbusSyncAppState: ObservableObject {
             guard let item, let origin = URL(string: domain.scope.origin), var components = URLComponents(url: origin.appendingPathComponent("home"), resolvingAgainstBaseURL: false) else { continue }
             let folderURI = item.kind == .folder ? item.uri : (item.parentIdentifier == NSFileProviderItemIdentifier.rootContainer.rawValue ? domain.scope.rootURI : item.uri)
             let openURI = item.kind == .folder ? nil : item.uri
-            components.queryItems = [URLQueryItem(name: "path", value: folderURI), URLQueryItem(name: "open", value: openURI)]
+            components.setCloudreveQueryItems([URLQueryItem(name: "path", value: folderURI), URLQueryItem(name: "open", value: openURI)])
             guard let target = components.url else { continue }
             NSWorkspace.shared.open(target)
             return
@@ -1240,7 +1257,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 let application = try await service.preview(
                     revision: max(1, currentRevision + 1),
                     text: text,
-                    items: try domainStore.allItems(limit: 100_000),
+                    items: try domainStore.allItems(limit: DomainScale.maximumItems),
                     rootURI: domain.currentRootURI
                 )
                 // Applying a view rule never deletes remote objects. When

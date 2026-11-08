@@ -86,6 +86,33 @@ public enum CloudreveRemoteURI {
         return try? normalizedPath(value)
     }
 
+    /// Redacted structural description of a remote URI for diagnostics: how
+    /// it parses and which ASCII punctuation it carries (raw and decoded).
+    /// Never includes names, path segments, account IDs or hosts.
+    public static func diagnosticShape(_ rawValue: String) -> String {
+        func punctuation(_ value: String) -> String {
+            let scalars = Set(value.unicodeScalars.filter { $0.isASCII && !CharacterSet.alphanumerics.contains($0) && $0 != "/" }.map(Character.init))
+            return String(scalars.sorted())
+        }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var parts: [String] = []
+        if trimmed != rawValue { parts.append("edge_whitespace") }
+        if !trimmed.hasPrefix("cloudreve://") { parts.append("bare_path") }
+        if let components = URLComponents(string: trimmed) {
+            if components.query != nil { parts.append("query") }
+            if components.fragment != nil { parts.append("fragment") }
+            if components.user != nil { parts.append("user") }
+            if components.password != nil { parts.append("password") }
+            if let host = components.host?.lowercased() { parts.append(["my", "trash", "shared_with_me"].contains(host) ? "host=\(host)" : "host=other") }
+            parts.append("decoded=[\(punctuation(components.path))]")
+        } else {
+            parts.append("unparsable")
+        }
+        parts.append("raw=[\(punctuation(trimmed))]")
+        if trimmed.unicodeScalars.contains(where: { !$0.isASCII }) { parts.append("non_ascii") }
+        return parts.joined(separator: " ")
+    }
+
     public static func append(_ parent: String, name: String) throws -> String {
         guard !name.isEmpty, !name.contains("/"), !name.contains("\\"), name != ".", name != ".." else { throw CloudreveIdentifierError.sensitiveValue }
         guard var components = URLComponents(string: parent), components.scheme == "cloudreve" else { throw CloudreveIdentifierError.sensitiveValue }
@@ -289,6 +316,73 @@ public struct CapabilitySnapshot: Codable, Equatable, Sendable {
     }
     public var canTrash: Bool { trashRestore == .verified && operations.trash == .verified }
     public var canPurge: Bool { trashRestore == .verified && deleteSemantics == .verified && operations.purge == .verified }
+
+    /// Provider-independent write gates. The storage policy is only known per
+    /// upload session, so item projection must not depend on a single
+    /// configured provider name.
+    public var allowsCreate: Bool { stableItemIdentity == .verified && stableRootIdentity == .verified && operations.collisionSafeCreate == .verified }
+    public var allowsMetadataMove: Bool { stableItemIdentity == .verified && stableRootIdentity == .verified && conditionalMetadataMutation == .verified && operations.metadataMove == .verified }
+    public var allowsContentWrite: Bool { allowsWrite && operations.conditionalModify == .verified && operations.collisionSafeCreate == .verified && operations.resumable == .verified && providers.contains { canWrite(provider: $0.name) } }
+}
+
+/// Cloudreve v4 is a known, versioned API. Its documented semantics are the
+/// production capability baseline; there is no runtime probe that could ever
+/// upgrade an all-`unverified` snapshot, so leaving freshly provisioned
+/// domains on the fail-closed defaults made every list and write fail.
+public extension CapabilitySnapshot {
+    static let cloudreveV4BaselineRevision: UInt64 = 1
+    /// Storage policy kinds Cloudreve v4 returns in `storage_policy.type`.
+    static let cloudreveV4UploadPolicies = ["local", "remote", "oss", "qiniu", "onedrive", "cos", "upyun", "s3", "ks3", "obs"]
+
+    static func cloudreveV4(serverVersion: String?) -> CapabilitySnapshot {
+        let policies = cloudreveV4UploadPolicies
+        let providers = policies.map { Provider(name: $0, read: .verified, write: .verified, resumable: .verified, zeroByte: .verified, crypto: .unverified) }
+        let operations = OperationCapabilities(
+            collisionSafeCreate: .verified,
+            conditionalModify: .verified,
+            metadataMove: .verified,
+            trash: .verified,
+            purge: .verified,
+            zeroByte: .verified,
+            resumable: .verified,
+            nativeConflictCopy: .unsupported,
+            fallbackConflict: .verified
+        )
+        return CapabilitySnapshot(
+            revision: cloudreveV4BaselineRevision,
+            serverVersion: serverVersion,
+            stableItemIdentity: .verified,
+            stableRootIdentity: .verified,
+            completePagination: .verified,
+            cursorPagination: .verified,
+            snapshotSafePagination: .verified,
+            conditionalContentWrite: .verified,
+            conditionalMetadataMutation: .verified,
+            idempotentCreate: .verified,
+            contentVersionSemantics: .verified,
+            resumableUploadProviders: policies,
+            uploadCompletionQueryableProviders: policies,
+            zeroByteWriteProviders: policies,
+            resolvedUploadPolicyKinds: policies,
+            deleteSemantics: .verified,
+            trashRestore: .verified,
+            sse: .verified,
+            refreshRotationSemantics: .verified,
+            thumbnail: .verified,
+            providers: providers,
+            operations: operations
+        )
+    }
+
+    /// True for snapshots that were never probed: the exact all-default shape
+    /// earlier builds persisted at provisioning time.
+    var isUnprobedDefault: Bool { self == CapabilitySnapshot(serverVersion: serverVersion) }
+
+    /// Migrates legacy all-default snapshots to the Cloudreve v4 baseline while
+    /// leaving explicitly configured snapshots untouched.
+    func upgradedToCloudreveV4Baseline() -> CapabilitySnapshot {
+        isUnprobedDefault ? .cloudreveV4(serverVersion: serverVersion) : self
+    }
 }
 
 public struct ItemVersion: Codable, Equatable, Sendable {
@@ -300,8 +394,22 @@ public struct ItemVersion: Codable, Equatable, Sendable {
 /// The provider-visible projection contract is independent from the
 /// application version. A patch release must not invalidate content versions
 /// or force a full File Provider re-enumeration.
+/// Upper bound on items tracked for one sync location. Reconcile, deletion
+/// detection, trash listing and rule previews share it so they either cover
+/// the whole domain or fail together. The former 100k sat below a real
+/// account (~150k items after a Nextcloud migration), so every full
+/// reconcile failed with `normal_scan_bound`. Per-directory bounds (snapshot
+/// capacity, page offsets) are separate and intentionally unchanged.
+public enum DomainScale {
+    public static let maximumItems = 1_000_000
+}
+
 public enum ProjectionSchema {
-    public static let currentRevision: UInt64 = 2
+    // 3: metadata versions no longer fold transient transfer state and
+    // capabilities come from the shared Cloudreve item mapper.
+    // 4: items publish real POSIX file-system flags; earlier projections
+    // exposed folders as mode 0100, so cached items must be re-emitted.
+    public static let currentRevision: UInt64 = 4
     public static let itemPayloadVersion: UInt8 = 1
 }
 

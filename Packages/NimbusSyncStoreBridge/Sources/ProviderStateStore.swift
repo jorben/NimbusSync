@@ -248,6 +248,17 @@ public struct SchemaManifestSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// The minimum needed to decide remote deletions without materialising every
+/// stored item (a full `RemoteItem` per row was ~100 MB at 150k items).
+public struct StoredRemoteIdentity: Sendable, Equatable {
+    public let itemIdentifier: String
+    public let remoteID: String
+    public let uri: String
+    public init(itemIdentifier: String, remoteID: String, uri: String) {
+        self.itemIdentifier = itemIdentifier; self.remoteID = remoteID; self.uri = uri
+    }
+}
+
 public extension SQLiteStateStore {
     func applyExclusionRules(_ snapshot: ExclusionRuleSnapshot, domainIdentifier: String, rootURI: String) throws -> [JournalChange] {
         let items = try allItems()
@@ -388,7 +399,7 @@ public extension SQLiteStateStore {
                   let snapshot = try? JSONDecoder().decode(CapabilitySnapshot.self, from: data) else {
                 return false
             }
-            return snapshot.operationVerified(operation)
+            return snapshot.upgradedToCloudreveV4Baseline().operationVerified(operation)
         }
     }
 
@@ -485,7 +496,7 @@ public extension SQLiteStateStore {
                 let previous = try itemUnlockedForProjection(identifier: item.itemIdentifier)
                 if recursive, item.tombstone, item.kind == .folder {
                     let refreshed = try tombstoneDescendantsUnlocked(rootIdentifier: item.itemIdentifier, oldURI: previous?.uri ?? item.uri)
-                    if refreshed >= 100_000 {
+                    if refreshed >= DomainScale.maximumItems {
                         try execute("UPDATE sync_state SET reconcile_status = 'required:recursive_delete' WHERE singleton = 1")
                     }
                 }
@@ -625,8 +636,8 @@ public extension SQLiteStateStore {
     /// appended. The child-first sequence ordering lets File Provider remove
     /// nested items without briefly leaving a stale child under a deleted
     /// directory.
-    func tombstoneDescendantsUnlocked(rootIdentifier: String, oldURI: String, limit: Int = 100_000) throws -> Int {
-        let boundedLimit = max(1, min(limit, 100_000))
+    func tombstoneDescendantsUnlocked(rootIdentifier: String, oldURI: String, limit: Int = DomainScale.maximumItems) throws -> Int {
+        let boundedLimit = max(1, min(limit, DomainScale.maximumItems))
         let statement = try prepare("""
         SELECT item_uuid, remote_entity_id, parent_uuid, trash_original_parent_uuid, remote_name, kind, current_remote_uri, size, remote_version, content_version, metadata_version, trashed, tombstone, created_at, modified_at, can_read, can_write, can_add_children, can_trash, can_delete, content_type
         FROM items
@@ -811,14 +822,34 @@ public extension SQLiteStateStore {
         }
     }
 
-    func allItems(limit: Int = 100_000, includeTombstones: Bool = false) throws -> [RemoteItem] {
+    /// Live (non-tombstoned) items that carry a remote identity.
+    func remoteIdentities(limit: Int = DomainScale.maximumItems) throws -> [StoredRemoteIdentity] {
+        try withLock {
+            let statement = try prepare("""
+            SELECT item_uuid, remote_entity_id, current_remote_uri
+            FROM items
+            WHERE tombstone = 0 AND remote_entity_id IS NOT NULL AND remote_entity_id <> ''
+            ORDER BY item_uuid ASC
+            LIMIT \(max(1, min(limit, DomainScale.maximumItems)))
+            """)
+            defer { sqlite3_finalize(statement) }
+            var result: [StoredRemoteIdentity] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let identifier = columnString(statement, 0), let remoteID = columnString(statement, 1) else { continue }
+                result.append(StoredRemoteIdentity(itemIdentifier: identifier, remoteID: remoteID, uri: columnString(statement, 2) ?? ""))
+            }
+            return result
+        }
+    }
+
+    func allItems(limit: Int = DomainScale.maximumItems, includeTombstones: Bool = false) throws -> [RemoteItem] {
         try withLock {
             let tombstoneClause = includeTombstones ? "" : "WHERE tombstone = 0"
             let statement = try prepare("""
             SELECT item_uuid, remote_entity_id, parent_uuid, trash_original_parent_uuid, remote_name, kind, current_remote_uri, size, remote_version, content_version, metadata_version, trashed, tombstone, created_at, modified_at, can_read, can_write, can_add_children, can_trash, can_delete, content_type
             FROM items \(tombstoneClause)
             ORDER BY item_uuid ASC
-            LIMIT \(max(1, min(limit, 100_000)))
+            LIMIT \(max(1, min(limit, DomainScale.maximumItems)))
             """)
             defer { sqlite3_finalize(statement) }
             var result: [RemoteItem] = []
@@ -1375,7 +1406,7 @@ public extension SQLiteStateStore {
         guard let encoded = try scalar("SELECT capability_snapshot FROM domains ORDER BY domain_id LIMIT 1"), let data = encoded.data(using: .utf8), let snapshot = try? JSONDecoder().decode(CapabilitySnapshot.self, from: data) else {
             return false
         }
-        return snapshot.stableItemIdentity == .verified && snapshot.stableRootIdentity == .verified && snapshot.conditionalMetadataMutation == .verified && snapshot.operations.metadataMove == .verified
+        return snapshot.upgradedToCloudreveV4Baseline().allowsMetadataMove
     }
 
     private func snapshotDescriptorUnlocked(snapshotID: String) throws -> DirectorySnapshotDescriptor {

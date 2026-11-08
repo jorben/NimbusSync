@@ -6,6 +6,7 @@ import OSLog
 import CloudreveAuthKit
 import CloudreveDomainKit
 import CloudreveStoreBridge
+import CloudreveObservability
 
 private struct APIEnvelope<Value: Decodable>: Decodable {
     let code: Int
@@ -24,6 +25,11 @@ private struct RemoteFileDTO: Decodable {
     let permission: String?
     let capability: String?
     let primaryEntity: String?
+    let metadata: CloudreveFileMetadata?
+
+    var fields: CloudreveFileFields {
+        CloudreveFileFields(type: type, id: id, name: name, size: size, permission: permission, capability: capability, createdAt: createdAt, updatedAt: updatedAt, primaryEntity: primaryEntity, metadata: metadata?.values ?? [:])
+    }
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -36,6 +42,7 @@ private struct RemoteFileDTO: Decodable {
         case permission
         case capability
         case primaryEntity = "primary_entity"
+        case metadata
     }
 }
 
@@ -111,6 +118,12 @@ private struct FileURLDTO: Decodable {
 
 private struct EntityURLDTO: Decodable {
     let url: String
+}
+
+private struct FileThumbDTO: Decodable {
+    let url: String
+    let expires: String?
+    let obfuscated: Bool?
 }
 
 private struct QiniuChunkResponse: Decodable {
@@ -203,13 +216,28 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
         self.clientID = clientID ?? (try? store.ensureEventClientID())
         self.credentialRefresh = CredentialRefreshService(vault: vault)
         let configuration = urlSessionConfiguration ?? URLSessionConfiguration.ephemeral
+        // timeoutIntervalForRequest is an idle timeout between bytes; the
+        // resource timeout caps the *whole* transfer. Capping it at the API
+        // timeout (60 s) failed every download/upload that took longer than a
+        // minute, so transfers get the system default ceiling instead.
         configuration.timeoutIntervalForRequest = requestTimeout
-        configuration.timeoutIntervalForResource = requestTimeout
+        configuration.timeoutIntervalForResource = 7 * 24 * 3_600
         configuration.httpShouldSetCookies = false
         self.session = URLSession(configuration: configuration, delegate: RedirectPolicy(), delegateQueue: nil)
     }
 
     public func item(identifier: String) throws -> RemoteItem? { try store.item(identifier: identifier) }
+
+    /// Thumbnails are optional: Cloudreve answers 40077 for types it cannot preview and the caller
+    /// falls back, so those stay out of the error log and the user-facing activity log.
+    private func reportAPIFailure(path: String, detail: String) {
+        guard path != "file/thumb" else {
+            logger.debug("api.failed path=\(path, privacy: .public) \(detail, privacy: .public)")
+            return
+        }
+        logger.error("api.failed path=\(path, privacy: .public) \(detail, privacy: .public)")
+        ActivityLog.shared.error("api", "Request failed · path=\(path) \(detail)")
+    }
 
     private func discardTransferSecret(operationID: UUID, reference: String) {
         do {
@@ -272,13 +300,10 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
             var mapped: [RemoteItem] = []
             var pageIdentities: [String: String] = [:]
             for dto in response.files {
-                let identifier: String
-                if let existing = pageIdentities[dto.id] {
-                    identifier = existing
-                } else {
-                    identifier = try store.itemIdentifier(forRemoteID: dto.id) ?? CloudreveIdentifier.item()
-                    pageIdentities[dto.id] = identifier
-                }
+                let known = try pageIdentities[dto.id] ?? store.itemIdentifier(forRemoteID: dto.id)
+                if known == nil, dto.fields.hasActiveUploadSession { continue }
+                let identifier = known ?? CloudreveIdentifier.item()
+                pageIdentities[dto.id] = identifier
                 mapped.append(try makeItem(dto, parentIdentifier: parentIdentifier, itemIdentifier: identifier))
             }
             let pagination = response.pagination
@@ -314,7 +339,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
                 }
                 try store.appendDirectorySnapshotItems(snapshotID: activeSnapshot.snapshotID, items: mapped, nextCursor: hasMore ? Data("page:\(pageNumber + 1)".utf8) : nil)
             } else {
-                hasMore = mapped.count >= pageSize
+                hasMore = response.files.count >= pageSize
                 if hasMore {
                     guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: false) else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
@@ -483,23 +508,13 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
     }
 
     public func delete(identifier: String, expectedVersion: Data?, recursive: Bool) throws {
-        try requireOperation("purge")
         guard let current = try store.item(identifier: identifier) else { return }
-        guard current.canDelete else { throw CoreFailure(code: .permissionDenied, retryable: false, userActionRequired: true) }
-        if let expectedVersion, expectedVersion != current.version.content { throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true) }
-        if current.kind == .folder && !recursive {
-            let children = try children(parentIdentifier: identifier)
-            if !children.isEmpty { throw CoreFailure(code: .directoryNotEmpty, retryable: false) }
-        }
-        guard current.trashed else { throw CoreFailure(code: .cannotSynchronize, retryable: false, userActionRequired: true) }
+        let skipSoftDelete = try deletionMode(for: current, expectedVersion: expectedVersion, recursive: recursive)
         do {
-            let _: EmptyResponse = try request(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": true], authenticated: true)
+            let _: EmptyResponse = try request(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": skipSoftDelete], authenticated: true)
         } catch let failure as CoreFailure where failure.code == .notFound {
-            // Purge is idempotent once the remote trash entry has already
-            // disappeared.
+            // Deletion is idempotent once the remote item is gone.
         }
-        var tombstone = current
-        tombstone.tombstone = true
     }
 
     private func parentURI(for identifier: String) throws -> String {
@@ -700,15 +715,20 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
         guard let rootComponents = URLComponents(string: rootURI), let accountID = rootComponents.user else {
             throw CoreFailure(code: .rootUnavailable, retryable: false, userActionRequired: true)
         }
+        let canonical: String
         do {
-            let canonical = try CloudreveRemoteURI.canonical(value, accountID: accountID)
-            try validateURI(canonical)
-            return canonical
-        } catch let error as CoreFailure {
-            throw error
+            canonical = try CloudreveRemoteURI.canonical(value, accountID: accountID)
         } catch {
-            throw CoreFailure(code: .rootUnavailable, retryable: false, userActionRequired: true)
+            logger.error("uri.rejected stage=uri_canonical shape=\(CloudreveRemoteURI.diagnosticShape(value), privacy: .public)")
+            ActivityLog.shared.warning("file-provider", "Remote path rejected · stage=uri_canonical shape=\(CloudreveRemoteURI.diagnosticShape(value))")
+            throw CoreFailure(code: .rootUnavailable, retryable: false, userActionRequired: true, redactedContext: ["stage": "uri_canonical"])
         }
+        guard CloudreveRemoteURI.isWithin(canonical, root: rootURI) else {
+            logger.error("uri.rejected stage=uri_outside_root shape=\(CloudreveRemoteURI.diagnosticShape(value), privacy: .public)")
+            ActivityLog.shared.warning("file-provider", "Remote path outside the sync root · shape=\(CloudreveRemoteURI.diagnosticShape(value))")
+            throw CoreFailure(code: .rootUnavailable, retryable: false, userActionRequired: true, redactedContext: ["stage": "uri_outside_root"])
+        }
+        return canonical
     }
 
     private func boundedUploadURLs(_ values: [String], allowRelative: Bool = false) throws -> [String] {
@@ -728,8 +748,11 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
         let verified: Bool
         switch operation {
         case "create": verified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.operations.collisionSafeCreate == .verified
-        case "content": verified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.operations.conditionalModify == .verified && capabilitySnapshot.canWrite(provider: providerName)
-        case "zero_byte": verified = capabilitySnapshot.canWriteZeroByte(provider: providerName)
+        // The storage policy is resolved per upload session (folders may use
+        // different policies), so content gates are provider-independent and
+        // the concrete policy is checked once the server names it.
+        case "content": verified = capabilitySnapshot.allowsContentWrite
+        case "zero_byte": verified = capabilitySnapshot.providers.contains { capabilitySnapshot.canWriteZeroByte(provider: $0.name) }
         case "metadata_move": verified = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.conditionalMetadataMutation == .verified && capabilitySnapshot.operations.metadataMove == .verified
         case "trash": verified = capabilitySnapshot.canTrash
         case "purge": verified = capabilitySnapshot.canPurge
@@ -742,7 +765,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
         var components = URLComponents(url: origin.appendingPathComponent("api/v4/file/content"), resolvingAgainstBaseURL: false)
         var query = [URLQueryItem(name: "uri", value: uri)]
         if let previous { query.append(URLQueryItem(name: "previous", value: previous)) }
-        components?.queryItems = query
+        components?.setCloudreveQueryItems(query)
         guard let url = components?.url else { throw CoreFailure(code: .network, retryable: true) }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "PUT"
@@ -792,26 +815,31 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
                 throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "session_id"])
             }
             let provider = credential.storagePolicy?.type?.lowercased() ?? providerName.lowercased()
-            guard provider.caseInsensitiveCompare(providerName) == .orderedSame else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true) }
+            guard capabilitySnapshot.canWrite(provider: provider) else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "storage_policy"]) }
             let uploadURLs = try boundedUploadURLs(credential.uploadURLs ?? [], allowRelative: provider == "remote")
             let expiresAt = credential.expires > 0 ? Date(timeIntervalSince1970: TimeInterval(credential.expires)) : nil
             let secretReference = "transfer-\(operationID.uuidString)"
             let newCache = UploadCredentialCache(sessionID: credential.sessionID, credential: credential.credential, uploadPolicy: credential.uploadPolicy, mimeType: credential.mimeType, uploadURLs: uploadURLs, callbackSecret: credential.callbackSecret, completeURL: credential.completeURL, provider: provider, expiresAt: expiresAt)
             try secretVault.writeSecret(JSONEncoder().encode(newCache).base64EncodedString(), reference: secretReference)
-            guard credential.chunkSize > 0, provider == "upyun" || credential.chunkSize <= 8 * 1024 * 1024 else {
+            let chunkSize: Int
+            do {
+                chunkSize = try Self.uploadChunkSize(serverChunkSize: credential.chunkSize, fileSize: Int64(content.count), provider: provider)
+            } catch {
+                // Cancel the server session too, or its placeholder blocks every retry (40004).
+                let _: EmptyResponse? = try? request(path: "file/upload", method: "DELETE", query: [], body: ["id": credential.sessionID, "uri": uri], authenticated: true)
                 discardTransferSecret(operationID: operationID, reference: secretReference)
-                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "chunk_size"])
+                throw error
             }
             let descriptors = provider == "upyun"
                 ? [UploadPartDescriptor(index: 0, offset: 0, length: content.count)]
-                : planParts(size: content.count, chunkSize: Int(credential.chunkSize))
+                : planParts(size: content.count, chunkSize: chunkSize)
             let parts = descriptors.map { descriptor in
                 let sourceHash = provider == "upyun"
                     ? Data(SHA256.hash(data: content))
                     : Data(SHA256.hash(data: content[descriptor.offset..<(descriptor.offset + descriptor.length)]))
                 return UploadPartCheckpoint(index: descriptor.index, offset: Int64(descriptor.offset), length: Int64(descriptor.length), sourceHash: sourceHash)
             }
-            let checkpointChunkSize = provider == "upyun" ? max(1, Int64(content.count)) : credential.chunkSize
+            let checkpointChunkSize = provider == "upyun" ? max(1, Int64(content.count)) : Int64(chunkSize)
             session = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: secretReference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts)
             cache = newCache
             try store.saveUploadSession(session!)
@@ -934,9 +962,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
             throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
         }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        var query = components?.queryItems ?? []
-        query.append(URLQueryItem(name: "chunk", value: String(index)))
-        components?.queryItems = query
+        components?.appendCloudreveQueryItem(URLQueryItem(name: "chunk", value: String(index)))
         guard let target = components?.url else {
             throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
         }
@@ -1099,6 +1125,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
     private func fetchRemoteItem(fallback: RemoteItem) throws -> RemoteItem {
         let uri = try canonicalRemoteURI(fallback.uri)
         let dto: RemoteFileDTO = try request(path: "file/info", method: "GET", query: [URLQueryItem(name: "uri", value: uri), URLQueryItem(name: "extended", value: "true")], body: nil, authenticated: true)
+        try Self.requireSameRemoteObject(dto, as: fallback)
         let normalized = try canonicalRemoteURI(dto.path)
         let parent = try parentIdentifierForRemoteURI(normalized, fallback: fallback.parentIdentifier)
         return try makeItem(dto, parentIdentifier: parent, itemIdentifier: fallback.itemIdentifier)
@@ -1106,23 +1133,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
 
     private func makeItem(_ dto: RemoteFileDTO, parentIdentifier: String, itemIdentifier: String? = nil) throws -> RemoteItem {
         let normalizedURI = try canonicalRemoteURI(dto.path)
-        // updated_at is metadata evidence, not a content version. Keep a
-        // stable placeholder for read-only projection when the server omits
-        // primary_entity, and never expose file writes in that state.
-        let contentVersion = RemoteContentVersionPolicy.resolve(primaryEntity: dto.primaryEntity, stableEntityID: dto.id)
-        let hasReliableContentRevision = contentVersion.reliable
-        let contentRevision = contentVersion.value
-        let kind: RemoteItemKind = dto.type == 1 ? .folder : (dto.type == 0 ? .file : .unsupported)
-        let remoteWritable = dto.capability?.contains("w") ?? false
-        let contentWritable = capabilitySnapshot.canWrite(provider: providerName) && remoteWritable
-        let metadataWritable = capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.conditionalMetadataMutation == .verified && capabilitySnapshot.operations.metadataMove == .verified && remoteWritable
-        let writable = kind == .folder ? metadataWritable : (hasReliableContentRevision && (contentWritable || metadataWritable))
-        let trashable = remoteWritable && capabilitySnapshot.canTrash
-        let purgeable = remoteWritable && capabilitySnapshot.canPurge
-        let readable = dto.permission.map { $0.contains("r") } ?? true
-        let remoteDeletable = dto.capability?.contains("d") ?? false
-        let contentType = kind == .folder ? UTType.folder.identifier : (kind == .symlink ? UTType.symbolicLink.identifier : UTType.data.identifier)
-        return RemoteItem(itemIdentifier: itemIdentifier ?? CloudreveIdentifier.item(), remoteID: dto.id, parentIdentifier: parentIdentifier, name: dto.name, uri: normalizedURI, kind: kind, contentType: contentType, size: max(0, dto.size ?? 0), remoteVersion: dto.primaryEntity, version: ItemVersion(content: VersionHasher.content(primaryEntity: contentRevision), metadata: VersionHasher.metadata(parent: parentIdentifier, name: dto.name, kind: kind, permissionBits: readable ? 1 : 0, revision: dto.updatedAt)), creationDate: parseRemoteDate(dto.createdAt), contentModificationDate: parseRemoteDate(dto.updatedAt), canRead: readable && kind != .unsupported, canWrite: writable && readable && kind != .unsupported, canAddChildren: remoteWritable && readable && kind == .folder && capabilitySnapshot.stableItemIdentity == .verified && capabilitySnapshot.stableRootIdentity == .verified && capabilitySnapshot.operations.collisionSafeCreate == .verified, canTrash: trashable && readable && remoteDeletable, canDelete: purgeable && readable && remoteDeletable)
+        return CloudreveItemMapper.item(from: dto.fields, normalizedURI: normalizedURI, parentIdentifier: parentIdentifier, itemIdentifier: itemIdentifier ?? CloudreveIdentifier.item(), capabilities: capabilitySnapshot)
     }
 
     private func request<Value: Decodable>(path: String, method: String, query: [URLQueryItem], body: [String: Any]?, authenticated: Bool) throws -> Value {
@@ -1133,7 +1144,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
         var result = try perform(request)
         guard let httpResponse = result.1 as? HTTPURLResponse else { throw CoreFailure(code: .network, retryable: true) }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            logger.error("api.failed path=\(path, privacy: .public) http_status=\(httpResponse.statusCode, privacy: .public)")
+            reportAPIFailure(path: path, detail: "http_status=\(httpResponse.statusCode)")
             throw mapHTTPStatus(httpResponse.statusCode)
         }
 
@@ -1145,14 +1156,14 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
             result = try performOnce(request)
             guard let retryResponse = result.1 as? HTTPURLResponse else { throw CoreFailure(code: .network, retryable: true) }
             guard (200..<300).contains(retryResponse.statusCode) else {
-                logger.error("api.failed path=\(path, privacy: .public) http_status=\(retryResponse.statusCode, privacy: .public) after_auth_retry=true")
+                reportAPIFailure(path: path, detail: "http_status=\(retryResponse.statusCode) after_auth_retry=true")
                 throw mapHTTPStatus(retryResponse.statusCode)
             }
             envelope = try JSONDecoder().decode(APIEnvelope<Value>.self, from: result.0)
         }
 
         guard envelope.code == 0 else {
-            logger.error("api.failed path=\(path, privacy: .public) api_code=\(envelope.code, privacy: .public)")
+            reportAPIFailure(path: path, detail: "api_code=\(envelope.code)")
             throw mapAPIError(envelope.code, message: envelope.msg)
         }
         if let value = envelope.data { return value }
@@ -1162,7 +1173,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
 
     private func makeRequest(path: String, method: String, query: [URLQueryItem], body: [String: Any]?, authenticated: Bool, credentialOverride: Credential?) throws -> URLRequest {
         var url = origin.appendingPathComponent("api/v4").appendingPathComponent(path)
-        if !query.isEmpty { var components = URLComponents(url: url, resolvingAgainstBaseURL: false); components?.queryItems = query; url = components?.url ?? url }
+        if !query.isEmpty { var components = URLComponents(url: url, resolvingAgainstBaseURL: false); components?.setCloudreveQueryItems(query); url = components?.url ?? url }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -1422,6 +1433,59 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         try await Task.detached(priority: .userInitiated) { try self.item(identifier: identifier) }.value
     }
 
+    /// Uses Cloudreve's thumbnail endpoint instead of downloading whole files
+    /// (Finder requests thumbnails for every visible item).
+    public func thumbnail(identifier: String, context: FileProviderOperationContext) async throws -> ThumbnailFetchResult {
+        guard let stored = try store.item(identifier: identifier), stored.kind == .file, stored.remoteID != nil, stored.canRead else { return .unavailable }
+        let dto: FileThumbDTO
+        do {
+            dto = try await requestAsync(path: "file/thumb", method: "GET", query: [URLQueryItem(name: "uri", value: try canonicalRemoteURI(stored.uri))], body: nil, authenticated: true, context: context)
+        } catch let failure as CoreFailure where ![.cancelled, .authentication, .network].contains(failure.code) {
+            // No thumbnail generator for this type, generation disabled, etc.
+            return .unavailable
+        }
+        var raw = dto.url
+        if dto.obfuscated == true {
+            guard let decoded = CloudreveTimeFlow.decode(raw), !decoded.isEmpty else { return .unavailable }
+            raw = decoded
+        }
+        guard !raw.isEmpty else { return .unavailable }
+        let url: URL
+        if raw.hasPrefix("/") {
+            guard let resolved = URL(string: raw, relativeTo: origin)?.absoluteURL else { return .unavailable }
+            url = resolved
+        } else {
+            url = try safeExternalURL(raw)
+        }
+        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+        // Bearer only ever goes to the Cloudreve origin, never to storage.
+        if url.scheme == origin.scheme, url.host == origin.host, url.port == origin.port,
+           let credential = try vault.read(reference: credentialReference) {
+            request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await externalDataAsync(request, context: context)
+        guard (200..<300).contains(response.statusCode), !data.isEmpty, data.count <= 16 * 1024 * 1024 else { return .unavailable }
+        return .image(data)
+    }
+
+    /// Looks the object up by its stable remote ID so a rename or move made
+    /// on the server is observed; returns nil when it no longer exists.
+    public func refreshItem(identifier: String, context: FileProviderOperationContext) async throws -> RemoteItem? {
+        guard let stored = try store.item(identifier: identifier), let remoteID = stored.remoteID else { return nil }
+        let dto: RemoteFileDTO
+        do {
+            dto = try await requestAsync(path: "file/info", method: "GET", query: [
+                URLQueryItem(name: "id", value: remoteID),
+                URLQueryItem(name: "extended", value: "true")
+            ], body: nil, authenticated: true, context: context)
+        } catch let failure as CoreFailure where failure.code == .notFound {
+            return nil
+        }
+        let normalized = try canonicalRemoteURI(dto.path)
+        let parent = try await parentIdentifierForRemoteURIAsync(normalized, fallback: stored.parentIdentifier, context: context)
+        return try makeItem(dto, parentIdentifier: parent, itemIdentifier: identifier)
+    }
+
     public func childrenPage(parentIdentifier: String, cursor: PageCursor?) async throws -> RemotePage {
         let context = FileProviderOperationContext(
             itemIdentifier: NSFileProviderItemIdentifier(parentIdentifier),
@@ -1434,138 +1498,163 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
 
     public func childrenPage(parentIdentifier: String, cursor: PageCursor?, context: FileProviderOperationContext) async throws -> RemotePage {
         let offset = cursor?.opaqueCursor.flatMap { Int(String(data: $0, encoding: .utf8) ?? "") } ?? 0
-        if let cursor, let snapshotID = cursor.snapshotID {
-            // A Finder page may outlive publication of a newer head. The
-            // token names the immutable snapshot, so it remains valid until
-            // its own TTL rather than being rejected merely because it is no
-            // longer current.
-            do {
-                let page = try store.directorySnapshotPage(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier, generation: cursor.generation, snapshotID: snapshotID, offset: offset, limit: 200)
-                let next = page.nextOffset.map { PageCursor(generation: page.generation, opaqueCursor: Data(String($0).utf8), snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) }) }
-                return RemotePage(items: page.items, nextCursor: next, complete: page.complete, snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) })
-            } catch let error as StoreBridgeError where error == .pageTokenInvalid {
-                // The snapshot is still collecting; resume hydration below.
-            }
-            guard let active = try store.activeDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier), active.snapshotID == snapshotID, active.generation == cursor.generation else {
+        if let cursor {
+            // A Finder page token names an immutable, complete snapshot; it
+            // stays valid until its own TTL even if a newer head was published.
+            // Hydration now completes within a single call, so a token can no
+            // longer name a collecting generation; anything else restarts the
+            // enumeration via pageExpired.
+            let snapshotID: String
+            if let named = cursor.snapshotID {
+                snapshotID = named
+            } else if let head = try store.currentCompleteDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier), head.generation == cursor.generation {
+                snapshotID = head.snapshotID
+            } else {
                 throw StoreBridgeError.snapshotExpired
             }
+            return try snapshotPage(parentIdentifier: parentIdentifier, generation: cursor.generation, snapshotID: snapshotID, offset: offset)
         }
-        if cursor == nil, let snapshot = try store.currentCompleteDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier) {
-            let page = try store.directorySnapshotPage(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier, generation: snapshot.generation, snapshotID: snapshot.snapshotID, offset: offset, limit: 200)
-            let next = page.nextOffset.map { PageCursor(generation: page.generation, opaqueCursor: Data(String($0).utf8), snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) }) }
-            return RemotePage(items: page.items, nextCursor: next, complete: page.complete, snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) })
+        let current = try store.currentCompleteDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier)
+        if let current, Self.isFresh(current) {
+            return try snapshotPage(parentIdentifier: parentIdentifier, generation: current.generation, snapshotID: current.snapshotID, offset: offset)
         }
+        do {
+            let published = try await hydrateDirectorySnapshot(parentIdentifier: parentIdentifier, context: context)
+            return try snapshotPage(parentIdentifier: parentIdentifier, generation: published.generation, snapshotID: published.snapshotID, offset: offset)
+        } catch let failure as CoreFailure where failure.code == .network && current != nil {
+            // Offline: a stale but complete listing is better than an error.
+            let stale = current!
+            return try snapshotPage(parentIdentifier: parentIdentifier, generation: stale.generation, snapshotID: stale.snapshotID, offset: offset)
+        } catch StoreBridgeError.generationFenced {
+            // A concurrent enumeration of the same folder published first.
+            guard let head = try store.currentCompleteDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier) else {
+                throw StoreBridgeError.snapshotExpired
+            }
+            return try snapshotPage(parentIdentifier: parentIdentifier, generation: head.generation, snapshotID: head.snapshotID, offset: offset)
+        }
+    }
+
+    /// Complete snapshots are re-hydrated after this window so a container
+    /// re-enumeration observes changes made while no event stream was running.
+    static let directorySnapshotTTL: TimeInterval = 3_600
+    static let directorySnapshotFreshness: TimeInterval = 300
+
+    private static func isFresh(_ snapshot: DirectorySnapshotDescriptor, now: Date = Date()) -> Bool {
+        snapshot.expiresAt.timeIntervalSince(now) > directorySnapshotTTL - directorySnapshotFreshness
+    }
+
+    private func snapshotPage(parentIdentifier: String, generation: UInt64, snapshotID: String, offset: Int) throws -> RemotePage {
+        let page = try store.directorySnapshotPage(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier, generation: generation, snapshotID: snapshotID, offset: offset, limit: 200)
+        let next = page.nextOffset.map { PageCursor(generation: page.generation, opaqueCursor: Data(String($0).utf8), snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) }) }
+        return RemotePage(items: page.items, nextCursor: next, complete: page.complete, snapshotID: page.snapshotID, expiresAt: page.expiresAt.map { Int64($0.timeIntervalSince1970) })
+    }
+
+    /// Pulls every remote page of a directory into one collecting generation
+    /// and publishes it. Previously each callback fetched a single page and
+    /// failed with cannotSynchronize until the system retried, so a folder
+    /// with N pages needed N failed enumerations (with backoff) to appear.
+    private func hydrateDirectorySnapshot(parentIdentifier: String, context: FileProviderOperationContext) async throws -> DirectorySnapshotDescriptor {
         let uri = try await parentURIAsync(for: parentIdentifier, context: context)
-        let active: DirectorySnapshotDescriptor
-        if let cursor, let snapshotID = cursor.snapshotID {
-            guard let collecting = try store.activeDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier), collecting.snapshotID == snapshotID else {
-                throw StoreBridgeError.snapshotExpired
+        // Resume an interrupted generation instead of discarding its durable
+        // cursor; this keeps a retry from drifting over a live offset scan.
+        let active = try store.activeDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier)
+            ?? store.beginDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier, ttl: Self.directorySnapshotTTL)
+        var storedCursor = active.nextCursor.flatMap { String(data: $0, encoding: .utf8) }
+        var requests = 0
+        while true {
+            try context.cancellation.throwIfCancelled()
+            requests += 1
+            guard requests <= 2_000 else {
+                throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "directory_snapshot_bound"])
             }
-            active = collecting
-        } else {
-            // Keep an interrupted hydration generation and resume it on the
-            // next initial-page retry. Starting a fresh generation here would
-            // discard the durable cursor and turn a retry into a drifting
-            // live-offset scan.
-            active = try store.activeDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier)
-                ?? store.beginDirectorySnapshot(domainIdentifier: domainIdentifier, parentIdentifier: parentIdentifier)
-        }
-        let storedCursor = active.nextCursor.flatMap { String(data: $0, encoding: .utf8) }
-        var query = [
-            URLQueryItem(name: "uri", value: uri),
-            URLQueryItem(name: "page_size", value: "200"),
-            URLQueryItem(name: "order_by", value: "name"),
-            URLQueryItem(name: "order_direction", value: "asc")
-        ]
-        if let storedCursor, storedCursor.hasPrefix("token:") {
-            query.append(URLQueryItem(name: "next_page_token", value: String(storedCursor.dropFirst("token:".count))))
-        } else {
-            let page = storedCursor.flatMap { $0.hasPrefix("page:") ? Int($0.dropFirst("page:".count)) : nil } ?? 1
-            query.append(URLQueryItem(name: "page", value: String(page)))
-        }
-        let response: RemoteListDTO = try await requestAsync(path: "file", method: "GET", query: query, body: nil, authenticated: true, context: context)
-        var mapped: [RemoteItem] = []
-        var pageIdentities: [String: String] = [:]
-        for dto in response.files {
-            let identifier: String
-            if let existing = pageIdentities[dto.id] {
-                identifier = existing
+            var query = [
+                URLQueryItem(name: "uri", value: uri),
+                URLQueryItem(name: "page_size", value: "200"),
+                URLQueryItem(name: "order_by", value: "name"),
+                URLQueryItem(name: "order_direction", value: "asc")
+            ]
+            let requestUsedCursor = storedCursor?.hasPrefix("token:") == true
+            let pageNumber = storedCursor.flatMap { $0.hasPrefix("page:") ? Int($0.dropFirst("page:".count)) : nil } ?? 1
+            if let storedCursor, requestUsedCursor {
+                query.append(URLQueryItem(name: "next_page_token", value: String(storedCursor.dropFirst("token:".count))))
             } else {
-                identifier = try store.itemIdentifier(forRemoteID: dto.id) ?? CloudreveIdentifier.item()
+                query.append(URLQueryItem(name: "page", value: String(pageNumber)))
+            }
+            let response: RemoteListDTO = try await requestAsync(path: "file", method: "GET", query: query, body: nil, authenticated: true, context: context)
+            var mapped: [RemoteItem] = []
+            var pageIdentities: [String: String] = [:]
+            for dto in response.files {
+                let known = try pageIdentities[dto.id] ?? store.itemIdentifier(forRemoteID: dto.id)
+                // A file an upload session is still writing is a 0-byte placeholder with no
+                // content. Listed as a file it sat next to the local item being uploaded under the
+                // same name, so when the upload landed Finder renamed the real file "name 2".
+                // Only unknown placeholders are skipped: an item already in the store keeps its
+                // current handling, so nothing local is ever mistaken for a remote deletion.
+                if known == nil, dto.fields.hasActiveUploadSession { continue }
+                let identifier = known ?? CloudreveIdentifier.item()
                 pageIdentities[dto.id] = identifier
+                mapped.append(try makeItem(dto, parentIdentifier: parentIdentifier, itemIdentifier: identifier))
             }
-            mapped.append(try makeItem(dto, parentIdentifier: parentIdentifier, itemIdentifier: identifier))
-        }
-        let nextCursor: Data?
-        let requestUsedCursor = storedCursor?.hasPrefix("token:") == true
-        if let token = response.pagination?.nextToken {
-            guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: true) else {
-                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
-            }
-            guard !token.isEmpty, token.utf8.count <= 64 * 1024 else {
-                throw CoreFailure(code: .unknownOutcome, retryable: true, userActionRequired: true, redactedContext: ["stage": "directory_snapshot_cursor"])
-            }
-            nextCursor = Data("token:\(token)".utf8)
-        } else if requestUsedCursor {
-            nextCursor = nil
-        } else if let total = response.pagination?.totalItems {
-            let page = storedCursor.flatMap { $0.hasPrefix("page:") ? Int($0.dropFirst("page:".count)) : nil } ?? 1
-            let effectivePageSize = max(1, response.pagination?.pageSize ?? 200)
-            let currentPage = max(1, response.pagination?.page ?? page)
-            if Int64(currentPage) * Int64(effectivePageSize) >= total {
+            let nextCursor: Data?
+            if let token = response.pagination?.nextToken {
+                guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: true) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                }
+                guard !token.isEmpty, token.utf8.count <= 64 * 1024 else {
+                    throw CoreFailure(code: .unknownOutcome, retryable: true, userActionRequired: true, redactedContext: ["stage": "directory_snapshot_cursor"])
+                }
+                nextCursor = Data("token:\(token)".utf8)
+            } else if requestUsedCursor {
                 nextCursor = nil
-            } else {
+            } else if let total = response.pagination?.totalItems {
+                let effectivePageSize = max(1, response.pagination?.pageSize ?? 200)
+                let currentPage = max(1, response.pagination?.page ?? pageNumber)
+                if Int64(currentPage) * Int64(effectivePageSize) >= total {
+                    nextCursor = nil
+                } else {
+                    guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: false) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+                    }
+                    guard !response.files.isEmpty else {
+                        throw CoreFailure(code: .unknownOutcome, retryable: true, userActionRequired: true, redactedContext: ["stage": "directory_snapshot_incomplete"])
+                    }
+                    nextCursor = Data("page:\(currentPage + 1)".utf8)
+                }
+            } else if response.files.count >= 200 {
                 guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: false) else {
                     throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
                 }
-                nextCursor = Data("page:\(currentPage + 1)".utf8)
+                nextCursor = Data("page:\(pageNumber + 1)".utf8)
+            } else {
+                nextCursor = nil
             }
-        } else if mapped.count >= 200 {
-            guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: false) else {
-                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
+            if nextCursor == nil {
+                guard paginationCompletionIsVerified(capabilitySnapshot) else {
+                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
+                }
             }
-            let page = storedCursor.flatMap { $0.hasPrefix("page:") ? Int($0.dropFirst("page:".count)) : nil } ?? 1
-            nextCursor = Data("page:\(page + 1)".utf8)
-        } else {
-            nextCursor = nil
+            try store.appendDirectorySnapshotItems(snapshotID: active.snapshotID, items: mapped, nextCursor: nextCursor)
+            guard let nextCursor else {
+                try store.publishDirectorySnapshot(snapshotID: active.snapshotID)
+                return active
+            }
+            storedCursor = String(data: nextCursor, encoding: .utf8)
         }
-        if nextCursor == nil {
-            guard paginationCompletionIsVerified(capabilitySnapshot) else {
-                throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
-            }
+    }
+
+    /// The trash listing is account-wide, and Cloudreve names each entry by its trash path
+    /// (`cloudreve://trash/…`), which this client cannot address; mapping one threw and failed
+    /// every Trash enumeration. Entries whose original location (`sys:restore_uri`) is outside
+    /// this domain, or whose path cannot be represented, are left out. Silent on purpose: this
+    /// runs on every Trash enumeration.
+    private func trashEntryIsRepresentable(_ dto: RemoteFileDTO) -> Bool {
+        guard let accountID = URLComponents(string: rootURI)?.user else { return false }
+        if let restore = dto.metadata?.values[CloudreveFileFields.restoreURIMetadataKey] {
+            guard let original = try? CloudreveRemoteURI.canonical(restore, accountID: accountID),
+                  CloudreveRemoteURI.isWithin(original, root: rootURI) else { return false }
         }
-        try store.appendDirectorySnapshotItems(snapshotID: active.snapshotID, items: mapped, nextCursor: nextCursor)
-        if nextCursor == nil {
-            try store.publishDirectorySnapshot(snapshotID: active.snapshotID)
-            let stablePage = try store.directorySnapshotPage(
-                domainIdentifier: domainIdentifier,
-                parentIdentifier: parentIdentifier,
-                generation: active.generation,
-                snapshotID: active.snapshotID,
-                offset: offset,
-                limit: 200
-            )
-            let stableNext = stablePage.nextOffset.map {
-                PageCursor(
-                    generation: stablePage.generation,
-                    opaqueCursor: Data(String($0).utf8),
-                    snapshotID: stablePage.snapshotID,
-                    expiresAt: stablePage.expiresAt.map { Int64($0.timeIntervalSince1970) }
-                )
-            }
-            return RemotePage(
-                items: stablePage.items,
-                nextCursor: stableNext,
-                complete: stablePage.complete,
-                snapshotID: stablePage.snapshotID,
-                expiresAt: stablePage.expiresAt.map { Int64($0.timeIntervalSince1970) }
-            )
-        }
-        // Until the generation is complete, no page is exposed to Finder:
-        // doing so would mix an in-flight remote listing with an immutable
-        // local snapshot on the following request. The durable cursor above
-        // lets a later initial-page retry continue hydration.
-        throw CoreFailure(code: .cannotSynchronize, retryable: true, userActionRequired: true, redactedContext: ["stage": "directory_snapshot_hydrating"])
+        guard let path = try? CloudreveRemoteURI.canonical(dto.path, accountID: accountID) else { return false }
+        return CloudreveRemoteURI.isWithin(path, root: rootURI)
     }
 
     /// Hydrates the provider-synchronised trash view from the server contract.
@@ -1587,6 +1676,8 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         var usedTokens = Set<String>()
         var result: [RemoteItem] = []
         var resultIndexes: [String: Int] = [:]
+        // Pagination counts what the server listed, including entries skipped below.
+        var received: Int64 = 0
         let rootRemoteID = try store.domain(identifier: domainIdentifier)?.rootRemoteID
         while true {
             try context.cancellation.throwIfCancelled()
@@ -1599,8 +1690,9 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             ] + (token.map { [URLQueryItem(name: "next_page_token", value: $0)] } ?? [URLQueryItem(name: "page", value: String(page))])
             let requestUsedCursor = token != nil
             let response: RemoteListDTO = try await requestAsync(path: "file", method: "GET", query: query, body: nil, authenticated: true, context: context)
+            received += Int64(response.files.count)
             for dto in response.files {
-                guard !dto.id.isEmpty, dto.id != rootRemoteID else { continue }
+                guard !dto.id.isEmpty, dto.id != rootRemoteID, trashEntryIsRepresentable(dto) else { continue }
                 let identifier = try store.itemIdentifier(forRemoteID: dto.id) ?? CloudreveIdentifier.item()
                 let previous = try store.item(identifier: identifier)
                 var item = try makeItem(dto, parentIdentifier: NSFileProviderItemIdentifier.trashContainer.rawValue, itemIdentifier: identifier)
@@ -1612,7 +1704,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                     resultIndexes[identifier] = result.count
                     result.append(item)
                 }
-                guard result.count <= 100_000 else { throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "trash_listing_bound"]) }
+                guard result.count <= DomainScale.maximumItems else { throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "trash_listing_bound"]) }
             }
             if let next = response.pagination?.nextToken {
                 guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: true) else {
@@ -1631,7 +1723,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                 try store.insertItems(sorted)
                 return sorted
             }
-            if let total = response.pagination?.totalItems, Int64(result.count) < total {
+            if let total = response.pagination?.totalItems, received < total {
                 guard paginationContinuationIsVerified(capabilitySnapshot, usesCursor: false) else {
                     throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_capability"])
                 }
@@ -1675,11 +1767,12 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             let entity = current.remoteVersion?.isEmpty == false ? current.remoteVersion : nil
             var signedURL = try await signedDownloadURLAsync(uri: try canonicalRemoteURI(current.uri), entity: entity, context: context)
             stage = "download"
+            let resumeKey = (itemIdentifier: identifier, contentVersion: current.version.content)
             do {
-                try await downloadWithoutBearerAsync(url: signedURL, to: destination, expectedSize: current.size, context: context)
+                try await downloadWithoutBearerAsync(url: signedURL, to: destination, expectedSize: current.size, resumeKey: resumeKey, context: context)
             } catch let error as DownloadHTTPError where error.statusCode == 404 && entity != nil {
                 signedURL = try await signedDownloadURLAsync(uri: try canonicalRemoteURI(current.uri), entity: nil, context: context)
-                try await downloadWithoutBearerAsync(url: signedURL, to: destination, expectedSize: current.size, context: context)
+                try await downloadWithoutBearerAsync(url: signedURL, to: destination, expectedSize: current.size, resumeKey: resumeKey, context: context)
             }
             stage = "verify_remote_version"
             let refreshed = try await fetchRemoteItemAsync(fallback: current, context: context)
@@ -1786,20 +1879,33 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
     }
 
     public func delete(_ request: DeleteRequest, context: FileProviderOperationContext) async throws {
-        try requireOperation("purge")
         guard let current = try store.item(identifier: request.itemIdentifier) else { return }
-        guard current.canDelete else { throw CoreFailure(code: .permissionDenied, retryable: false, userActionRequired: true) }
-        if let expectedVersion = request.expectedVersion, expectedVersion != current.version.content { throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true) }
-        if current.kind == .folder && !request.recursive {
-            let children = try store.listChildren(parentIdentifier: request.itemIdentifier)
+        let skipSoftDelete = try deletionMode(for: current, expectedVersion: request.expectedVersion, recursive: request.recursive)
+        do {
+            let _: EmptyResponse = try await requestAsync(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": skipSoftDelete], authenticated: true, context: context)
+        } catch let failure as CoreFailure where failure.code == .notFound {
+            // Deletion is idempotent once the remote item is gone.
+        }
+    }
+
+    /// Items already in the Cloudreve trash are purged. Anything else (`rm`,
+    /// application temp-file cleanup, "Delete Immediately" outside the
+    /// trash) is soft-deleted into the Cloudreve trash so it stays
+    /// recoverable on the server. Returns the `skip_soft_delete` flag.
+    private func deletionMode(for current: RemoteItem, expectedVersion: Data?, recursive: Bool) throws -> Bool {
+        if let expectedVersion, expectedVersion != current.version.content { throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true) }
+        if current.kind == .folder && !recursive {
+            let children = try store.listChildren(parentIdentifier: current.itemIdentifier)
             if !children.isEmpty { throw CoreFailure(code: .directoryNotEmpty, retryable: false) }
         }
-        guard current.trashed, capabilitySnapshot.canPurge else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true) }
-        do {
-            let _: EmptyResponse = try await requestAsync(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": true], authenticated: true, context: context)
-        } catch let failure as CoreFailure where failure.code == .notFound {
-            // A purge is idempotent once the remote item is gone.
+        if current.trashed {
+            try requireOperation("purge")
+            guard current.canDelete else { throw CoreFailure(code: .permissionDenied, retryable: false, userActionRequired: true) }
+            return true
         }
+        try requireOperation("trash")
+        guard current.canTrash else { throw CoreFailure(code: .permissionDenied, retryable: false, userActionRequired: true) }
+        return false
     }
 
     private func requestAsync<Value: Decodable>(path: String, method: String, query: [URLQueryItem], body: [String: Any]?, authenticated: Bool, context: FileProviderOperationContext) async throws -> Value {
@@ -1812,16 +1918,25 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             request = try makeRequest(path: path, method: method, query: query, body: body, authenticated: authenticated, credentialOverride: refreshed)
             result = try await transport.data(for: request, itemIdentifier: context.itemIdentifier, context: context)
         }
-        guard (200..<300).contains(result.1.statusCode) else { throw mapHTTPStatus(result.1.statusCode) }
+        guard (200..<300).contains(result.1.statusCode) else {
+            reportAPIFailure(path: path, detail: "http_status=\(result.1.statusCode)")
+            throw mapHTTPStatus(result.1.statusCode)
+        }
         var envelope = try JSONDecoder().decode(APIEnvelope<Value>.self, from: result.0)
         if authenticated, isAuthenticationAPIError(code: envelope.code, message: envelope.msg) {
             let refreshed = try await credentialRefresh.credential(origin: origin, reference: credentialReference, forceRefresh: true)
             request = try makeRequest(path: path, method: method, query: query, body: body, authenticated: authenticated, credentialOverride: refreshed)
             result = try await transport.data(for: request, itemIdentifier: context.itemIdentifier, context: context)
-            guard (200..<300).contains(result.1.statusCode) else { throw mapHTTPStatus(result.1.statusCode) }
+            guard (200..<300).contains(result.1.statusCode) else {
+                reportAPIFailure(path: path, detail: "http_status=\(result.1.statusCode)")
+                throw mapHTTPStatus(result.1.statusCode)
+            }
             envelope = try JSONDecoder().decode(APIEnvelope<Value>.self, from: result.0)
         }
-        guard envelope.code == 0 else { throw mapAPIError(envelope.code, message: envelope.msg) }
+        guard envelope.code == 0 else {
+            reportAPIFailure(path: path, detail: "api_code=\(envelope.code)")
+            throw mapAPIError(envelope.code, message: envelope.msg)
+        }
         if let value = envelope.data { return value }
         if Value.self == EmptyResponse.self, let empty = EmptyResponse() as? Value { return empty }
         throw CoreFailure(code: .unknownOutcome, retryable: false)
@@ -1937,9 +2052,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
         }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        var query = components?.queryItems ?? []
-        query.append(URLQueryItem(name: "chunk", value: String(index)))
-        components?.queryItems = query
+        components?.appendCloudreveQueryItem(URLQueryItem(name: "chunk", value: String(index)))
         guard let target = components?.url else {
             throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
         }
@@ -2035,16 +2148,32 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                     var abandoned = existing
                     abandoned.state = "abandoned"
                     try store.saveUploadSession(abandoned)
+                    await cancelRemoteUploadSessionAsync(sessionID: existing.remoteSessionReference, uri: uri, context: context)
                     if let reference = existing.secretReference { discardTransferSecret(operationID: operationID, reference: reference) }
                 }
             } else if let existing = try store.uploadSession(operationID: operationID) {
                 var abandoned = existing
                 abandoned.state = "abandoned"
                 try store.saveUploadSession(abandoned)
+                if existing.state != "abandoned" {
+                    await cancelRemoteUploadSessionAsync(sessionID: existing.remoteSessionReference, uri: uri, context: context)
+                }
                 if let reference = existing.secretReference { discardTransferSecret(operationID: operationID, reference: reference) }
             }
 
             if cache == nil {
+                let reference = "transfer-\(operationID.uuidString)"
+                // An earlier attempt may have created a server session (and its placeholder
+                // file) and given up before recording it. Cloudreve then refuses a new session
+                // for the same path with 40004 until it expires the old one a day later, so the
+                // orphan is cancelled first. Its credentials were cached under this operation's
+                // reference, which only this item and content can produce.
+                if let encoded = try? secretVault.readSecret(reference: reference),
+                   let data = Data(base64Encoded: encoded),
+                   let orphan = try? JSONDecoder().decode(UploadCredentialCache.self, from: data) {
+                    await cancelRemoteUploadSessionAsync(sessionID: orphan.sessionID, uri: uri, context: context)
+                    discardTransferSecret(operationID: operationID, reference: reference)
+                }
                 var body: [String: Any] = ["uri": uri, "size": sourceFingerprint.size, "policy_id": ""]
                 if let previous {
                     body["previous"] = previous
@@ -2054,37 +2183,38 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                 guard isOpaqueTransferComponent(credential.sessionID) else {
                     throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "session_id"])
                 }
-                let provider = credential.storagePolicy?.type?.lowercased() ?? providerName.lowercased()
-                guard provider.caseInsensitiveCompare(providerName) == .orderedSame else {
-                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true)
-                }
-                let uploadURLs = try boundedUploadURLs(credential.uploadURLs ?? [], allowRelative: provider == "remote")
-                let expiresAt = credential.expires > 0 ? Date(timeIntervalSince1970: TimeInterval(credential.expires)) : nil
-                let reference = "transfer-\(operationID.uuidString)"
-                let newCache = UploadCredentialCache(sessionID: credential.sessionID, credential: credential.credential, uploadPolicy: credential.uploadPolicy, mimeType: credential.mimeType, uploadURLs: uploadURLs, callbackSecret: credential.callbackSecret, completeURL: credential.completeURL, provider: provider, expiresAt: expiresAt)
-                try secretVault.writeSecret(JSONEncoder().encode(newCache).base64EncodedString(), reference: reference)
-                guard credential.chunkSize > 0, provider == "upyun" || credential.chunkSize <= 8 * 1024 * 1024 else {
-                    throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "chunk_size"])
-                }
-                let chunkSize = Int(credential.chunkSize)
-                guard sourceFingerprint.size <= Int64(Int.max) else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true) }
-                let descriptors = provider == "upyun"
-                    ? [UploadPartDescriptor(index: 0, offset: 0, length: Int(sourceFingerprint.size))]
-                    : planParts(size: Int(sourceFingerprint.size), chunkSize: chunkSize)
-                let parts = try descriptors.map { descriptor in
-                    let sourceHash: Data
-                    if provider == "upyun" {
-                        sourceHash = sourceFingerprint.hash
-                    } else {
-                        let data = try readSourceChunk(source, offset: descriptor.offset, length: descriptor.length)
-                        sourceHash = Data(SHA256.hash(data: data))
+                do {
+                    let provider = credential.storagePolicy?.type?.lowercased() ?? providerName.lowercased()
+                    guard capabilitySnapshot.canWrite(provider: provider) else {
+                        throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "storage_policy"])
                     }
-                    return UploadPartCheckpoint(index: descriptor.index, offset: Int64(descriptor.offset), length: Int64(descriptor.length), sourceHash: sourceHash)
+                    let chunkSize = try Self.uploadChunkSize(serverChunkSize: Int64(credential.chunkSize), fileSize: sourceFingerprint.size, provider: provider)
+                    let uploadURLs = try boundedUploadURLs(credential.uploadURLs ?? [], allowRelative: provider == "remote")
+                    let expiresAt = credential.expires > 0 ? Date(timeIntervalSince1970: TimeInterval(credential.expires)) : nil
+                    let newCache = UploadCredentialCache(sessionID: credential.sessionID, credential: credential.credential, uploadPolicy: credential.uploadPolicy, mimeType: credential.mimeType, uploadURLs: uploadURLs, callbackSecret: credential.callbackSecret, completeURL: credential.completeURL, provider: provider, expiresAt: expiresAt)
+                    try secretVault.writeSecret(JSONEncoder().encode(newCache).base64EncodedString(), reference: reference)
+                    let descriptors = provider == "upyun"
+                        ? [UploadPartDescriptor(index: 0, offset: 0, length: Int(sourceFingerprint.size))]
+                        : planParts(size: Int(sourceFingerprint.size), chunkSize: chunkSize)
+                    // Part hashes are recorded as each part is uploaded (from the
+                    // same bytes that are sent); pre-hashing every part here read
+                    // the whole source an extra time before the first byte left.
+                    let parts = descriptors.map { descriptor in
+                        UploadPartCheckpoint(index: descriptor.index, offset: Int64(descriptor.offset), length: Int64(descriptor.length), sourceHash: provider == "upyun" ? sourceFingerprint.hash : Data())
+                    }
+                    let checkpointChunkSize = provider == "upyun" ? max(1, sourceFingerprint.size) : Int64(chunkSize)
+                    activeSession = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: reference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts)
+                    cache = newCache
+                    try store.saveUploadSession(activeSession!)
+                } catch {
+                    // The session exists on the server from the moment `PUT file/upload`
+                    // answered; giving up on it without cancelling leaves a placeholder that
+                    // blocks every retry of this path (40004).
+                    activeSession = nil
+                    await cancelRemoteUploadSessionAsync(sessionID: credential.sessionID, uri: uri, context: context)
+                    discardTransferSecret(operationID: operationID, reference: reference)
+                    throw error
                 }
-                let checkpointChunkSize = provider == "upyun" ? max(1, sourceFingerprint.size) : credential.chunkSize
-                activeSession = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: reference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts)
-                cache = newCache
-                try store.saveUploadSession(activeSession!)
             }
 
             guard var session = activeSession, let cache else {
@@ -2101,15 +2231,18 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                 try context.cancellation.throwIfCancelled()
                 let part = session.parts[index]
                 let provider = cache.provider.lowercased()
-                let hash = provider == "upyun"
-                    ? sourceFingerprint.hash
-                    : Data(SHA256.hash(data: try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))))
-                guard part.sourceHash.isEmpty || part.sourceHash == hash else {
-                    throw CoreFailure(code: .awaitingSourceReplay, retryable: false, userActionRequired: true)
-                }
                 if part.state == "completed" {
+                    // The session fingerprint (whole-file hash) already
+                    // matched above, so completed parts need no re-read.
                     context.progress.completedUnitCount = min(sourceFingerprint.size, context.progress.completedUnitCount + part.length)
                     continue
+                }
+                // Read each pending part exactly once; the same bytes are
+                // hashed and sent.
+                let chunk: Data? = provider == "upyun" ? nil : try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
+                let hash = chunk.map { Data(SHA256.hash(data: $0)) } ?? sourceFingerprint.hash
+                guard part.sourceHash.isEmpty || part.sourceHash == hash else {
+                    throw CoreFailure(code: .awaitingSourceReplay, retryable: false, userActionRequired: true)
                 }
                 let etag: String?
                 if provider == "qiniu" {
@@ -2117,7 +2250,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                           let credential = cache.credential else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "qiniu_credentials"])
                     }
-                    let data = try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
+                    let data = try chunk ?? readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
                     etag = try await uploadQiniuPartAsync(baseURL: try safeExternalURL(uploadURL), credential: credential, index: part.index, data: data, context: context)
                 } else if provider == "upyun" {
                     guard part.index == 0,
@@ -2132,7 +2265,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                     guard let credential = cache.credential else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "remote_credentials"])
                     }
-                    let data = try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
+                    let data = try chunk ?? readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
                     let partURL = try writeTemporaryPart(data)
                     defer { try? FileManager.default.removeItem(at: partURL) }
                     try await uploadRemotePartAsync(url: try safeExternalURL(uploadURL), credential: credential, index: part.index, source: partURL, length: part.length, context: context)
@@ -2143,7 +2276,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                         guard let uploadURL = cache.uploadURLs[safe: uploadIndex], !uploadURL.isEmpty else {
                             throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "missing-upload-url"])
                         }
-                        let data = try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
+                        let data = try chunk ?? readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
                         let partURL = try writeTemporaryPart(data)
                         defer { try? FileManager.default.removeItem(at: partURL) }
                         var request = URLRequest(url: try safeExternalURL(uploadURL), timeoutInterval: requestTimeout)
@@ -2157,7 +2290,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                         guard (200..<300).contains(response.statusCode) else { throw mapHTTPStatus(response.statusCode) }
                         etag = response.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
                     } else {
-                        let data = try readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
+                        let data = try chunk ?? readSourceChunk(source, offset: Int(part.offset), length: Int(part.length))
                         let response = try await requestBytesAsync(path: "file/upload/\(cache.sessionID)/\(part.index)", method: "POST", query: [], body: data, authenticated: true, context: context)
                         guard (200..<300).contains(response.1.statusCode) else { throw mapHTTPStatus(response.1.statusCode) }
                         etag = nil
@@ -2203,7 +2336,52 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                 try? store.setPending(itemIdentifier, templateIdentifier: nil, uploadError: "awaiting_source_replay")
                 throw CoreFailure(code: .awaitingSourceReplay, retryable: false, userActionRequired: true)
             }
+            // Retryable (network) failures keep the session so the next attempt resumes from the
+            // last completed part. Anything else abandons it, and like the official uploader the
+            // server session is cancelled too, so the retry is not refused with 40004.
+            if var session = activeSession, session.state == "active", !Self.keepsUploadSession(after: error) {
+                session.state = "abandoned"
+                try? store.saveUploadSession(session)
+                await cancelRemoteUploadSessionAsync(sessionID: session.remoteSessionReference, uri: uri, context: context)
+                if let reference = session.secretReference { discardTransferSecret(operationID: operationID, reference: reference) }
+            }
             throw error
+        }
+    }
+
+    /// Cloudreve picks the chunk size per storage policy (25 MiB is common for local storage);
+    /// 0 means the policy does not chunk and the whole file is one part. Each part is read into
+    /// memory once, so the only ceiling is a sanity bound on that buffer.
+    static let maximumUploadChunkSize: Int64 = 1 << 30
+
+    static func uploadChunkSize(serverChunkSize: Int64, fileSize: Int64, provider: String) throws -> Int {
+        if provider == "upyun" { return Int(max(1, fileSize)) }
+        let effective = serverChunkSize > 0 ? serverChunkSize : max(1, fileSize)
+        guard serverChunkSize >= 0, effective <= maximumUploadChunkSize, fileSize <= Int64(Int.max) else {
+            throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "chunk_size"])
+        }
+        return Int(effective)
+    }
+
+    static func keepsUploadSession(after error: Error) -> Bool {
+        if error is URLError { return true }
+        guard let failure = error as? CoreFailure else { return false }
+        return failure.retryable || failure.code == .network
+    }
+
+    /// `DELETE file/upload {id, uri}` — what Cloudreve's own uploader sends for any session it
+    /// gives up on; it removes the placeholder file the session created. Best effort: a failure
+    /// here must never replace the error that caused the cancellation.
+    private func cancelRemoteUploadSessionAsync(sessionID: String?, uri: String, context: FileProviderOperationContext) async {
+        guard let sessionID, isOpaqueTransferComponent(sessionID), !context.cancellation.isCancelled else { return }
+        do {
+            let _: EmptyResponse = try await requestAsync(path: "file/upload", method: "DELETE", query: [], body: ["id": sessionID, "uri": uri], authenticated: true, context: context)
+            logger.info("upload.session.cancelled")
+            ActivityLog.shared.info("upload", "Abandoned upload session cancelled on the server")
+        } catch {
+            let code = (error as? CoreFailure)?.code.rawValue ?? String(describing: type(of: error))
+            logger.error("upload.session.cancel_failed code=\(code, privacy: .public)")
+            ActivityLog.shared.warning("upload", "Could not cancel an abandoned upload session · code=\(code)")
         }
     }
 
@@ -2212,9 +2390,20 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             URLQueryItem(name: "uri", value: try canonicalRemoteURI(fallback.uri)),
             URLQueryItem(name: "extended", value: "true")
         ], body: nil, authenticated: true, context: context)
+        try Self.requireSameRemoteObject(dto, as: fallback)
         let normalized = try canonicalRemoteURI(dto.path)
         let parent = try await parentIdentifierForRemoteURIAsync(normalized, fallback: fallback.parentIdentifier, context: context)
         return try makeItem(dto, parentIdentifier: parent, itemIdentifier: fallback.itemIdentifier)
+    }
+
+    /// The lookup is by path, so it answers with whatever lives there now. When that is another
+    /// object, the one this item stood for was deleted or replaced: re-binding the item to it took
+    /// over another item's remote identity, which the unique remote-ID index rejected as a SQL
+    /// error (-2005 on every download of the stale item). Reporting it as gone lets the system
+    /// drop the stale item instead.
+    private static func requireSameRemoteObject(_ dto: RemoteFileDTO, as stored: RemoteItem) throws {
+        guard let expected = stored.remoteID, !expected.isEmpty, dto.id != expected else { return }
+        throw CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "remote_identity_changed"])
     }
 
     private func fetchRemoteByURIAsync(uri: String, fallbackIdentifier: String, parentIdentifier: String, context: FileProviderOperationContext) async throws -> RemoteItem {
@@ -2236,15 +2425,58 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         return url
     }
 
-    private func downloadWithoutBearerAsync(url: URL, to destination: URL, expectedSize: Int64, context: FileProviderOperationContext) async throws {
+    private func downloadWithoutBearerAsync(url: URL, to destination: URL, expectedSize: Int64, resumeKey: (itemIdentifier: String, contentVersion: Data), context: FileProviderOperationContext) async throws {
+        PartialDownloadStore.purgeStale()
+        guard let partial = PartialDownloadStore.url(itemIdentifier: resumeKey.itemIdentifier, contentVersion: resumeKey.contentVersion) else {
+            try await downloadWholeWithoutBearerAsync(url: url, to: destination, expectedSize: expectedSize, context: context)
+            return
+        }
+        var offset = PartialDownloadStore.size(of: partial)
+        if offset > expectedSize {
+            try? FileManager.default.removeItem(at: partial)
+            offset = 0
+        }
+        if offset == 0 || offset < expectedSize {
+            var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+            if offset > 0 {
+                request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+                logger.info("download.resume offset=\(offset, privacy: .public) total=\(expectedSize, privacy: .public)")
+            }
+            let response = try await RegisteredURLSessionTransport(session: session).streamDownload(appendingTo: partial, resumeOffset: offset, request: request, itemIdentifier: context.itemIdentifier, context: context)
+            if response.statusCode == 416 {
+                // The stored prefix no longer matches the object; start over.
+                try? FileManager.default.removeItem(at: partial)
+                throw CoreFailure(code: .network, retryable: true, redactedContext: ["stage": "range_not_satisfiable"])
+            }
+            guard (200..<300).contains(response.statusCode) else {
+                throw DownloadHTTPError(statusCode: response.statusCode)
+            }
+        }
+        let actualSize = PartialDownloadStore.size(of: partial)
+        guard actualSize == expectedSize, FileManager.default.fileExists(atPath: partial.path) || expectedSize == 0 else {
+            try? FileManager.default.removeItem(at: partial)
+            throw CoreFailure(code: .integrityFailure, retryable: true, redactedContext: ["expected-size": String(expectedSize), "actual-size": String(actualSize)])
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        if FileManager.default.fileExists(atPath: partial.path) {
+            try FileManager.default.moveItem(at: partial, to: destination)
+        } else {
+            guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw CoreFailure(code: .network, retryable: true) }
+        }
+    }
+
+    /// Fallback when no caches directory is available: a single, non-resumable
+    /// transfer straight to the destination.
+    private func downloadWholeWithoutBearerAsync(url: URL, to destination: URL, expectedSize: Int64, context: FileProviderOperationContext) async throws {
         let request = URLRequest(url: url, timeoutInterval: requestTimeout)
         let response = try await RegisteredURLSessionTransport(session: session).download(to: destination, request: request, itemIdentifier: context.itemIdentifier, context: context)
         guard (200..<300).contains(response.statusCode) else {
             try? FileManager.default.removeItem(at: destination)
             throw DownloadHTTPError(statusCode: response.statusCode)
         }
-        let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
-        let actualSize = (attributes[.size] as? NSNumber)?.int64Value ?? -1
+        let actualSize = PartialDownloadStore.size(of: destination)
         guard actualSize == expectedSize else {
             try? FileManager.default.removeItem(at: destination)
             throw CoreFailure(code: .integrityFailure, retryable: true, redactedContext: ["expected-size": String(expectedSize), "actual-size": String(actualSize)])

@@ -216,7 +216,7 @@ public final class OAuthCoordinator: @unchecked Sendable {
 
     public func authorizationURL(origin: URL, state: String, verifier: String, configuration: CloudreveOAuthConfiguration = CloudreveOAuthConfiguration()) throws -> URL {
         var components = URLComponents(url: origin.appendingPathComponent("session/authorize"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
+        components?.setCloudreveQueryItems([
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "client_id", value: configuration.clientID),
             URLQueryItem(name: "scope", value: configuration.scope),
@@ -224,7 +224,7 @@ public final class OAuthCoordinator: @unchecked Sendable {
             URLQueryItem(name: "code_challenge", value: pkceChallenge(verifier: verifier)),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
-        ]
+        ])
         guard let url = components?.url else { throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true) }
         return url
     }
@@ -420,14 +420,16 @@ public final class OAuthTokenExchange: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         var components = URLComponents()
-        components.queryItems = [
+        // Form body: `+` must be %2B or the server decodes it as a space
+        // (an authorization code or secret containing `+` would be corrupted).
+        components.setCloudreveQueryItems([
             URLQueryItem(name: "grant_type", value: "authorization_code"),
             URLQueryItem(name: "client_id", value: configuration.clientID),
             URLQueryItem(name: "client_secret", value: configuration.clientSecret),
             URLQueryItem(name: "code", value: callback.code),
             URLQueryItem(name: "redirect_uri", value: configuration.redirectURI),
             URLQueryItem(name: "code_verifier", value: verifier),
-        ]
+        ])
         request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {

@@ -91,7 +91,7 @@ public final class CloudreveIdentityResolver: @unchecked Sendable {
 
     private func request<Value: Decodable>(origin: URL, credential: Credential, path: String, query: [URLQueryItem]) async throws -> Value {
         var components = URLComponents(url: origin.appendingPathComponent("api/v4").appendingPathComponent(path), resolvingAgainstBaseURL: false)
-        components?.queryItems = query
+        components?.setCloudreveQueryItems(query)
         guard let url = components?.url else { throw CoreFailure(code: .network, retryable: true) }
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
@@ -246,6 +246,11 @@ public actor DomainRegistryService {
     @discardableResult
     public func removeOrphanedSystemDomains() async -> [(identifier: String, preservedLocation: URL?)] {
         guard let storedDomains = try? store.allDomains() else { return [] }
+        // An empty registry next to registered system domains is far more
+        // likely a recreated/reset App Group database than a user who removed
+        // every location; removing them all would make every sync location
+        // disappear from Finder. Only prune when the registry has content.
+        guard !storedDomains.isEmpty else { return [] }
         guard let systemDomains = try? await lifecycle.registeredDomains() else { return [] }
         let registryIdentifiers = Set(storedDomains.map(\.identifier))
         let orphanedIdentifiers = OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: registryIdentifiers)
