@@ -33,6 +33,29 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertEqual(app.recent(limit: 1).map(\.message), ["sse.stream.failed"])
     }
 
+    func testRecentLinesAreRawTextMergedInTimeOrderAndBounded() throws {
+        let app = ActivityLog(directory: directory, source: "app")
+        let extensionLog = ActivityLog(directory: directory, source: "fileprovider")
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        app.record(.info, category: "sync", "first", date: base)
+        extensionLog.record(.error, category: "file-provider", "second", date: base.addingTimeInterval(1))
+        app.record(.warning, category: "live-updates", "third", date: base.addingTimeInterval(2))
+        app.flush(); extensionLog.flush()
+        // A line from an older or foreign format is still shown, just not parsed.
+        let foreign = "9999-not-a-timestamp free text\n"
+        let handle = try FileHandle(forWritingTo: XCTUnwrap(app.currentFileURL))
+        try handle.seekToEnd(); try handle.write(contentsOf: Data(foreign.utf8)); try handle.close()
+
+        let lines = app.recentLines()
+        XCTAssertEqual(lines.count, 4)
+        XCTAssertEqual(lines.map { $0.split(separator: "\t").last.map(String.init) }, ["first", "second", "third", "9999-not-a-timestamp free text"])
+        XCTAssertTrue(lines[1].contains("\tERROR\tfileprovider\tfile-provider\t"), "lines are returned exactly as written")
+        XCTAssertEqual(app.recentLines(limit: 2).count, 2)
+        XCTAssertEqual(app.recentLines(limit: 2).first?.hasSuffix("third"), true)
+        XCTAssertEqual(ActivityLog.entry(fromLine: lines[0])?.message, "first")
+        XCTAssertNil(ActivityLog.entry(fromLine: lines[3]))
+    }
+
     func testLinesStayParsableAndSecretsAreRedacted() throws {
         let log = ActivityLog(directory: directory, source: "app")
         log.record(.error, category: "api\tbad", "line one\nline two\tAuthorization: Bearer abc.def access_token=xyz")

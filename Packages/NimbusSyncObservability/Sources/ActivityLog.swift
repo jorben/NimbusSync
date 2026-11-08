@@ -102,6 +102,24 @@ public final class ActivityLog: @unchecked Sendable {
         return Array(entries.suffix(limit))
     }
 
+    /// The newest raw lines across every process's files, oldest first, exactly as written.
+    ///
+    /// Every line starts with an ISO-8601 timestamp, so ordering the text orders by time; nothing
+    /// is parsed, and lines this version could not parse still show.
+    public func recentLines(limit: Int = 100) -> [String] {
+        guard let directory, limit > 0,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+        var lines: [String] = []
+        for name in names where name.hasSuffix(".log") {
+            lines += Self.tailLines(of: directory.appendingPathComponent(name))
+        }
+        lines.sort()
+        return Array(lines.suffix(limit))
+    }
+
+    /// Parses one raw line; nil when it is not in the current format.
+    public static func entry(fromLine line: String) -> ActivityEntry? { parse(line) }
+
     // MARK: - Writing
 
     private func append(_ line: String) {
@@ -131,6 +149,10 @@ public final class ActivityLog: @unchecked Sendable {
     static let tailBytes = 256 * 1024
 
     static func tailEntries(of url: URL) -> [ActivityEntry] {
+        tailLines(of: url).compactMap(parse)
+    }
+
+    static func tailLines(of url: URL) -> [String] {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
@@ -143,7 +165,7 @@ public final class ActivityLog: @unchecked Sendable {
             data = data[data.index(after: newline)...]
         }
         guard let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).compactMap { parse(String($0)) }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
 
     static func parse(_ line: String) -> ActivityEntry? {
