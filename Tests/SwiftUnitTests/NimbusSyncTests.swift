@@ -392,11 +392,39 @@ final class NimbusSyncTests: XCTestCase {
 
         let result = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "remote-new", fromURI: "/team/new-file.dmg", toURI: ""))
 
-        XCTAssertEqual(result, .unknown)
+        XCTAssertEqual(result, .applied, "a live change with no echo evidence is applied, not skipped")
         XCTAssertEqual(try store.item(identifier: item.itemIdentifier), item)
         XCTAssertEqual(try store.pendingOutboxCount(), 1)
         let pendingScopes = await pipeline.scopesNeedingReconciliation()
         XCTAssertTrue(pendingScopes.isEmpty)
+    }
+
+    /// Only a change that really could not be applied is reported as skipped; the app logs each
+    /// skip as a warning, so an applied change must never look like one.
+    func testPipelineOutcomesSeparateAppliedRepeatedOutOfScopeAndMissing() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-remote-outcomes-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try SQLiteStateStore(url: url)
+        let parent = NSFileProviderItemIdentifier.rootContainer.rawValue
+        let item = RemoteItem(itemIdentifier: CloudreveIdentifier.item(), remoteID: "remote-a", parentIdentifier: parent, name: "a.txt", uri: "/team/a.txt", kind: .file, contentType: "public.data", version: ItemVersion(content: Data("v1".utf8), metadata: Data("m1".utf8)), canRead: true)
+        let change = EnrichedRemoteChange(item: item, oldParentIdentifier: nil, newParentIdentifier: parent, kind: "modify")
+        let pipeline = EventNormalizationPipeline(scopeGuard: EventScopeGuard(rootRemoteID: "root", rootURI: "/team"), enricher: FixedRemoteEventEnricher(change: change), writer: EventJournalWriter(store: store))
+
+        let hint = RemoteEventHint(kind: .file, remoteID: "remote-a", fromURI: "/team/a.txt", toURI: "")
+        let first = await pipeline.consume(hint)
+        XCTAssertEqual(first, .applied)
+        let repeated = await pipeline.consume(hint)
+        XCTAssertEqual(repeated, .unchanged, "the same version twice writes once")
+        let root = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "root"))
+        XCTAssertEqual(root, .outsideScope)
+        let elsewhere = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "remote-b", fromURI: "/other/b.txt"))
+        XCTAssertEqual(elsewhere, .outsideScope)
+
+        let missing = EventNormalizationPipeline(scopeGuard: EventScopeGuard(rootRemoteID: "root", rootURI: "/team"), enricher: MissingRemoteEventEnricher(), writer: EventJournalWriter(store: store))
+        let gone = await missing.consume(RemoteEventHint(kind: .file, remoteID: "remote-gone", fromURI: "/team/gone.txt"))
+        XCTAssertEqual(gone, .skipped(reason: "not_found"))
+        let pendingScopes = await missing.scopesNeedingReconciliation()
+        XCTAssertEqual(pendingScopes, ["/team/gone.txt"])
     }
 
     func testEchoMatcherRequiresParentNameTrashAndVersionEvidence() {
@@ -1633,6 +1661,11 @@ private final class FixedRemoteEventEnricher: RemoteEventEnricher, @unchecked Se
     func enrich(_ hint: RemoteEventHint) async throws -> EnrichedRemoteChange? {
         change
     }
+}
+
+/// The server answers that the item no longer exists, as it does after a delete.
+private struct MissingRemoteEventEnricher: RemoteEventEnricher {
+    func enrich(_ hint: RemoteEventHint) async throws -> EnrichedRemoteChange? { nil }
 }
 
 private actor RecordingWorkingSetSignaller: WorkingSetSignaller {

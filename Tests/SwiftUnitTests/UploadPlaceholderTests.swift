@@ -73,7 +73,7 @@ final class UploadPlaceholderTests: XCTestCase {
             writer: EventJournalWriter(store: store)
         )
         let result = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "r-up"))
-        XCTAssertEqual(result, .matched, ".unknown would start a full reconcile of the whole domain")
+        XCTAssertEqual(result, .unchanged, "nothing to apply until the upload completes")
         let scopes = await pipeline.scopesNeedingReconciliation()
         XCTAssertTrue(scopes.isEmpty)
     }

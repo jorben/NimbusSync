@@ -746,6 +746,20 @@ public protocol RemoteEventEnricher: Sendable {
     func enrich(_ hint: RemoteEventHint) async throws -> EnrichedRemoteChange?
 }
 
+/// What consuming one live update did. Only `skipped` leaves the change for the next full check.
+public enum EventConsumeOutcome: Equatable, Sendable {
+    /// The change was written to the local state.
+    case applied
+    /// Nothing to write: our own change echoed back, a version already applied, or a file whose
+    /// upload has not finished yet.
+    case unchanged
+    /// The event concerns something outside this Domain, such as the Domain's root folder or
+    /// another folder of the same account.
+    case outsideScope
+    /// The change could not be applied; `reason` is a short, redacted code for the log.
+    case skipped(reason: String)
+}
+
 public actor EventNormalizationPipeline {
     private var scopeGuard: EventScopeGuard
     private let enricher: RemoteEventEnricher
@@ -755,38 +769,43 @@ public actor EventNormalizationPipeline {
 
     public init(scopeGuard: EventScopeGuard, enricher: RemoteEventEnricher, writer: EventJournalWriter) { self.scopeGuard = scopeGuard; self.enricher = enricher; self.writer = writer }
 
-    public func consume(_ hint: RemoteEventHint, echo: EchoEvidence? = nil) async -> EchoMatchResult {
+    public func consume(_ hint: RemoteEventHint, echo: EchoEvidence? = nil) async -> EventConsumeOutcome {
         guard scopeGuard.accepts(remoteID: hint.remoteID, fromURI: hint.fromURI, toURI: hint.toURI) else {
             pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
-            return .unknown
+            return .outsideScope
         }
         do {
             guard let change = try await enricher.enrich(hint) else {
+                // The server no longer has the item: usually a delete. Deletions stay with the
+                // full check, which can prove an item is gone rather than briefly unreadable.
                 pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
-                return .unknown
+                return .skipped(reason: "not_found")
             }
-            let match = EchoMatcher.match(echo, item: change.item)
-            switch match {
-            case .matched:
-                seenVersions[change.item.remoteID ?? change.item.itemIdentifier] = change.item.version
-                return .matched
-            case .realDifference, .unknown:
-                let versionKey = change.item.remoteID ?? change.item.itemIdentifier
-                if seenVersions[versionKey] == change.item.version { return .matched }
-                do {
-                    _ = try await writer.commit(change)
-                } catch {
-                    pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
-                    return .unknown
-                }
+            let versionKey = change.item.remoteID ?? change.item.itemIdentifier
+            // Without echo evidence the matcher says `.unknown`, which still means "apply it".
+            if EchoMatcher.match(echo, item: change.item) == .matched || seenVersions[versionKey] == change.item.version {
                 seenVersions[versionKey] = change.item.version
-                return match
+                return .unchanged
             }
+            do {
+                _ = try await writer.commit(change)
+            } catch {
+                pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
+                return .skipped(reason: "store_\(reconciliationErrorCode(error))")
+            }
+            seenVersions[versionKey] = change.item.version
+            return .applied
         } catch EventEnrichmentError.pendingUpload {
-            return .matched
+            return .unchanged
+        } catch EventEnrichmentError.outsideScope {
+            pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
+            return .outsideScope
+        } catch let error as EventEnrichmentError {
+            pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
+            return .skipped(reason: error == .malformedHint ? "malformed_event" : "server_unavailable")
         } catch {
             pendingScopes.insert(hint.fromURI ?? hint.toURI ?? "root")
-            return .unknown
+            return .skipped(reason: reconciliationErrorCode(error))
         }
     }
 
@@ -982,13 +1001,18 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
 
     public func handle(hint: RemoteEventHint) async {
         countReplayedEvent()
-        let result = await pipeline.consume(hint)
-        if result == .unknown {
+        switch await pipeline.consume(hint) {
+        case .applied, .unchanged:
+            try? store.updateSyncState(eventAt: Date(), reconcileStatus: "event_active")
+        case .outsideScope:
+            break
+        case .skipped(reason: "not_found"):
+            // Expected after a delete on the server; not a fault worth a warning.
+            ActivityLog.shared.info("live-updates", "A change named an item the server no longer has; the next full check removes it")
+        case .skipped(let reason):
             // A full check per unresolvable event cost far more than it saved; the fallback
             // check picks the change up.
-            ActivityLog.shared.warning("live-updates", "Skipped a change that could not be resolved")
-        } else {
-            try? store.updateSyncState(eventAt: Date(), reconcileStatus: "event_active")
+            ActivityLog.shared.warning("live-updates", "Skipped a change that could not be applied · reason=\(reason)")
         }
     }
 
