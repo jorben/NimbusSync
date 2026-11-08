@@ -256,3 +256,72 @@ private extension String {
         }
     }
 }
+
+/// One activity-log line as the popover shows it. Kept free of the logging module so the design
+/// system stays a leaf; the app maps its log entries into these.
+public struct LogEntryDisplay: Identifiable, Sendable, Equatable {
+    public enum Level: Sendable, Equatable {
+        case info, warning, error
+
+        var symbol: String {
+            switch self {
+            case .info: "info.circle"
+            case .warning: "exclamationmark.triangle"
+            case .error: "xmark.octagon"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .info: .secondary
+            case .warning: .orange
+            case .error: .red
+            }
+        }
+
+        var accessibilityName: String {
+            switch self {
+            case .info: "Info"
+            case .warning: "Warning"
+            case .error: "Error"
+            }
+        }
+    }
+
+    public let id: String
+    public let date: Date
+    public let level: Level
+    /// `app` or `fileprovider`.
+    public let source: String
+    public let category: String
+    public let message: String
+
+    public init(id: String, date: Date, level: Level, source: String, category: String, message: String) {
+        self.id = id; self.date = date; self.level = level; self.source = source; self.category = category; self.message = message
+    }
+}
+
+struct LogEntryRow: View {
+    let entry: LogEntryDisplay
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: NimbusSyncDesignTokens.spacing8) {
+            Image(systemName: entry.level.symbol)
+                .font(.caption)
+                .foregroundStyle(entry.level.tint)
+                .accessibilityLabel(Text(entry.level.accessibilityName))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.message)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                    .help(entry.message)
+                Text("\(entry.date.formatted(date: .omitted, time: .standard)) · \(entry.source == "fileprovider" ? "Finder extension" : "App") · \(entry.category)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}

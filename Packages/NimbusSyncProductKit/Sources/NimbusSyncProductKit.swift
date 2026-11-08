@@ -83,6 +83,11 @@ public struct ProductSnapshot: Equatable, Sendable {
         domains.map(\.status).sorted { $0.priority > $1.priority }.first ?? .initializing
     }
     public var activeTasks: [ProductTask] { tasks.filter { [.queued, .running, .retrying].contains($0.state) } }
+    /// Drives the menu bar animation: a transfer is queued or running, or a domain is applying or
+    /// checking remote changes. Problem states (auth, offline, errors) are not "syncing".
+    public var isSyncing: Bool {
+        !activeTasks.isEmpty || domains.contains { $0.status == .syncing || $0.status == .reconciling }
+    }
     public var actionableConflicts: [ProductConflict] { conflicts.filter { $0.state == "pending" } }
     public var taskProjection: ProductTaskProjection { ProductTaskProjection(tasks: tasks) }
 }

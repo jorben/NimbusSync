@@ -28,8 +28,6 @@ struct NimbusSyncApp: App {
         let _ = appDelegate.configure(runtime: runtime)
 
         MenuBarExtra(
-            "NimbusSync",
-            systemImage: "externaldrive",
             isInserted: Binding(
                 get: { appDelegate.isPrimaryInstance },
                 set: { _ in }
@@ -41,6 +39,8 @@ struct NimbusSyncApp: App {
                 onAddDomain: { appDelegate.openOnboardingWindow() },
                 onOpenConflicts: { appDelegate.openConflictsWindow() }
             )
+        } label: {
+            MenuBarIconLabel(animator: runtime.menuBarIcon)
         }
         .menuBarExtraStyle(.window)
 
@@ -497,7 +497,11 @@ private struct StatusPopoverContent: View {
                 onOpenConflicts: onOpenConflicts,
                 onOpenDomain: runtime.openFinder,
                 onCancelTask: runtime.cancelTask,
-                onRetryTask: runtime.retryTask
+                onRetryTask: runtime.retryTask,
+                recentLog: runtime.recentLog.map { entry in
+                    LogEntryDisplay(id: entry.id, date: entry.date, level: entry.level.display, source: entry.source, category: entry.category, message: entry.message)
+                },
+                onOpenLogs: runtime.openLogsFolder
             )
             Divider()
             HStack {
@@ -614,6 +618,10 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
+    /// The menu bar image; animates while `snapshot.isSyncing`.
+    let menuBarIcon = MenuBarIconAnimator()
+    /// Newest activity-log entries from the app and the File Provider extension.
+    @Published private(set) var recentLog: [ActivityEntry] = []
 
     private let factory = AppGroupStoreFactory()
     private let registry: SQLiteStateStore?
@@ -645,6 +653,8 @@ private final class NimbusSyncAppState: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        ActivityLog.shared.info("app", "NimbusSync \(version) started")
         reload()
         Task { await notifications.configureCategories() }
         Task { [heartbeat] in
@@ -652,6 +662,17 @@ private final class NimbusSyncAppState: ObservableObject {
                 await heartbeat.beat()
                 reload()
                 try? await Task.sleep(for: .seconds(30))
+            }
+        }
+        // The extension records transfers in the shared store without notifying the app, so the
+        // menu bar learns about them by polling: briskly while something is syncing, so the
+        // animation stops soon after the work does, and gently otherwise.
+        Task { [weak self] in
+            while !Task.isCancelled {
+                let syncing = self?.snapshot.isSyncing ?? false
+                try? await Task.sleep(for: .seconds(syncing ? 2 : 10))
+                guard let self else { return }
+                self.reload()
             }
         }
         if let registry {
@@ -665,6 +686,10 @@ private final class NimbusSyncAppState: ObservableObject {
             let next = await productStore.snapshot()
             let previous = snapshot
             snapshot = next
+            menuBarIcon.setSyncing(next.isSyncing)
+            menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
+            let entries = await Task.detached(priority: .utility) { ActivityLog.shared.recent(limit: 30) }.value
+            if entries != recentLog { recentLog = entries }
             syncEventSupervisors(for: next.domains)
             await notifyChanges(from: previous, to: next)
         }
@@ -1012,6 +1037,18 @@ private final class NimbusSyncAppState: ObservableObject {
             guard let target = components.url else { continue }
             NSWorkspace.shared.open(target)
             return
+        }
+    }
+
+    /// Reveals the newest log file (or the folder) in Finder. The folder lives in the App Group
+    /// container: ~/Library/Group Containers/group.ai.tiy.nimbussync/Logs.
+    func openLogsFolder() {
+        guard let directory = ActivityLog.shared.directory else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let file = ActivityLog.shared.currentFileURL, FileManager.default.fileExists(atPath: file.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([file])
+        } else {
+            NSWorkspace.shared.open(directory)
         }
     }
 
@@ -1838,6 +1875,16 @@ private extension DomainStatus {
             true
         default:
             false
+        }
+    }
+}
+
+private extension ActivityLevel {
+    var display: LogEntryDisplay.Level {
+        switch self {
+        case .info: .info
+        case .warning: .warning
+        case .error: .error
         }
     }
 }

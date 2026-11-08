@@ -12,6 +12,8 @@ public struct MenuBarPopoverView: View {
     public let onOpenDomain: (DomainDescriptor) -> Void
     public let onCancelTask: (UUID) -> Void
     public let onRetryTask: (UUID) -> Void
+    public let recentLog: [LogEntryDisplay]
+    public let onOpenLogs: (() -> Void)?
 
     public init(
         domains: [DomainDescriptor],
@@ -23,7 +25,9 @@ public struct MenuBarPopoverView: View {
         onOpenConflicts: @escaping () -> Void = {},
         onOpenDomain: @escaping (DomainDescriptor) -> Void = { _ in },
         onCancelTask: @escaping (UUID) -> Void = { _ in },
-        onRetryTask: @escaping (UUID) -> Void = { _ in }
+        onRetryTask: @escaping (UUID) -> Void = { _ in },
+        recentLog: [LogEntryDisplay] = [],
+        onOpenLogs: (() -> Void)? = nil
     ) {
         self.domains = domains
         self.tasks = tasks
@@ -35,6 +39,8 @@ public struct MenuBarPopoverView: View {
         self.onOpenDomain = onOpenDomain
         self.onCancelTask = onCancelTask
         self.onRetryTask = onRetryTask
+        self.recentLog = recentLog
+        self.onOpenLogs = onOpenLogs
     }
 
     public var body: some View {
@@ -61,6 +67,10 @@ public struct MenuBarPopoverView: View {
 
                     if !recentTasks.isEmpty {
                         taskSection(title: "Recent activity", tasks: recentTasks)
+                    }
+
+                    if onOpenLogs != nil || !recentLog.isEmpty {
+                        logSection
                     }
                 }
                 .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
@@ -276,36 +286,41 @@ public struct MenuBarPopoverView: View {
         domains.map(\.status).max { lhs, rhs in lhs.priority < rhs.priority } ?? .initializing
     }
 
-    private var statusSummary: String {
-        if domains.isEmpty { return "Ready to connect" }
-        if attentionCount > 0 { return "Needs your attention" }
-        if !tasks.isEmpty { return "Syncing your files" }
-        return overallStatus.title
+    private var summary: MenuBarStatusSummary {
+        MenuBarStatusSummary(domains: domains, activeTaskCount: tasks.count, hasActionableConflicts: hasActionableConflicts)
     }
 
-    private var statusDetail: String {
-        if domains.isEmpty { return "Connect a Cloudreve domain to get started." }
-        if attentionCount > 0 { return "\(attentionCount) domain\(attentionCount == 1 ? "" : "s") need a review." }
-        if !tasks.isEmpty { return "Changes are being processed in the background." }
-        return switch overallStatus {
-        case .healthy: "Your connected domains are ready in Finder."
-        case .eventDegraded: "Live updates are unavailable; NimbusSync will reconcile when possible."
-        case .appNotRunning: "NimbusSync is not running; launch it to resume live updates."
-        case .syncing: "NimbusSync is processing changes in the background."
-        case .reconciling, .initializing: "NimbusSync is checking your connected domains."
-        case .removalPreflight: "A domain is being removed."
-        default: "Your connected domains are being prepared."
-        }
-    }
+    private var statusSummary: String { summary.headline }
 
-    private var attentionCount: Int {
-        domains.filter { domain in
-            switch domain.status {
-            case .healthy, .syncing, .reconciling, .initializing, .eventDegraded, .appNotRunning, .removalPreflight:
-                return false
-            case .offline, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError, .repairRequired, .preservedRemoval:
-                return true
+    private var statusDetail: String { summary.detail }
+
+    /// The newest entries first; the popover is a glance, the folder has the rest.
+    static let visibleLogEntries = 8
+
+    private var logSection: some View {
+        VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
+            HStack {
+                Text("Recent log")
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: NimbusSyncDesignTokens.spacing8)
+                if let onOpenLogs {
+                    Button(action: onOpenLogs) {
+                        Label("Open Logs Folder", systemImage: "folder")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show NimbusSync's log files in Finder")
+                }
             }
-        }.count
+            if recentLog.isEmpty {
+                Text("No log entries yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(recentLog.suffix(Self.visibleLogEntries).reversed()) { entry in
+                    LogEntryRow(entry: entry)
+                }
+            }
+        }
     }
 }

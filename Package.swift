@@ -49,7 +49,8 @@ let package = Package(
         .target(
             name: "CloudreveDesignSystem",
             dependencies: ["CloudreveDomainKit"],
-            path: "Packages/NimbusSyncDesignSystem/Sources"
+            path: "Packages/NimbusSyncDesignSystem/Sources",
+            resources: [.process("Resources")]
         ),
         .target(
             name: "CloudreveObservability",
