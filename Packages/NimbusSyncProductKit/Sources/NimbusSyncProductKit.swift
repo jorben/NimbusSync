@@ -78,7 +78,9 @@ public struct ProductSnapshot: Equatable, Sendable {
     public var metrics: ConsistencyMetrics
     public var notificationPreferences: NotificationPreferences
     public var exclusionRules: [String: String]
-    public init(domains: [DomainDescriptor] = [], tasks: [ProductTask] = [], conflicts: [ProductConflict] = [], metrics: ConsistencyMetrics = ConsistencyMetrics(), notificationPreferences: NotificationPreferences = NotificationPreferences(), exclusionRules: [String: String] = [:]) { self.domains = domains; self.tasks = tasks; self.conflicts = conflicts; self.metrics = metrics; self.notificationPreferences = notificationPreferences; self.exclusionRules = exclusionRules }
+    /// Full-check progress keyed by Domain identifier, only for Domains currently checking.
+    public var checkProgress: [String: DomainCheckProgress]
+    public init(domains: [DomainDescriptor] = [], tasks: [ProductTask] = [], conflicts: [ProductConflict] = [], metrics: ConsistencyMetrics = ConsistencyMetrics(), notificationPreferences: NotificationPreferences = NotificationPreferences(), exclusionRules: [String: String] = [:], checkProgress: [String: DomainCheckProgress] = [:]) { self.domains = domains; self.tasks = tasks; self.conflicts = conflicts; self.metrics = metrics; self.notificationPreferences = notificationPreferences; self.exclusionRules = exclusionRules; self.checkProgress = checkProgress }
     public var highestStatus: DomainStatus {
         domains.map(\.status).sorted { $0.priority > $1.priority }.first ?? .initializing
     }
@@ -124,6 +126,7 @@ public actor ProductStore {
         var tasks: [ProductTask] = []
         var conflicts: [ProductConflict] = []
         var exclusionRules: [String: String] = [:]
+        var checkProgress: [String: DomainCheckProgress] = [:]
         for domain in domains {
             let domainStore: SQLiteStateStore?
             if let storeFactory { domainStore = try? storeFactory.domainStore(identifier: domain.identifier) } else { domainStore = nil }
@@ -139,6 +142,10 @@ public actor ProductStore {
                     // Store matcher as fail-closed; it should not hide the
                     // rest of the product snapshot.
                 }
+            }
+            // A crashed check leaves its run active; the status gate keeps it from showing forever.
+            if domain.status == .reconciling, let progress = try? domainStore?.activeCheckProgress() {
+                checkProgress[domain.identifier] = progress
             }
             let storedOperations = (try? domainStore?.operations(limit: 100) ?? []) ?? []
             tasks.append(contentsOf: storedOperations.map { stored in
@@ -189,7 +196,7 @@ public actor ProductStore {
             })
         }
         let preferences = userDefaults.data(forKey: notificationKey).flatMap { try? JSONDecoder().decode(NotificationPreferences.self, from: $0) } ?? NotificationPreferences()
-        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules)
+        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules, checkProgress: checkProgress)
     }
 
     public func saveNotificationPreferences(_ preferences: NotificationPreferences) throws {

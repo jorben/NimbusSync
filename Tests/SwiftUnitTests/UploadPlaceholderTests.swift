@@ -12,6 +12,11 @@ import CloudreveEventCoordinator
 /// remote item put a second item under the uploader's own name, so when the real upload landed
 /// Finder renamed the user's file "name 2" (273 times in one folder). Unknown placeholders are
 /// skipped everywhere a listing turns into items; items already in the store keep their handling.
+private final class ProgressProbe: @unchecked Sendable {
+    var duringListing: DomainCheckProgress?
+    var duringTrash: DomainCheckProgress?
+}
+
 final class UploadPlaceholderTests: XCTestCase {
     private var cleanup: [URL] = []
 
@@ -149,6 +154,38 @@ final class UploadPlaceholderTests: XCTestCase {
 
         XCTAssertEqual(try store.item(identifier: gone.itemIdentifier)?.tombstone, true, "the run must reach deletion detection")
         XCTAssertEqual(try store.item(identifier: trashed.itemIdentifier)?.tombstone, false, "an item that is only in the trash is not a permanent deletion")
+    }
+
+    /// The full check records how far it has come so the app can draw an estimated progress bar.
+    func testReconcileRecordsProgressAgainstThePreviousItemCount() async throws {
+        let store = try makeStore()
+        try store.insertItems([item(remoteID: "r-a", name: "a.txt"), item(remoteID: "r-b", name: "b.txt"), item(remoteID: "r-c", name: "c.txt")])
+        let observed = ProgressProbe()
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            if uri == "cloudreve://trash" {
+                observed.duringTrash = try? store.activeCheckProgress()
+                return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+            }
+            observed.duringListing = try? store.activeCheckProgress()
+            return Self.envelope(["files": [Self.file(id: "r-a", name: "a.txt", uploading: false), Self.file(id: "r-b", name: "b.txt", uploading: false)], "pagination": ["page": 1, "page_size": 500, "total_items": 2]])
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+
+        XCTAssertEqual(observed.duringListing?.phase, .scanningFiles)
+        XCTAssertEqual(observed.duringListing?.scannedItems, 0)
+        XCTAssertEqual(observed.duringListing?.expectedItems, 3, "the estimate is what the previous check left behind")
+        XCTAssertEqual(observed.duringTrash?.phase, .scanningTrash)
+        XCTAssertEqual(observed.duringTrash?.scannedItems, 2)
+        XCTAssertEqual(observed.duringTrash?.expectedItems, 3)
+        XCTAssertNil(try store.activeCheckProgress(), "a completed check reports no progress")
     }
 
     // MARK: - Fixture

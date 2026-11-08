@@ -14,6 +14,18 @@ public struct MenuBarPopoverView: View {
     public let onRetryTask: (UUID) -> Void
     public let recentLog: [LogEntryDisplay]
     public let onOpenLogs: (() -> Void)?
+    /// Server connection per Domain identifier; a Domain without an entry shows no indicator.
+    public let connections: [String: ServerConnectionDisplay]
+    /// Running full checks per Domain identifier.
+    public let checkProgress: [String: DomainCheckProgress]
+    /// Domains that can start a full check now; nil hides the action.
+    public let checkableDomainIdentifiers: Set<String>
+    public let onCheckDomain: ((DomainDescriptor) -> Void)?
+    /// The scrolling content's natural height. The menu bar window sizes itself to the smallest
+    /// height the popover accepts, and a flexible ScrollView accepts zero, so the scroll area
+    /// is pinned to this measured height instead (capped, and scrolling beyond the cap).
+    @State private var contentHeight: CGFloat = 0
+    static let maximumContentHeight: CGFloat = 520
 
     public init(
         domains: [DomainDescriptor],
@@ -27,7 +39,11 @@ public struct MenuBarPopoverView: View {
         onCancelTask: @escaping (UUID) -> Void = { _ in },
         onRetryTask: @escaping (UUID) -> Void = { _ in },
         recentLog: [LogEntryDisplay] = [],
-        onOpenLogs: (() -> Void)? = nil
+        onOpenLogs: (() -> Void)? = nil,
+        connections: [String: ServerConnectionDisplay] = [:],
+        checkProgress: [String: DomainCheckProgress] = [:],
+        checkableDomainIdentifiers: Set<String> = [],
+        onCheckDomain: ((DomainDescriptor) -> Void)? = nil
     ) {
         self.domains = domains
         self.tasks = tasks
@@ -41,6 +57,10 @@ public struct MenuBarPopoverView: View {
         self.onRetryTask = onRetryTask
         self.recentLog = recentLog
         self.onOpenLogs = onOpenLogs
+        self.connections = connections
+        self.checkProgress = checkProgress
+        self.checkableDomainIdentifiers = checkableDomainIdentifiers
+        self.onCheckDomain = onCheckDomain
     }
 
     public var body: some View {
@@ -75,8 +95,13 @@ public struct MenuBarPopoverView: View {
                 }
                 .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
                 .padding(.vertical, NimbusSyncDesignTokens.spacing16)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    contentHeight = height
+                }
             }
-            .frame(maxHeight: 520)
+            .frame(height: min(contentHeight, Self.maximumContentHeight))
         }
         .frame(minWidth: 380, idealWidth: NimbusSyncDesignTokens.popoverWidth, maxWidth: 420)
         .tint(NimbusSyncDesignTokens.brandColor)
@@ -168,7 +193,7 @@ public struct MenuBarPopoverView: View {
 
     private var domainsSection: some View {
         VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
-            sectionHeading("Connected domains", count: domains.count)
+            sectionHeading("Domains", count: domains.count)
             ForEach(domains, id: \.identifier) { domain in
                 domainRow(domain)
             }
@@ -199,18 +224,47 @@ public struct MenuBarPopoverView: View {
     }
 
     private func domainRow(_ domain: DomainDescriptor) -> some View {
-        HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+        HStack(alignment: .top, spacing: NimbusSyncDesignTokens.spacing8) {
             DomainIconView(iconURL: domain.iconURL, size: 30)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(domain.displayName)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                StatusBadge(status: domain.status, compact: true)
+                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                    Text(domain.displayName)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: NimbusSyncDesignTokens.spacing4)
+                    StatusBadge(status: domain.status, compact: true)
+                }
+                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                    if let connection = connections[domain.identifier] {
+                        ServerConnectionIndicator(connection: connection)
+                            .fixedSize()
+                    }
+                    Text(Self.host(of: domain))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(domain.scope.origin)
+                }
+                if let progress = DomainCheckProgress.visible(for: domain, in: checkProgress) {
+                    DomainCheckProgressView(progress: progress)
+                        .padding(.top, 2)
+                }
             }
 
-            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
+            if let onCheckDomain {
+                Button(action: { onCheckDomain(domain) }) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
+                .accessibilityLabel(Text("Check \(domain.displayName) now"))
+                .help("Check Now: compare every file with the server")
+            }
 
             Button(action: { onOpenDomain(domain) }) {
                 Image(systemName: "folder")
@@ -223,6 +277,10 @@ public struct MenuBarPopoverView: View {
         }
         .padding(NimbusSyncDesignTokens.spacing8)
         .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
+    }
+
+    static func host(of domain: DomainDescriptor) -> String {
+        URL(string: domain.scope.origin)?.host ?? domain.scope.origin
     }
 
     private var conflictCallout: some View {

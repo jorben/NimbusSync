@@ -67,7 +67,16 @@ struct NimbusSyncApp: App {
             onReauthorize: runtime.reauthorize,
             onApplyExclusionRules: runtime.applyExclusionRules,
             onNotificationsChanged: runtime.setNotificationPreferences,
-            onAddDomain: { appDelegate.openOnboardingWindow() }
+            onAddDomain: { appDelegate.openOnboardingWindow() },
+            connections: runtime.connectionDisplays,
+            checkProgress: runtime.snapshot.checkProgress,
+            checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
+            onCheckNow: runtime.checkNow,
+            recentLogLines: runtime.recentLogLines,
+            logsDirectoryPath: runtime.logsDirectoryPath,
+            onOpenLogs: runtime.openLogsFolder,
+            onCopyLogsPath: runtime.copyLogsDirectoryPath,
+            onRefresh: runtime.reload
         )
     }
 
@@ -498,10 +507,12 @@ private struct StatusPopoverContent: View {
                 onOpenDomain: runtime.openFinder,
                 onCancelTask: runtime.cancelTask,
                 onRetryTask: runtime.retryTask,
-                recentLog: runtime.recentLog.map { entry in
-                    LogEntryDisplay(id: entry.id, date: entry.date, level: entry.level.display, source: entry.source, category: entry.category, message: entry.message)
-                },
-                onOpenLogs: runtime.openLogsFolder
+                recentLog: runtime.recentLog.map(\.display),
+                onOpenLogs: runtime.openLogsFolder,
+                connections: runtime.connectionDisplays,
+                checkProgress: runtime.snapshot.checkProgress,
+                checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
+                onCheckDomain: runtime.checkNow
             )
             Divider()
             HStack {
@@ -622,6 +633,14 @@ private final class NimbusSyncAppState: ObservableObject {
     let menuBarIcon = MenuBarIconAnimator()
     /// Newest activity-log entries from the app and the File Provider extension.
     @Published private(set) var recentLog: [ActivityEntry] = []
+    /// The newest raw log lines, unparsed, for Settings.
+    @Published private(set) var recentLogLines: [String] = []
+    /// Settings shows at most this many lines; the popover parses only the newest few.
+    nonisolated static let settingsLogLineLimit = 100
+    nonisolated static let popoverLogEntryLimit = 30
+    /// Each Domain's live-update connection, keyed by Domain identifier. Only Domains that
+    /// currently have an event supervisor appear here.
+    @Published private(set) var connectionStatuses: [String: DomainConnectionStatus] = [:]
 
     private let factory = AppGroupStoreFactory()
     private let registry: SQLiteStateStore?
@@ -635,6 +654,10 @@ private final class NimbusSyncAppState: ObservableObject {
     private var eventSupervisors: [String: EventSupervisor] = [:]
     private var eventTasks: [String: Task<Void, Never>] = [:]
     private var eventRootURIs: [String: String] = [:]
+    /// Identifies the current supervisor per Domain, so a replaced one cannot report late state.
+    private var eventSupervisorTokens: [String: UUID] = [:]
+    /// Each Domain's event runtime, for the fallback and manual full checks.
+    private var eventRuntimes: [String: DomainEventRuntime] = [:]
     private var notificationAuthorizationRequested = false
     private var isQuitting = false
     private var terminationObserver: NSObjectProtocol?
@@ -675,6 +698,15 @@ private final class NimbusSyncAppState: ObservableObject {
                 self.reload()
             }
         }
+        // Live updates carry everyday changes; this fallback catches what the server never
+        // delivered. Each Domain counts from its own last check, so they stay spread out.
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard let self else { return }
+                self.startDueFallbackChecks()
+            }
+        }
         if let registry {
             let service = DomainRegistryService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
             Task { await service.recoverProvisioning(); await service.removeOrphanedSystemDomains(); reload() }
@@ -688,8 +720,11 @@ private final class NimbusSyncAppState: ObservableObject {
             snapshot = next
             menuBarIcon.setSyncing(next.isSyncing)
             menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
-            let entries = await Task.detached(priority: .utility) { ActivityLog.shared.recent(limit: 30) }.value
-            if entries != recentLog { recentLog = entries }
+            let lines = await Task.detached(priority: .utility) { ActivityLog.shared.recentLines(limit: Self.settingsLogLineLimit) }.value
+            if lines != recentLogLines {
+                recentLogLines = lines
+                recentLog = lines.suffix(Self.popoverLogEntryLimit).compactMap(ActivityLog.entry(fromLine:))
+            }
             syncEventSupervisors(for: next.domains)
             await notifyChanges(from: previous, to: next)
         }
@@ -722,27 +757,84 @@ private final class NimbusSyncAppState: ObservableObject {
         _ = try? await notifications.requestAuthorizationIfNeeded()
     }
 
+    /// Forgets a Domain's event supervisor and its connection state; the caller stops it.
+    private func detachEventSupervisor(_ identifier: String) -> EventSupervisor? {
+        eventTasks.removeValue(forKey: identifier)?.cancel()
+        eventRootURIs.removeValue(forKey: identifier)
+        eventSupervisorTokens.removeValue(forKey: identifier)
+        eventRuntimes.removeValue(forKey: identifier)
+        connectionStatuses.removeValue(forKey: identifier)
+        return eventSupervisors.removeValue(forKey: identifier)
+    }
+
+    private func recordConnectionState(_ state: ConnectionState, domainIdentifier: String, token: UUID) {
+        guard eventSupervisorTokens[domainIdentifier] == token else { return }
+        let current = connectionStatuses[domainIdentifier] ?? DomainConnectionStatus()
+        connectionStatuses[domainIdentifier] = current.applying(state)
+    }
+
+    private func startDueFallbackChecks() {
+        let interval = FullCheckInterval.stored().seconds
+        for runtime in eventRuntimes.values {
+            Task { [weak self] in
+                if await runtime.startFallbackCheckIfDue(interval: interval) { self?.reload() }
+            }
+        }
+    }
+
+    /// Whether a manual full check can start: the Domain has a live connection and is not
+    /// already checking.
+    func canCheckNow(_ domain: DomainDescriptor) -> Bool {
+        connectionStatuses[domain.identifier] != nil && domain.status != .reconciling
+    }
+
+    func checkNow(_ domain: DomainDescriptor) {
+        guard let runtime = eventRuntimes[domain.identifier] else { return }
+        ActivityLog.shared.info("sync", "Full check requested by the user")
+        Task { [weak self] in
+            if await runtime.startManualCheck() {
+                // Let the check record its run before the UI refreshes.
+                try? await Task.sleep(for: .milliseconds(300))
+                self?.reload()
+            }
+        }
+    }
+
+    var checkableDomainIdentifiers: Set<String> {
+        Set(snapshot.domains.filter(canCheckNow).map(\.identifier))
+    }
+
+    var connectionDisplays: [String: ServerConnectionDisplay] {
+        Dictionary(snapshot.domains.map { ($0.identifier, connectionDisplay(for: $0)) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    func connectionDisplay(for domain: DomainDescriptor) -> ServerConnectionDisplay {
+        guard let status = connectionStatuses[domain.identifier] else {
+            return domain.status == .authExpired ? ServerConnectionDisplay(kind: .authorizationRequired) : .notConnected
+        }
+        let kind: ServerConnectionDisplay.Kind = switch status.state {
+        case .subscribed: .connected
+        case .connecting: status.lastConnectedAt == nil ? .connecting : .reconnecting
+        case .degraded: .reconnecting
+        case .offline: .offline
+        case .authExpired: .authorizationRequired
+        case .stopped: .notConnected
+        }
+        return ServerConnectionDisplay(kind: kind, since: status.since, lastConnectedAt: status.lastConnectedAt)
+    }
+
     private func syncEventSupervisors(for domains: [DomainDescriptor]) {
         let desired = Set(domains.map(\.identifier))
         for identifier in Array(eventSupervisors.keys) where !desired.contains(identifier) {
-            eventTasks.removeValue(forKey: identifier)?.cancel()
-            let supervisor = eventSupervisors.removeValue(forKey: identifier)
-            eventRootURIs.removeValue(forKey: identifier)
-            if let supervisor { Task { await supervisor.stop() } }
+            if let supervisor = detachEventSupervisor(identifier) { Task { await supervisor.stop() } }
         }
         for descriptor in domains {
             if descriptor.status == .removalPreflight || descriptor.status == .repairRequired || descriptor.status == .preservedRemoval {
-                eventTasks.removeValue(forKey: descriptor.identifier)?.cancel()
-                if let supervisor = eventSupervisors.removeValue(forKey: descriptor.identifier) {
-                    Task { await supervisor.stop() }
-                }
-                eventRootURIs.removeValue(forKey: descriptor.identifier)
+                if let supervisor = detachEventSupervisor(descriptor.identifier) { Task { await supervisor.stop() } }
                 continue
             }
-            if let supervisor = eventSupervisors[descriptor.identifier], eventRootURIs[descriptor.identifier] != descriptor.currentRootURI {
-                eventTasks.removeValue(forKey: descriptor.identifier)?.cancel()
-                eventSupervisors.removeValue(forKey: descriptor.identifier)
-                eventRootURIs.removeValue(forKey: descriptor.identifier)
+            if eventSupervisors[descriptor.identifier] != nil, eventRootURIs[descriptor.identifier] != descriptor.currentRootURI,
+               let supervisor = detachEventSupervisor(descriptor.identifier) {
                 Task { await supervisor.stop() }
             }
             guard eventSupervisors[descriptor.identifier] == nil else { continue }
@@ -750,12 +842,18 @@ private final class NimbusSyncAppState: ObservableObject {
             let vault = KeychainCredentialVault(accessGroup: KeychainAccessGroup.current())
             guard let clientID = try? store.ensureEventClientID() else { continue }
             let streamFactory = CloudreveEventStreamFactory(origin: origin, uri: descriptor.currentRootURI, clientID: clientID, vault: vault, credentialReference: descriptor.secretReference)
+            let identifier = descriptor.identifier
+            let token = UUID()
             guard let runtime = DomainEventRuntime(descriptor: descriptor, store: store, registry: registry, vault: vault, onRootChanged: { [weak self, weak streamFactory] rootURI in
                 await streamFactory?.update(uri: rootURI)
                 await self?.reload()
+            }, onConnectionStateChanged: { [weak self] state in
+                await self?.recordConnectionState(state, domainIdentifier: identifier, token: token)
             }) else { continue }
             let supervisor = EventSupervisor(factory: streamFactory, delegate: runtime)
             eventSupervisors[descriptor.identifier] = supervisor
+            eventSupervisorTokens[descriptor.identifier] = token
+            eventRuntimes[descriptor.identifier] = runtime
             eventRootURIs[descriptor.identifier] = descriptor.currentRootURI
             eventTasks[descriptor.identifier] = Task { await supervisor.run() }
         }
@@ -1059,6 +1157,14 @@ private final class NimbusSyncAppState: ObservableObject {
 
     /// Reveals the newest log file (or the folder) in Finder. The folder lives in the App Group
     /// container: ~/Library/Group Containers/group.ai.tiy.nimbussync/Logs.
+    var logsDirectoryPath: String? { ActivityLog.shared.directory?.path }
+
+    func copyLogsDirectoryPath() {
+        guard let path = logsDirectoryPath else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+    }
+
     func openLogsFolder() {
         guard let directory = ActivityLog.shared.directory else { return }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1403,11 +1509,9 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     private func resetEventSupervisor(domainIdentifier: String) async {
-        eventTasks.removeValue(forKey: domainIdentifier)?.cancel()
-        if let supervisor = eventSupervisors.removeValue(forKey: domainIdentifier) {
+        if let supervisor = detachEventSupervisor(domainIdentifier) {
             await supervisor.stop()
         }
-        eventRootURIs.removeValue(forKey: domainIdentifier)
     }
 
     private func markApplicationNotRunning() async {
@@ -1470,13 +1574,23 @@ private struct SettingsView: View {
     let onApplyExclusionRules: (DomainDescriptor, String) -> Void
     let onNotificationsChanged: (NotificationPreferences) -> Void
     let onAddDomain: () -> Void
+    let connections: [String: ServerConnectionDisplay]
+    let checkProgress: [String: DomainCheckProgress]
+    let checkableDomainIdentifiers: Set<String>
+    let onCheckNow: (DomainDescriptor) -> Void
+    let recentLogLines: [String]
+    let logsDirectoryPath: String?
+    let onOpenLogs: () -> Void
+    let onCopyLogsPath: () -> Void
+    let onRefresh: () -> Void
     @State private var selectedSection: SettingsSection? = .domains
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var notificationPreferences: NotificationPreferences
     @State private var pendingRemoval: DomainDescriptor?
     @State private var editingExclusionsDomainIdentifier: String?
+    @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
 
-    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onCopyLogsPath: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
         self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
@@ -1494,6 +1608,15 @@ private struct SettingsView: View {
         self.onApplyExclusionRules = onApplyExclusionRules
         self.onNotificationsChanged = onNotificationsChanged
         self.onAddDomain = onAddDomain
+        self.connections = connections
+        self.checkProgress = checkProgress
+        self.checkableDomainIdentifiers = checkableDomainIdentifiers
+        self.onCheckNow = onCheckNow
+        self.recentLogLines = recentLogLines
+        self.logsDirectoryPath = logsDirectoryPath
+        self.onOpenLogs = onOpenLogs
+        self.onCopyLogsPath = onCopyLogsPath
+        self.onRefresh = onRefresh
         _notificationPreferences = State(initialValue: notificationPreferences)
     }
 
@@ -1613,6 +1736,23 @@ private struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section {
+                    Picker("Background full check", selection: Binding(
+                        get: { FullCheckInterval(rawValue: fullCheckIntervalDays) ?? FullCheckInterval.defaultValue },
+                        set: { fullCheckIntervalDays = $0.rawValue }
+                    )) {
+                        ForEach(FullCheckInterval.allCases) { interval in
+                            Text(interval.title).tag(interval)
+                        }
+                    }
+                } header: {
+                    Text("Full check")
+                } footer: {
+                    Text("Live updates keep your domains current. A full check compares every file with the server to catch anything live updates missed, and uses more network and battery. It runs at most this often while connected, counted from the last check whether or not it succeeded. To check a domain right away, choose Check Now from its menu.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         case .notifications:
             SettingsPage(title: "Notifications", description: "Choose which sync events should notify you.", symbol: "bell.fill") {
@@ -1637,12 +1777,42 @@ private struct SettingsView: View {
                     SettingsStatusRow(title: "Application mode", value: "Menu bar", symbol: "menubar.rectangle")
                     SettingsStatusRow(title: "File Provider", value: "Managed by macOS", symbol: "checkmark.circle")
                 }
+                Section {
+                    if domains.isEmpty {
+                        Text("No domains configured.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(domains, id: \.identifier) { domain in
+                            ServerConnectionRow(displayName: domain.displayName, origin: domain.scope.origin, connection: connection(for: domain))
+                        }
+                    }
+                } header: {
+                    Text("Server connections")
+                } footer: {
+                    Text("Live updates from each Cloudreve server. While disconnected, NimbusSync reconnects automatically and checks for changes once the connection is back.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Section {
+                    LogTextView(lines: recentLogLines)
+                    logLocationRow
+                } header: {
+                    HStack {
+                        Text("Logs")
+                        Spacer()
+                        Text(recentLogLines.isEmpty ? "" : "Latest \(recentLogLines.count) lines")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section("Support") {
                     Text("Unsupported capabilities remain read-only until verified for this server and storage provider.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .onAppear(perform: onRefresh)
         case .about:
             SettingsPage(title: "About", description: "NimbusSync keeps your Cloudreve files available in Finder.", symbol: "info.circle.fill") {
                 Section {
@@ -1675,12 +1845,21 @@ private struct SettingsView: View {
                     .font(.body.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(domain.scope.origin)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(domain.scope.origin)
+                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                    ServerConnectionIndicator(connection: connection(for: domain))
+                        .fixedSize()
+                    Text(domain.scope.origin)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(domain.scope.origin)
+                }
+                if let progress = DomainCheckProgress.visible(for: domain, in: checkProgress) {
+                    DomainCheckProgressView(progress: progress)
+                        .frame(maxWidth: 320, alignment: .leading)
+                        .padding(.top, 4)
+                }
             }
             Spacer(minLength: 12)
             StatusBadge(status: domain.status)
@@ -1698,6 +1877,10 @@ private struct SettingsView: View {
                 .disabled(removingDomainIdentifier != nil)
 
                 Menu {
+                    Button { onCheckNow(domain) } label: {
+                        Label("Check Now", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
                     Button { onOpenWeb(domain) } label: {
                         Label("Open Cloudreve", systemImage: "safari")
                     }
@@ -1722,6 +1905,43 @@ private struct SettingsView: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private func connection(for domain: DomainDescriptor) -> ServerConnectionDisplay {
+        connections[domain.identifier] ?? .notConnected
+    }
+
+    private var logLocationRow: some View {
+        HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing8) {
+            Image(systemName: "folder")
+                .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Log files")
+                Text(logsDirectoryPath ?? "Unavailable")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(logsDirectoryPath ?? "")
+            }
+            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
+            Button(action: onCopyLogsPath) {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("Copy path")
+            .accessibilityLabel(Text("Copy log folder path"))
+            .disabled(logsDirectoryPath == nil)
+            Button(action: onOpenLogs) {
+                Label("Show in Finder", systemImage: "arrow.up.forward.app")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(logsDirectoryPath == nil)
+        }
     }
 
     private func notificationBinding(_ keyPath: WritableKeyPath<NotificationPreferences, Bool>) -> Binding<Bool> {
@@ -1893,6 +2113,12 @@ private extension DomainStatus {
         default:
             false
         }
+    }
+}
+
+private extension ActivityEntry {
+    var display: LogEntryDisplay {
+        LogEntryDisplay(id: id, date: date, level: level.display, source: source, category: category, message: message)
     }
 }
 

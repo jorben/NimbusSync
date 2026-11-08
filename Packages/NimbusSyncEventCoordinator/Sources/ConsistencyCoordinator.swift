@@ -301,6 +301,8 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         var deletionSafe = savedCursor == nil
         if activeRun == nil {
             try store.startReconcile(runID: runID, scope: descriptor.currentRootURI, generation: UInt64(Date().timeIntervalSince1970), phase: "prepared", cursor: nil)
+        } else {
+            try store.markReconcileAttempt(runID: runID)
         }
         var knownRemoteIDs = Set<String>()
         try store.updateSyncState(reconcileStatus: "scanning_normal")
@@ -332,10 +334,13 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         var token = savedCursor?.token
         var usedTokens = Set(savedCursor?.usedTokens ?? [])
         var seen = Set<String>([descriptor.rootRemoteID])
+        // The previous check's item count is the estimate of how many this one will see.
+        let expectedItems = knownRemoteIDs.count
+        func scanProgress() -> (scanned: Int, expected: Int) { (seen.count - 1, expectedItems) }
         if savedCursor == nil {
-            try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: rootScope.rootURI, state: "active")
+            try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: rootScope.rootURI, state: "active", progress: scanProgress())
         } else if let savedCursor {
-            try persistCursor(runID: runID, queue: savedCursor.queue, current: savedCursor.current, page: savedCursor.page, token: savedCursor.token, usedTokens: Set(savedCursor.usedTokens))
+            try persistCursor(runID: runID, queue: savedCursor.queue, current: savedCursor.current, page: savedCursor.page, token: savedCursor.token, usedTokens: Set(savedCursor.usedTokens), progress: scanProgress())
         }
         while currentWork != nil || !queue.isEmpty {
             let current = currentWork ?? queue.removeFirst()
@@ -347,7 +352,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 let requestUsedCursor = token != nil
                 let response = try await list(uri: current.uri, page: Int32(page), token: token)
                 logger.info("reconcile.page id=\(correlationID, privacy: .public) page=\(page, privacy: .public) token=\(token != nil, privacy: .public) items=\(response.files.count, privacy: .public)")
-                try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: token ?? "page:\(page)", state: "active")
+                try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: token ?? "page:\(page)", state: "active", progress: scanProgress())
                 for file in response.files {
                     guard file.id != descriptor.rootRemoteID else { continue }
                     if !seen.contains(file.id) {
@@ -385,7 +390,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     }
                     guard !nextToken.isEmpty, usedTokens.insert(nextToken).inserted, usedTokens.count <= 2_000 else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
                     token = nextToken; page = 0
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
+                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
                 } else if requestUsedCursor {
                     guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: true) else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
@@ -409,7 +414,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                         break
                     }
                     page = currentPage + 1; token = nil
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
+                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
                 } else if response.files.count >= 500 {
                     // Without an explicit total/token, a full page is not
                     // proof that the scan is complete. Continue by page and
@@ -420,7 +425,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     }
                     page += 1
                     token = nil
-                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens)
+                    try persistCursor(runID: runID, queue: queue, current: current, page: page, token: token, usedTokens: usedTokens, progress: scanProgress())
                 } else {
                     guard reconciliationPaginationIsVerified(descriptor.capabilitySnapshot, usesCursor: false) else {
                         throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "pagination_completion_capability"])
@@ -432,10 +437,11 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             page = 1
             token = nil
             usedTokens.removeAll()
-            try persistCursor(runID: runID, queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens)
+            try persistCursor(runID: runID, queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens, progress: scanProgress())
         }
         if descriptor.capabilitySnapshot.canTrash && deletionSafe {
             try store.updateSyncState(reconcileStatus: "scanning_trash")
+            try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
             let trashFiles = try await listTrash(capability: descriptor.capabilitySnapshot)
             var unrepresentableTrash = 0
             for file in trashFiles {
@@ -476,6 +482,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 logger.info("reconcile.trash.skipped id=\(correlationID, privacy: .public) count=\(unrepresentableTrash, privacy: .public)")
                 ActivityLog.shared.info("sync", "Skipped \(unrepresentableTrash) trash entries this client cannot address")
             }
+            try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.applyingDeletions.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
             for identity in try store.remoteIdentities() {
                 guard knownRemoteIDs.contains(identity.remoteID),
                       !seen.contains(identity.remoteID),
@@ -509,14 +516,14 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         }
     }
 
-    private func persistCursor(runID: UUID, queue: [ReconcileWork], current: ReconcileWork?, page: Int, token: String?, usedTokens: Set<String>) throws {
+    private func persistCursor(runID: UUID, queue: [ReconcileWork], current: ReconcileWork?, page: Int, token: String?, usedTokens: Set<String>, progress: (scanned: Int, expected: Int)) throws {
         let full = ReconcileCursor(queue: queue, current: current, page: page, token: token, usedTokens: usedTokens.sorted())
         var data = try JSONEncoder().encode(full)
         if data.count > 64 * 1024 {
             let bounded = ReconcileCursor(queue: [], current: nil, page: 1, token: nil, usedTokens: [])
             data = try JSONEncoder().encode(bounded)
         }
-        try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: String(data: data, encoding: .utf8), state: "active")
+        try store.updateReconcile(runID: runID, phase: "scanning_normal", cursor: String(data: data, encoding: .utf8), state: "active", progress: progress)
     }
 
     private func fetchFile(id: String) async throws -> EventFileDTO {
@@ -883,8 +890,8 @@ public struct DomainConsistencyProjection: Sendable {
 
 /// Production wiring for one Domain's live event path. It deliberately keeps
 /// reconciliation as a persisted request until the full normal/trash scan
-/// worker is available; an event stream can therefore never promote a Domain
-/// to healthy on its own.
+/// worker is available. A resumed subscription keeps a Domain that already finished a check
+/// current: the server replays what this client ID missed.
 public actor DomainEventRuntime: EventSupervisorDelegate {
     private let store: SQLiteStateStore
     private let registry: SQLiteStateStore?
@@ -897,14 +904,22 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     private var currentRootURI: String
     private var streamRestartRequired = false
     private let onRootChanged: (@Sendable (String) async -> Void)?
+    private let onConnectionStateChanged: (@Sendable (ConnectionState) async -> Void)?
+    /// One full check at a time; requests while one runs are dropped, not queued.
+    private var fullCheckInFlight = false
+    /// A Domain that never finished a check retries that first check once per app session.
+    private var initialCheckAttempted = false
+    /// Events received since `resumed`, until the first keep-alive ends the replay.
+    private var replay: (count: Int, itemCount: Int)?
 
-    public init?(descriptor: DomainDescriptor, store: SQLiteStateStore, registry: SQLiteStateStore? = nil, vault: CredentialVault, onRootChanged: (@Sendable (String) async -> Void)? = nil) {
+    public init?(descriptor: DomainDescriptor, store: SQLiteStateStore, registry: SQLiteStateStore? = nil, vault: CredentialVault, onRootChanged: (@Sendable (String) async -> Void)? = nil, onConnectionStateChanged: (@Sendable (ConnectionState) async -> Void)? = nil) {
         guard let origin = URL(string: descriptor.scope.origin) else { return nil }
         self.store = store
         self.registry = registry
         self.domainIdentifier = descriptor.identifier
         self.currentRootURI = descriptor.currentRootURI
         self.onRootChanged = onRootChanged
+        self.onConnectionStateChanged = onConnectionStateChanged
         self.vault = vault
         let enricher = CloudreveEventEnricher(origin: origin, rootURI: descriptor.currentRootURI, rootRemoteID: descriptor.rootRemoteID, store: store, vault: vault, credentialReference: descriptor.secretReference, capabilitySnapshot: descriptor.capabilitySnapshot)
         self.reconciler = CloudreveReconciliationService(origin: origin, store: store, registry: registry, vault: vault, credentialReference: descriptor.secretReference)
@@ -916,9 +931,93 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     public func handle(hint: RemoteEventHint) async {
+        countReplayedEvent()
         let result = await pipeline.consume(hint)
-        if result == .unknown { await reconcile(reason: "event_enrichment_unavailable") }
-        else { try? store.updateSyncState(eventAt: Date(), reconcileStatus: "event_active") }
+        if result == .unknown {
+            // A full check per unresolvable event cost far more than it saved; the fallback
+            // check picks the change up.
+            ActivityLog.shared.warning("live-updates", "Skipped a change that could not be resolved")
+        } else {
+            try? store.updateSyncState(eventAt: Date(), reconcileStatus: "event_active")
+        }
+    }
+
+    // MARK: - Deciding on full checks
+
+    public func subscriptionConfirmed(resumed: Bool) async {
+        let hasCompletedCheck = hasCompletedFullCheck()
+        if let reason = FullCheckPolicy.reasonAfterSubscription(resumed: resumed, hasCompletedCheck: hasCompletedCheck, initialCheckAttemptedThisSession: initialCheckAttempted) {
+            if !hasCompletedCheck { initialCheckAttempted = true }
+            ActivityLog.shared.info("live-updates", resumed ? "Live updates resumed" : "New live-update subscription; changes made meanwhile may be missing")
+            startFullCheck(reason: reason)
+            return
+        }
+        ActivityLog.shared.info("live-updates", "Live updates resumed; applying changes made meanwhile")
+        replay = (0, (try? store.remoteItemCount()) ?? 0)
+        promoteAfterResume(hasCompletedCheck: hasCompletedCheck)
+    }
+
+    public func keepAliveReceived() async {
+        replay = nil
+    }
+
+    public func ignoredUnrecognizedEvent() async {
+        ActivityLog.shared.warning("live-updates", "Ignored a live update this version does not understand")
+    }
+
+    /// Starts the background fallback check when it is due. Only while connected, so a Mac
+    /// without network does not spend its attempt on a check that cannot succeed.
+    @discardableResult
+    public func startFallbackCheckIfDue(interval: TimeInterval, now: Date = Date()) -> Bool {
+        guard connectionState == .subscribed, !fullCheckInFlight else { return false }
+        let lastAttempt = (try? store.lastFullCheckAttemptAt()) ?? nil
+        guard FullCheckPolicy.isFallbackDue(lastAttempt: lastAttempt, interval: interval, now: now) else { return false }
+        startFullCheck(reason: "scheduled")
+        return true
+    }
+
+    /// The user asked for a full check. False when one is already running.
+    @discardableResult
+    public func startManualCheck() -> Bool {
+        guard !fullCheckInFlight else { return false }
+        startFullCheck(reason: "manual")
+        return true
+    }
+
+    public func isRunningFullCheck() -> Bool { fullCheckInFlight }
+
+    /// Runs off the event path, so the stream keeps draining while the server is listed.
+    private func startFullCheck(reason: String) {
+        guard !fullCheckInFlight else { return }
+        Task { await self.reconcile(reason: reason) }
+    }
+
+    private func countReplayedEvent() {
+        guard var current = replay else { return }
+        current.count += 1
+        if FullCheckPolicy.replayCalledForFullCheck(replayedEvents: current.count, itemCount: current.itemCount) {
+            replay = nil
+            ActivityLog.shared.info("live-updates", "More changes replayed than the domain has items; checking everything instead")
+            startFullCheck(reason: "replay_exceeds_items")
+        } else {
+            replay = current
+        }
+    }
+
+    private func hasCompletedFullCheck() -> Bool {
+        ((try? store.syncState())?.lastReconcileAt) != nil
+    }
+
+    /// Statuses a resumed subscription may replace; problems that need the user stay visible.
+    static let statusesResumeMayReplace: Set<DomainStatus> = [.initializing, .reconciling, .eventDegraded, .appNotRunning, .offline, .healthy, .syncing]
+
+    private func promoteAfterResume(hasCompletedCheck: Bool) {
+        guard hasCompletedCheck, !fullCheckInFlight,
+              let current = try? store.domain(identifier: domainIdentifier)?.status,
+              Self.statusesResumeMayReplace.contains(current) else { return }
+        let next: DomainStatus = (try? store.hasDirtyWork()) == true ? .syncing : .healthy
+        try? store.setDomainStatus(identifier: domainIdentifier, status: next)
+        try? registry?.setDomainStatus(identifier: domainIdentifier, status: next)
     }
 
     public func markEventDegraded() async {
@@ -928,13 +1027,21 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     public func markAuthenticationExpired() async {
-        connectionState = .authExpired
+        await publishConnectionState(.authExpired)
         try? store.setDomainStatus(identifier: domainIdentifier, status: .authExpired)
         try? registry?.setDomainStatus(identifier: domainIdentifier, status: .authExpired)
         try? store.updateSyncState(reconcileStatus: "auth_expired")
     }
 
+    /// A full check. Ignored while another one runs.
     public func reconcile(reason: String) async {
+        guard !fullCheckInFlight else { return }
+        fullCheckInFlight = true
+        defer { fullCheckInFlight = false }
+        await performFullCheck(reason: reason)
+    }
+
+    private func performFullCheck(reason: String) async {
         try? store.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
         try? registry?.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
         try? store.updateSyncState(reconcileStatus: "requested:\(reason)")
@@ -1001,7 +1108,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     public func setConnectionState(_ state: ConnectionState) async {
-        connectionState = state
+        await publishConnectionState(state)
         switch state {
         case .degraded: await markEventDegraded()
         case .offline:
@@ -1011,20 +1118,26 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
             try? store.setDomainStatus(identifier: domainIdentifier, status: .appNotRunning)
             try? registry?.setDomainStatus(identifier: domainIdentifier, status: .appNotRunning)
         case .connecting:
-            try? store.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
+            // The status waits for the server's reply: `resumed` keeps the Domain current,
+            // `subscribed` starts a check.
+            break
         case .subscribed:
-            try? store.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
             _ = await outboxDrainer.drain()
         case .authExpired:
             await markAuthenticationExpired()
-        case .resumedUnknownGap:
-            await reconcile(reason: "connection_\(state.rawValue)")
         }
     }
 
     public func isAuthenticationExpired() async -> Bool { connectionState == .authExpired }
+
+    public func currentConnectionState() -> ConnectionState { connectionState }
+
+    /// Records the state and tells the observer about real changes only.
+    private func publishConnectionState(_ state: ConnectionState) async {
+        let changed = connectionState != state
+        connectionState = state
+        if changed { await onConnectionStateChanged?(state) }
+    }
 
     public func shouldRestartStream() async -> Bool {
         defer { streamRestartRequired = false }

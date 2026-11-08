@@ -51,7 +51,7 @@
     "preferences": ["key", "value", "updated_at"],
     "process_heartbeats": ["role", "instance_id", "bundle_version", "schema_generation", "last_seen"],
     "projection_refresh_jobs": ["job_id", "domain_id", "target_revision", "scope", "cursor", "state", "attempt", "last_error", "feature_fallback_enabled", "updated_at"],
-    "reconcile_runs": ["run_id", "scope", "generation", "phase", "cursor", "state", "started_at", "completed_at"],
+    "reconcile_runs": ["run_id", "scope", "generation", "phase", "cursor", "state", "started_at", "completed_at", "scanned_items", "expected_items"],
     "schema_meta": ["singleton", "version", "generation", "compat_min", "compat_max", "migration_state"],
     "signal_outbox": ["signal_id", "working_set_revision", "state", "attempt", "next_retry_at", "acknowledged_at", "created_at"],
     "sync_state": ["singleton", "epoch", "next_sequence", "min_valid_sequence", "domain_version_revision", "last_event_at", "event_client_id", "last_reconcile_at", "reconcile_status", "projection_schema_revision", "last_applied_projection_schema_revision"],

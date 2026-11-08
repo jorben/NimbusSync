@@ -153,6 +153,20 @@ public protocol EventCoordinatorDelegate: Sendable {
     func reconcile(reason: String) async
 }
 
+/// Why one stream's consumption stopped; the supervisor decides how to reconnect.
+public enum EventStreamEnd: Equatable, Sendable {
+    case stopped
+    case ended
+    case failed
+    case authenticationExpired
+    /// The server asked for a fresh connection; the same client ID resumes it immediately.
+    case reconnectRequested
+}
+
+/// Consumes one live-update stream. A stream ending, an error, or an event this client does not
+/// understand never starts a full check here: Cloudreve keeps a disconnected client's events for
+/// the same client ID and replays them on `resumed`, so the delegate decides what a new
+/// subscription needs.
 public actor EventCoordinator {
     private let delegate: EventCoordinatorDelegate
     private var running = false
@@ -161,12 +175,13 @@ public actor EventCoordinator {
 
     public func stop() { running = false }
 
-    public func run(stream: EventStream) async {
+    @discardableResult
+    public func run(stream: EventStream) async -> EventStreamEnd {
         running = true
         while running && !Task.isCancelled {
             do {
-                guard let event = try await stream.next() else { await delegate.markEventDegraded(); await delegate.reconcile(reason: "stream_ended"); break }
-                await consume(event)
+                guard let event = try await stream.next() else { await delegate.markEventDegraded(); return .ended }
+                if await consume(event) == .reconnectRequested { return .reconnectRequested }
             } catch let failure as CoreFailure where failure.code == .authentication {
                 if let supervisorDelegate = delegate as? EventSupervisorDelegate {
                     await supervisorDelegate.markAuthenticationExpired()
@@ -174,32 +189,35 @@ public actor EventCoordinator {
                 } else {
                     await delegate.markEventDegraded()
                 }
-                break
+                return .authenticationExpired
             } catch {
                 await delegate.markEventDegraded()
-                await delegate.reconcile(reason: "stream_error")
-                break
+                return .failed
             }
         }
+        return .stopped
     }
 
-    private func consume(_ event: SSEEvent) async {
+    private enum ConsumeResult { case continueReading, reconnectRequested }
+
+    private func consume(_ event: SSEEvent) async -> ConsumeResult {
         let eventName = event.event?.lowercased() ?? "message"
+        let supervisorDelegate = delegate as? EventSupervisorDelegate
         switch eventName {
         case "subscribed":
-            if let supervisorDelegate = delegate as? EventSupervisorDelegate { await supervisorDelegate.setConnectionState(.subscribed) }
+            if let supervisorDelegate { await supervisorDelegate.subscriptionConfirmed(resumed: false) }
             else { await delegate.reconcile(reason: "subscribed") }
-        case "resumed": await delegate.reconcile(reason: "resumed_unknown_gap")
-        case "keep-alive", "keepalive": break
+        case "resumed":
+            await supervisorDelegate?.subscriptionConfirmed(resumed: true)
+        case "keep-alive", "keepalive":
+            await supervisorDelegate?.keepAliveReceived()
         case "reconnect-required":
-            await delegate.markEventDegraded()
-            await delegate.reconcile(reason: "reconnect_required")
             running = false
+            return .reconnectRequested
         default:
             guard let name = event.event?.lowercased(), ["event", "file", "create", "modify", "rename", "delete"].contains(name), !event.data.isEmpty else {
-                await delegate.markEventDegraded()
-                await delegate.reconcile(reason: "unknown_or_malformed_event")
-                return
+                await supervisorDelegate?.ignoredUnrecognizedEvent()
+                return .continueReading
             }
             let payloads: [RemoteEventPayload]
             if let decoded = try? JSONDecoder().decode([RemoteEventPayload].self, from: Data(event.data.utf8)) {
@@ -207,14 +225,8 @@ public actor EventCoordinator {
             } else if let decoded = try? JSONDecoder().decode(RemoteEventPayload.self, from: Data(event.data.utf8)) {
                 payloads = [decoded]
             } else {
-                await delegate.markEventDegraded()
-                await delegate.reconcile(reason: "unknown_or_malformed_event")
-                return
-            }
-            guard !payloads.isEmpty else {
-                await delegate.markEventDegraded()
-                await delegate.reconcile(reason: "unknown_or_malformed_event")
-                return
+                await supervisorDelegate?.ignoredUnrecognizedEvent()
+                return .continueReading
             }
             for payload in payloads {
                 let kind = RemoteEventKind(rawValue: (payload.type ?? name).lowercased()) ?? .file
@@ -222,6 +234,7 @@ public actor EventCoordinator {
                 await delegate.handle(hint: RemoteEventHint(kind: kind, remoteID: payload.id, fromURI: payload.from, toURI: payload.to, payload: encodedPayload))
             }
         }
+        return .continueReading
     }
 }
 
@@ -234,18 +247,52 @@ public protocol EventSupervisorDelegate: EventCoordinatorDelegate {
     func markAuthenticationExpired() async
     func isAuthenticationExpired() async -> Bool
     func shouldRestartStream() async -> Bool
+    /// The server's first word on a connection: `subscribed` (a new subscription, so events may
+    /// have been missed) or `resumed` (the server replays what this client ID missed).
+    func subscriptionConfirmed(resumed: Bool) async
+    func keepAliveReceived() async
+    func ignoredUnrecognizedEvent() async
 }
 
 public extension EventSupervisorDelegate {
     func markAuthenticationExpired() async { await markEventDegraded() }
     func isAuthenticationExpired() async -> Bool { false }
     func shouldRestartStream() async -> Bool { false }
+    func subscriptionConfirmed(resumed: Bool) async { if !resumed { await reconcile(reason: "subscribed") } }
+    func keepAliveReceived() async {}
+    func ignoredUnrecognizedEvent() async {}
 }
 
-public enum ConnectionState: String, Sendable { case connecting, subscribed, resumedUnknownGap = "resumed_unknown_gap", degraded, offline, authExpired = "auth_expired", stopped }
+public enum ConnectionState: String, Sendable { case connecting, subscribed, degraded, offline, authExpired = "auth_expired", stopped }
 
-/// Owns one stream per Domain. A stream ending is a reconnect condition, not
-/// a healthy completion; each new subscription asks the delegate to reconcile.
+/// One Domain's live-update connection as the app last observed it. In memory only: it describes
+/// this process's event stream, which does not outlive the process.
+public struct DomainConnectionStatus: Equatable, Sendable {
+    public private(set) var state: ConnectionState
+    /// When `state` last changed. Repeated reports of the same state keep the original time.
+    public private(set) var since: Date
+    /// The most recent successful subscription, kept across disconnects.
+    public private(set) var lastConnectedAt: Date?
+
+    public init(state: ConnectionState = .stopped, since: Date = Date(), lastConnectedAt: Date? = nil) {
+        self.state = state
+        self.since = since
+        self.lastConnectedAt = lastConnectedAt
+    }
+
+    public func applying(_ next: ConnectionState, at date: Date = Date()) -> DomainConnectionStatus {
+        guard next != state else { return self }
+        var updated = self
+        updated.state = next
+        updated.since = date
+        if next == .subscribed { updated.lastConnectedAt = date }
+        return updated
+    }
+}
+
+/// Owns one stream per Domain. A stream ending is a reconnect condition, not a healthy
+/// completion. Connecting never starts a full check by itself: the server's `subscribed` or
+/// `resumed` reply, handed to the delegate, decides that.
 public actor EventSupervisor {
     private let factory: EventStreamFactory
     private let delegate: EventSupervisorDelegate
@@ -272,7 +319,6 @@ public actor EventSupervisor {
                 let connectionStartedAt = Date()
                 activeStream = stream
                 await delegate.setConnectionState(.subscribed)
-                await delegate.reconcile(reason: "connected")
                 if await delegate.shouldRestartStream() {
                     await stream.cancel()
                     activeStream = nil
@@ -280,11 +326,18 @@ public actor EventSupervisor {
                 }
                 let coordinator = EventCoordinator(delegate: delegate)
                 activeCoordinator = coordinator
-                await coordinator.run(stream: stream)
+                let end = await coordinator.run(stream: stream)
                 activeCoordinator = nil
                 activeStream = nil
                 guard running else { break }
                 if await delegate.isAuthenticationExpired() { break }
+                if end == .reconnectRequested {
+                    // The server asked for it; reconnecting with the same client ID resumes
+                    // without losing events, so there is no reason to wait.
+                    await stream.cancel()
+                    policy.reset()
+                    continue
+                }
                 if Date().timeIntervalSince(connectionStartedAt) >= 30 { policy.reset() }
                 await delegate.setConnectionState(.degraded)
             } catch let failure as CoreFailure where failure.code == .authentication {
@@ -294,7 +347,6 @@ public actor EventSupervisor {
             } catch {
                 await delegate.setConnectionState(.degraded)
                 await delegate.markEventDegraded()
-                await delegate.reconcile(reason: "connect_error")
             }
             let delay = policy.nextDelay(jitter: Double.random(in: 0...1))
             try? await Task.sleep(for: .seconds(delay))
@@ -487,5 +539,61 @@ public struct ReconcileScheduler: Sendable {
         if reason != nil { return true }
         if lastWorking.map({ now.timeIntervalSince($0) >= workingInterval }) ?? true { return true }
         return lastFull.map({ now.timeIntervalSince($0) >= fullInterval }) ?? true
+    }
+}
+
+/// How often the background fallback check runs. Live updates carry everyday changes; the
+/// fallback only catches what the server never delivered (it drops events past a small
+/// per-client queue during bursts).
+public enum FullCheckInterval: Int, CaseIterable, Identifiable, Sendable {
+    case daily = 1
+    case weekly = 7
+    case monthly = 30
+
+    public static let defaultValue: FullCheckInterval = .weekly
+    public static let preferenceKey = "fullCheck.intervalDays"
+
+    public var id: Int { rawValue }
+    public var seconds: TimeInterval { TimeInterval(rawValue) * 24 * 60 * 60 }
+
+    public var title: String {
+        switch self {
+        case .daily: "Every day"
+        case .weekly: "Every 7 days"
+        case .monthly: "Every 30 days"
+        }
+    }
+
+    public static func stored(in defaults: UserDefaults = .standard) -> FullCheckInterval {
+        FullCheckInterval(rawValue: defaults.integer(forKey: preferenceKey)) ?? defaultValue
+    }
+}
+
+/// When a Domain needs a full check. A full check lists every folder on the server, so it runs
+/// only when nothing cheaper can be trusted.
+public enum FullCheckPolicy {
+    /// The reason to check after the server confirms a subscription, or nil to rely on the
+    /// replayed events.
+    ///
+    /// - `subscribed` is a new subscription: the server kept nothing for this client ID (first
+    ///   connection, server restart, or offline past its retention), so changes may be missing.
+    /// - A Domain that never finished a check has no complete local view yet; that first check
+    ///   is retried once per app session until it completes.
+    public static func reasonAfterSubscription(resumed: Bool, hasCompletedCheck: Bool, initialCheckAttemptedThisSession: Bool) -> String? {
+        if !resumed { return "subscribed" }
+        if !hasCompletedCheck && !initialCheckAttemptedThisSession { return "initial" }
+        return nil
+    }
+
+    /// Due once the interval has passed since the last check started, whether or not that
+    /// check succeeded, so a failing check is not retried in a loop.
+    public static func isFallbackDue(lastAttempt: Date?, interval: TimeInterval, now: Date = Date()) -> Bool {
+        guard let lastAttempt else { return true }
+        return now.timeIntervalSince(lastAttempt) >= interval
+    }
+
+    /// Replaying more changes than the Domain has items costs more than listing it once.
+    public static func replayCalledForFullCheck(replayedEvents: Int, itemCount: Int) -> Bool {
+        replayedEvents > itemCount
     }
 }

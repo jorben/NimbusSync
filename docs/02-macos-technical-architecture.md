@@ -797,13 +797,16 @@ queued
 菜单栏主应用运行时为每个启用 Domain 维护一个 SSE subscription：
 
 ```text
-connect
-  -> resumed: 继续消费
-  -> subscribed: 触发全量 reconciliation
+connect（建连本身不触发校准，由服务端首个事件决定）
+  -> resumed: 消费服务端补发的离线事件；Domain 从未完成过全量检查时才校准
+  -> subscribed: 触发全量 reconciliation（服务端没有为该 client ID 保留事件）
   -> file events: 事务写 journal + signal outbox，再 signal .workingSet
-  -> reconnect-required: 立即重连并校准
-  -> stream/error: 指数退避，进入 event_degraded
+  -> reconnect-required: 不退避立即用同一 client ID 重连，不校准
+  -> stream/error: 指数退避，进入 event_degraded，不校准
+  -> unknown/malformed、无法补全的事件: 记录并跳过，不校准
 ```
+
+2026-11-08 依据 Cloudreve 服务端源码（`pkg/filemanager/eventhub`、`service/explorer/events.go`）调整：断开的订阅者被标记为离线而不删除，离线事件写入数据库，默认保留 14 天（`fs_event_push_max_age=1209600`），同一 `X-Cr-Client-Id` 重连时回 `resumed` 并补发；只有首次订阅、服务端重启（启动时 `DeleteAll`）、离线超期或订阅范围变化时才回 `subscribed`。服务端每个订阅者的发送通道只有 16 个槽位且非阻塞发送，一次 debounce flush（默认 5 秒）超过约 16 个事件时多余事件会被静默丢弃，这类缺口由周期兜底检查补齐，不在事件路径上主动全量校准。
 
 - `client_id` 对 Domain 稳定，保存在 `sync_state`；
 - SSE parser 遵循事件流 framing，支持 CRLF、多行 `data`、comment/keep-alive，并限制单事件与累计 buffer 大小；解析失败、未知状态事件或超限都进入 degraded 并触发校准，不能静默跳过；
@@ -835,15 +838,16 @@ reconciliation 使用可恢复的 generation scan：
 
 每次扫描开始和结束都验证 `remote_root_entity_id`。根 ID 对应对象安全改名或移动时，事务更新当前 URI 和 scope key，并使受影响的 path route cache 失效；若身份消失、权限不足、同路径换成新 ID、授权范围越界或与其他 Domain 形成重叠，终止扫描并进入 `root_unavailable/scope_conflict`。在该状态解除前只允许读取已 materialized 内容和诊断，不提交远端 mutation。
 
-触发条件：
+触发条件（2026-11-08 起，尽量不主动触发全量检查）：
 
-- 首次 `subscribed`；
-- reconnect-required、event client ID 改变或事件缺口；
-- anchor 过期；
-- 数据库恢复或进程异常终止；
-- 用户“立即检查更新”；
-- 主应用在线时每 6 小时校准 working/materialized scope、每 24 小时在空闲和非低电量条件下做全 Domain 扫描，并加入 Domain 级随机抖动；主应用退出期间由 Extension 的目标 scope 校准兜底，不承诺周期全量扫描；
-- 本地摘要与远端枚举摘要不一致。
+- Domain 从未完成过全量检查（首次创建）；失败后每个 App 会话最多重试一次；
+- 服务端回 `subscribed`；
+- `resumed` 后到首个 keep-alive 之间补发的事件数超过 Domain 当前 item 数；
+- 用户在 Settings 或菜单栏对某个 Domain 选择 “Check Now”；
+- 周期兜底：主应用在线且 SSE 已连接时，距上次全量检查开始（无论成败）超过设定间隔（1 / 7 / 30 天，默认 7 天）；
+- Extension 的 manual check。
+
+建连、断流、reconnect-required、未知或格式错误事件、单个事件无法补全均不再触发全量检查。同一 Domain 同时只运行一次全量检查，运行中的请求直接丢弃。
 
 ### 10.3 重试和幂等语义
 
