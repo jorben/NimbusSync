@@ -440,12 +440,11 @@ public struct ReleaseManifest: Codable, Equatable, Sendable {
     public let version: String
     public let commit: String
     public let swiftVersion: String
-    public let rustVersion: String
     public let architectures: [String]
     public let artifacts: [String: String]
     public let supportMatrix: [SupportMatrixEntry]
     public let gates: [String: Bool]
-    public init(version: String, commit: String, swiftVersion: String, rustVersion: String, architectures: [String], artifacts: [String: String], supportMatrix: [SupportMatrixEntry], gates: [String: Bool]) { self.version = version; self.commit = commit; self.swiftVersion = swiftVersion; self.rustVersion = rustVersion; self.architectures = architectures; self.artifacts = artifacts; self.supportMatrix = supportMatrix; self.gates = gates }
+    public init(version: String, commit: String, swiftVersion: String, architectures: [String], artifacts: [String: String], supportMatrix: [SupportMatrixEntry], gates: [String: Bool]) { self.version = version; self.commit = commit; self.swiftVersion = swiftVersion; self.architectures = architectures; self.artifacts = artifacts; self.supportMatrix = supportMatrix; self.gates = gates }
     public var isReleaseCandidate: Bool { gates.values.allSatisfy { $0 } && !supportMatrix.contains { $0.status == .unverified } }
 }
 

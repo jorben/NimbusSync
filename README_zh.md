@@ -6,7 +6,6 @@
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#环境要求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](#架构)
-[![Rust](https://img.shields.io/badge/Rust-workspace-DEA584?style=flat-square&logo=rust&logoColor=white)](#架构)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-D22128?style=flat-square)](LICENSE)
 
 [English](README.md) | 简体中文
@@ -20,7 +19,7 @@ Provider Domain，Finder 可以浏览远端 metadata、按需下载文件内容�
 
 > [!IMPORTANT]
 > 这是一个以源码构建为主的 Technical Preview/Beta 工程仓库，不是 1.0
-> 发布版，也不是已经发布到注册表的 Swift/Rust 包。本地 Rust、Swift、Xcode
+> 发布版，也不是已经发布到注册表的 Swift 包。本地 Swift、Xcode
 > 以及静态安全/Release 门禁已经建立，但真实 Cloudreve mutation 语义、签名
 > Finder 端到端行为、Provider 上传矩阵、公证和长稳证据仍未验证。当前 Phase 4
 > 的 1.0 发布结论是 **No-Go**。
@@ -36,7 +35,6 @@ Provider Domain，Finder 可以浏览远端 metadata、按需下载文件内容�
 
 | 范围 | 当前状态 | 证据或边界 |
 | --- | --- | --- |
-| Rust protocol/core/store/FFI 基础 | 本地已验证 | Rust workspace 测试及阶段报告 |
 | Swift Store/Auth/File Provider/Event/Product 模块 | 本地已验证 | Swift Package 测试及 Xcode Debug 构建 |
 | 菜单栏 App 和扩展 Target 结构 | 本地已实现 | `NimbusSync`、`NimbusSyncFileProvider`、`NimbusSyncFileProviderUI` |
 | 真实 Cloudreve root/item identity 与条件写 | 未验证 | 需要受控的 Cloudreve contract 环境 |
@@ -97,19 +95,8 @@ Finder 边界上最容易造成数据损坏的故障设计：
   working-set signal、outbox drain、generation reconciliation、stable-root 检查、
   health reducer 和 scheduler 模型。
 
-### Rust workspace
-
-Rust workspace 当前包含：
-
-| Crate | 职责 |
-| --- | --- |
-| `cloudreve-protocol` | Cloudreve DTO、URI/scope 规则、capability snapshot、版本、page token、sync anchor、SSE parser 和 backoff |
-| `cloudreve-store` | SQLite schema、domain/item、journal、anchor、outbox、operation、compaction 和 backup helper |
-| `cloudreve-core` | HTTP client、远端 mutation 原语、health reducer、reconciliation、upload recovery 和 AES-CTR-at-offset helper |
-| `cloudreve-ffi` | 用于版本和本地 identifier 校验的窄 C ABI，输出 static library |
-
-`cloudreve-ffi` crate 仍保留在 Rust workspace 中，但 native artifact 打包会在产品
-集成完成后再恢复。当前 Xcode project 直接链接 Swift Package products。
+产品是纯 Swift 实现：Xcode project 直接链接 Swift Package products，不再包含
+Rust workspace 或 native FFI 产物。
 
 ## 架构
 
@@ -122,7 +109,6 @@ flowchart LR
     Store[(App Group SQLite<br/>registry + Domain state)]
     Keychain[(Keychain<br/>凭据 + upload secrets)]
     Cloudreve[Cloudreve HTTPS API / SSE]
-    Rust[Rust workspace<br/>protocol / core / store / FFI]
 
     Finder <--> FP
     Finder <--> FPUI
@@ -173,8 +159,6 @@ File Provider。匹配的 SSE echo 只负责确认，不再次生成 provider-vi
 - macOS 13 或更高版本，依据 [`Package.swift`](Package.swift) 和 Xcode deployment settings。
 - 支持 Swift 6 的 Xcode。本 checkout 当前在 Xcode 26.2、Swift 6.2.3 环境检查过；项目
   声明 Swift 6.0，但没有在仓库中锁定 Xcode 发行版。
-- Stable Rust/Cargo。Rust workspace 使用 edition 2021 和 Apache-2.0 package metadata；
-  本 checkout 当前在 Rust 1.93.1 环境检查过。
 - 本地单元测试不需要真实 Cloudreve；任何真实服务端/Provider 支持结论都需要受控
   Cloudreve 实例和单独的外部验证。
 - File Provider E2E 需要签名开发环境和真实 Finder 测试机；未签名构建只能证明编译路径。
@@ -243,18 +227,14 @@ profile UUID 和其他机器专用签名设置不会被提交。
 # Swift Package tests
 swift test --disable-sandbox
 
-# Rust workspace tests
-(cd Rust && cargo test --workspace)
-
-# 格式和空白检查
-(cd Rust && cargo fmt --all --check)
+# 空白检查
 git diff --check
 ```
 
 需要实际注册 File Provider Domain 时必须使用 Apple Development 签名，未签名构建只能
 验证编译。签名证书和 provisioning profile 需要由开发环境单独准备。
 
-旧的阶段门禁脚本、GitHub Actions workflow、Rust XCFramework 打包脚本和独立 Release
+旧的阶段门禁脚本、GitHub Actions workflow 和独立 Release
 脚本暂时移除，待产品开发和发布证据完成后再恢复。
 
 ## 仓库结构
@@ -272,7 +252,6 @@ Packages/                           共享 Swift 模块
   NimbusSyncProductKit/             产品 projection、任务、冲突、UI state
   NimbusSyncDesignSystem/           产品 design token
   NimbusSyncObservability/          脱敏诊断和 metrics
-Rust/crates/                        平台无关 protocol/core/store/FFI
 Config/                             Entitlement、Info.plist、Debug/Release 设置
 Scripts/build.sh                    构建前检查、App 构建和打包
 Tests/SwiftUnitTests/               Swift unit/invariant tests
@@ -309,7 +288,7 @@ docs/                               产品、架构、阶段计划、退出报�
 1. 阅读 [`AGENTS.md`](AGENTS.md) 以及对应的阶段计划/退出报告。
 2. 保留工作区已有的本地改动；不要 reset、clean，也不要提交无关文件。
 3. 让 remote identity、operation state 和 secret 继续通过现有 Store/Auth 边界管理。
-4. 按改动范围补充 Swift 或 Rust 测试，重点覆盖 replay、stale version、取消、分页、
+4. 按改动范围补充 Swift 测试，重点覆盖 replay、stale version、取消、分页、
    anchor expiry、崩溃恢复、secret redaction 和 fail-closed 行为。
 5. Review 前运行局部测试、格式检查和 `git diff --check`。
 

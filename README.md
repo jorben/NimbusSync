@@ -6,7 +6,6 @@
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](#architecture)
-[![Rust](https://img.shields.io/badge/Rust-workspace-DEA584?style=flat-square&logo=rust&logoColor=white)](#architecture)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-D22128?style=flat-square)](LICENSE)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -21,8 +20,8 @@ recovery, events, and user-facing diagnostics.
 
 > [!IMPORTANT]
 > This is a source-first Technical Preview/Beta engineering repository, not a
-> 1.0 release or a published Swift/Rust package. The local Rust, Swift, Xcode,
-> and static security/release gates are implemented, but real Cloudreve
+> 1.0 release or a published Swift package. The local Swift, Xcode, and static
+> security/release gates are implemented, but real Cloudreve
 > mutation semantics, signed Finder end-to-end behavior, provider upload
 > matrices, notarization, and long-run evidence are still unverified. The
 > current Phase 4 release decision is **No-Go for 1.0**.
@@ -40,7 +39,6 @@ evidence:
 
 | Area | Current status | Evidence or boundary |
 | --- | --- | --- |
-| Rust protocol/core/store/FFI primitives | Verified locally | Rust workspace tests and the phase reports |
 | Swift Store/Auth/File Provider/Event/Product modules | Verified locally | Swift package tests and Xcode Debug builds |
 | Menu-bar app and extension target structure | Implemented locally | `NimbusSync`, `NimbusSyncFileProvider`, `NimbusSyncFileProviderUI` |
 | Real Cloudreve root/item identity and conditional writes | Unverified | Requires a controlled Cloudreve contract environment |
@@ -116,20 +114,8 @@ surfaces:
   local-write echo matching, working-set signaling, outbox draining, generation
   reconciliation, stable-root checks, health reduction, and scheduler models.
 
-### Rust workspace
-
-The Rust workspace is platform-neutral and currently contains:
-
-| Crate | Responsibility |
-| --- | --- |
-| `cloudreve-protocol` | Cloudreve DTOs, URI/scope rules, capability snapshots, versions, page tokens, sync anchors, SSE parser, and backoff |
-| `cloudreve-store` | SQLite schema, domains/items, journal, anchors, outbox, operation state, compaction, and backup helpers |
-| `cloudreve-core` | HTTP client, remote mutation primitives, health reduction, reconciliation, upload recovery, and AES-CTR-at-offset helpers |
-| `cloudreve-ffi` | Narrow C ABI for version and local identifier validation; static library output |
-
-The `cloudreve-ffi` crate remains in the Rust workspace, but native artifact
-packaging is deferred until product integration is complete. The current Xcode
-project links the Swift Package products directly.
+The product is pure Swift: the Xcode project links the Swift Package products
+directly and there is no Rust workspace or native FFI artifact.
 
 ## Architecture
 
@@ -142,7 +128,6 @@ flowchart LR
     Store[(App Group SQLite<br/>registry + Domain state)]
     Keychain[(Keychain<br/>credentials + upload secrets)]
     Cloudreve[Cloudreve HTTPS API / SSE]
-    Rust[Rust workspace<br/>protocol / core / store / FFI]
 
     Finder <--> FP
     Finder <--> FPUI
@@ -201,8 +186,6 @@ callbacks.
 - Xcode with Swift 6 support. This checkout was locally inspected with Xcode
   26.2 and Swift 6.2.3; the project declares Swift 6.0 and does not pin an
   Xcode distribution.
-- Stable Rust/Cargo. The Rust workspace uses edition 2021 and Apache-2.0
-  package metadata; this checkout was inspected with Rust 1.93.1.
 - A controlled Cloudreve instance is not required for local unit tests. Any claim
   about real server or storage-provider support requires separate external
   validation.
@@ -275,11 +258,7 @@ Tests and formatting can be run directly when needed:
 # Swift Package tests
 swift test --disable-sandbox
 
-# Rust workspace tests
-(cd Rust && cargo test --workspace)
-
-# Formatting check
-(cd Rust && cargo fmt --all --check)
+# Whitespace check
 git diff --check
 ```
 
@@ -306,7 +285,6 @@ Packages/                           Shared Swift modules
   NimbusSyncProductKit/             Product projections, tasks, conflicts, UI state
   NimbusSyncDesignSystem/           Product design tokens
   NimbusSyncObservability/          Redacted diagnostics and metrics
-Rust/crates/                        Platform-neutral protocol/core/store/FFI
 Config/                             Entitlements, Info.plists, Debug/Release settings
 Scripts/build.sh                    Pre-build checks, app build, and packaging
 Tests/SwiftUnitTests/               Swift unit and invariant tests
@@ -347,7 +325,7 @@ Before changing code:
    work.
 3. Keep remote identity, operation state, and secrets behind the existing
    Store/Auth boundaries.
-4. Add focused Swift or Rust tests for replay, stale versions, cancellation,
+4. Add focused Swift tests for replay, stale versions, cancellation,
    pagination, anchor expiry, crash recovery, secret redaction, and fail-closed
    behavior as applicable.
 5. Run the focused tests, formatting checks, and `git diff --check` before

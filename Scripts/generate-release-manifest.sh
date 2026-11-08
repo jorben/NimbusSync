@@ -41,8 +41,6 @@ fi
 
 swift_version=$(swift --version 2>/dev/null | sed -n '1p')
 xcode_version=$(xcodebuild -version | sed -n '1p')
-rust_version=$(rustc --version | sed -n '1p')
-cargo_version=$(cargo --version | sed -n '1p')
 
 if [ -n "$EVIDENCE" ]; then
     evidence_kind=$(jq -r '.kind' "$EVIDENCE")
@@ -64,8 +62,6 @@ jq -n \
     --argjson size "$artifact_size" \
     --arg swift "$swift_version" \
     --arg xcode "$xcode_version" \
-    --arg rust "$rust_version" \
-    --arg cargo "$cargo_version" \
     --arg signingMode "$signing_mode" \
     --arg evidenceKind "$evidence_kind" \
     --argjson verified "$evidence_verified" \
@@ -79,7 +75,7 @@ jq -n \
             working_tree_dirty: $dirty,
             signing_mode: $signingMode,
             artifact: {name: $artifact, sha256: $hash, size_bytes: $size},
-            toolchain: {swift: $swift, xcode: $xcode, rust: $rust, cargo: $cargo}
+            toolchain: {swift: $swift, xcode: $xcode}
         },
         external_evidence: {
             kind: (if $evidenceKind == "null" then null else $evidenceKind end),

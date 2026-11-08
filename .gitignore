@@ -36,8 +36,7 @@
 *.app/
 *.appex/
 
-# Rust build and coverage outputs. Cargo.lock remains tracked for reproducibility.
-target/
+# Coverage outputs.
 *.profraw
 *.profdata
 /.llvm-cov/

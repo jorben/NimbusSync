@@ -3,8 +3,8 @@
 # Primary targets:
 #   make dev     Build + launch the real app via Scripts/build.sh.
 #   make build   Unified build via Scripts/build.sh (secret/release scans, Dist/ artifacts).
-#   make test    Full test suite: Rust workspace + SwiftPM packages.
-#   make clean   Remove all build artifacts (.build/, Rust/target/, Dist/).
+#   make test    Full test suite (SwiftPM packages).
+#   make clean   Remove all build artifacts (.build/, Dist/).
 #
 # Signing: the File Provider extension only loads from signed builds. When
 # Config/build.local.sh provides signing defaults, `make dev`/`make build`
@@ -29,8 +29,6 @@ BUILD_ARGS := \
 
 # Optional passthroughs, e.g.:
 #   make test-swift SWIFT_TEST_FLAGS='--filter DomainHealthReducerTests'
-#   make test-rust CARGO_TEST_FLAGS='cloudreve-core'
-CARGO_TEST_FLAGS ?=
 SWIFT_TEST_FLAGS ?=
 
 # Fast unsigned iteration target (UI only — File Provider will NOT load).
@@ -43,8 +41,8 @@ XCODEBUILD := xcodebuild \
 	-destination platform=macOS
 
 .DEFAULT_GOAL := help
-.PHONY: help dev dev-unsigned build test test-rust test-swift build-rust lint \
-	clean clean-swift clean-rust clean-dist
+.PHONY: help dev dev-unsigned build test test-swift lint \
+	clean clean-swift clean-dist
 
 help: ## Show available targets
 	@printf 'NimbusSync tasks: make <target>\n\n'
@@ -74,28 +72,18 @@ dev-unsigned: ## Fast UI-only build; File Provider extension will NOT load
 build: ## Unified build via Scripts/build.sh (scans + Dist/ artifacts)
 	$(BUILD_ARGS) ./Scripts/build.sh
 
-test: test-rust test-swift ## Run all tests (Rust + Swift)
-
-test-rust: ## Run Rust workspace tests
-	cd Rust && cargo test --workspace $(CARGO_TEST_FLAGS)
+test: test-swift ## Run all tests
 
 test-swift: ## Run SwiftPM package tests
 	swift test --disable-sandbox $(SWIFT_TEST_FLAGS)
 
-build-rust: ## Build the Rust workspace (debug profile)
-	cd Rust && cargo build --workspace
-
 lint: ## Check formatting and whitespace (review gates)
-	cd Rust && cargo fmt --all --check
 	git --no-pager diff --check
 
-clean: clean-swift clean-rust clean-dist ## Remove all build artifacts
+clean: clean-swift clean-dist ## Remove all build artifacts
 
 clean-swift: ## Remove SwiftPM and Xcode build outputs (.build/)
 	rm -rf .build
-
-clean-rust: ## Remove Cargo build outputs (Rust/target/)
-	cd Rust && cargo clean
 
 clean-dist: ## Remove packaged artifacts (Dist/)
 	rm -rf $(DIST_DIR)

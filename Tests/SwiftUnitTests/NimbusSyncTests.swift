@@ -461,7 +461,7 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(tasks.active().first?.state, .retrying)
         XCTAssertTrue(UpgradeFence.canWrite(schemaVersion: 1, compatibilityMinimum: 1, compatibilityMaximum: 2, processGeneration: 3, currentGeneration: 3))
         XCTAssertFalse(UpgradeFence.canWrite(schemaVersion: 3, compatibilityMinimum: 1, compatibilityMaximum: 2, processGeneration: 3, currentGeneration: 3))
-        let manifest = ReleaseManifest(version: "1.0.0", commit: "abc", swiftVersion: "6.2", rustVersion: "1.93", architectures: ["arm64"], artifacts: [:], supportMatrix: [SupportMatrixEntry(component: "S3", version: "v4", architecture: "arm64", status: .unverified, evidence: "none")], gates: ["build": true])
+        let manifest = ReleaseManifest(version: "1.0.0", commit: "abc", swiftVersion: "6.2", architectures: ["arm64"], artifacts: [:], supportMatrix: [SupportMatrixEntry(component: "S3", version: "v4", architecture: "arm64", status: .unverified, evidence: "none")], gates: ["build": true])
         XCTAssertFalse(manifest.isReleaseCandidate)
     }
 
@@ -932,12 +932,13 @@ final class NimbusSyncTests: XCTestCase {
             XCTAssertEqual(Set(manifest.tables), Set(SQLiteSchemaManifest.tables))
             XCTAssertTrue(manifest.columns["change_journal"]?.contains("item_payload") == true)
             XCTAssertTrue(manifest.columns["system_set_state"]?.contains("active_generation") == true)
+            // Golden schema snapshot: an intentional schema change must update
+            // Tests/schema-manifest.json together with the migration.
             let workingTreeManifest = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Rust/schema-manifest.json")
-            let currentDirectoryManifest = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Rust/schema-manifest.json")
+                .appendingPathComponent("schema-manifest.json")
+            let currentDirectoryManifest = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/schema-manifest.json")
             let sharedURL = FileManager.default.fileExists(atPath: workingTreeManifest.path) ? workingTreeManifest : currentDirectoryManifest
             if let sharedData = try? Data(contentsOf: sharedURL),
                let shared = try? JSONSerialization.jsonObject(with: sharedData) as? [String: Any],
