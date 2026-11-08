@@ -74,7 +74,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NimbusSyncTests",
-            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit", "CloudreveEventCoordinator", "CloudreveFileProviderKit", "CloudreveDomainService", "CloudreveProductKit"],
+            dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveAuthKit", "CloudreveEventCoordinator", "CloudreveFileProviderKit", "CloudreveDomainService", "CloudreveProductKit", "CloudreveDesignSystem", "CloudreveObservability"],
             path: "Tests/SwiftUnitTests"
         ),
         .testTarget(
