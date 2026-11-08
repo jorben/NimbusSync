@@ -23,7 +23,7 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertEqual(base.size, MenuBarIcon.canvas)
         // The bundled PNGs, not the SF Symbol fallback.
         let widths = Set(base.representations.compactMap { ($0 as? NSBitmapImageRep)?.pixelsWide })
-        XCTAssertTrue(widths.isSuperset(of: [18, 36]), "bundled reps: \(widths)")
+        XCTAssertTrue(widths.isSuperset(of: [22, 44]), "bundled reps: \(widths)")
     }
 
     func testSyncingFramesKeepSizeAndTemplateAndMove() {
@@ -33,7 +33,7 @@ final class MenuBarIconTests: XCTestCase {
             XCTAssertEqual(frame.size, MenuBarIcon.canvas, "the status item must not change width")
             XCTAssertTrue(frame.isTemplate)
         }
-        XCTAssertNotEqual(pixels(frames[0]), pixels(frames[MenuBarIcon.frameCount / 2]), "the arrows move across the cycle")
+        XCTAssertNotEqual(pixels(frames[0]), pixels(frames[MenuBarIcon.frameCount / 2]), "the node moves along the track")
         XCTAssertNotEqual(pixels(frames[0]), pixels(MenuBarIcon.base), "a syncing frame differs from the idle glyph")
         writePreviewIfRequested(frames)
     }
@@ -108,16 +108,17 @@ final class MenuBarIconTests: XCTestCase {
     private func writePreviewIfRequested(_ frames: [NSImage]) {
         guard let path = ProcessInfo.processInfo.environment["NIMBUSSYNC_ICON_PREVIEW"] else { return }
         let images = [MenuBarIcon.base] + frames
-        let zoom: CGFloat = 8, cell = 18 * zoom + 16
-        let sheet = NSImage(size: NSSize(width: cell * CGFloat(images.count), height: cell * 2), flipped: false) { _ in
+        let zoom: CGFloat = 8, cellWidth = MenuBarIcon.canvas.width * zoom + 16, cell = MenuBarIcon.canvas.height * zoom + 16
+        let sheet = NSImage(size: NSSize(width: cellWidth * CGFloat(images.count), height: cell * 2), flipped: false) { _ in
             for (row, (background, ink)) in [(NSColor(white: 0.93, alpha: 1), NSColor.black), (NSColor(white: 0.17, alpha: 1), NSColor.white)].enumerated() {
                 background.setFill()
-                NSRect(x: 0, y: CGFloat(1 - row) * cell, width: cell * CGFloat(images.count), height: cell).fill()
+                NSRect(x: 0, y: CGFloat(1 - row) * cell, width: cellWidth * CGFloat(images.count), height: cell).fill()
                 for (index, image) in images.enumerated() {
-                    let rect = NSRect(x: CGFloat(index) * cell + 8, y: CGFloat(1 - row) * cell + 8, width: 18 * zoom, height: 18 * zoom)
+                    let rect = NSRect(x: CGFloat(index) * cellWidth + 8, y: CGFloat(1 - row) * cell + 8, width: MenuBarIcon.canvas.width * zoom, height: MenuBarIcon.canvas.height * zoom)
                     // Rasterise at @2x exactly as a Retina menu bar would, then enlarge without
                     // smoothing, so the sheet shows the real pixels rather than a vector re-render.
-                    let retina = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 36 * 4, bitsPerPixel: 32)!
+                    let pixelsWide = Int(MenuBarIcon.canvas.width * 2), pixelsHigh = Int(MenuBarIcon.canvas.height * 2)
+                    let retina = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: pixelsWide * 4, bitsPerPixel: 32)!
                     retina.size = MenuBarIcon.canvas
                     NSGraphicsContext.saveGraphicsState()
                     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: retina)

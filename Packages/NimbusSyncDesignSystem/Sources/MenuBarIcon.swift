@@ -5,17 +5,20 @@ import SwiftUI
 ///
 /// **Always a template.** A template image is drawn in the menu bar's own ink, which is what keeps
 /// the icon right on a light bar, a dark one, a highlighted item and under reduced transparency.
-/// The syncing state therefore adds shape, not colour: a pair of arrows drifts inside the glyph's
-/// cloud — the open area in its lower half — so the moon and the ring stay whole. They are punched
-/// out before they are drawn, so they keep their own edge where they brush the cloud's outline.
+/// The syncing state therefore adds motion, not colour: the glyph is a cloud over an infinity
+/// track carrying two nodes, and while syncing the filled node runs laps of the track with a short
+/// fading tail, the way the app icon's artwork draws it in motion. The ring stays put: it is where
+/// the cloud joins the track.
 ///
 /// The size never changes while animating; a status item that widened during every transfer would
 /// shove its neighbours along with it.
 @MainActor
 public enum MenuBarIcon {
-    public static let frameCount = 10
-    public static let frameInterval: TimeInterval = 0.09
-    public static let canvas = NSSize(width: 18, height: 18)
+    public static let frameCount = 36
+    /// One lap every 2.4 s.
+    public static let frameInterval: TimeInterval = 1.0 / 15
+    /// Matches `Scripts/make-menubar-icon.swift`: the wide glyph fits 20 × 16 pt of it.
+    public nonisolated static let canvas = NSSize(width: 22, height: 18)
 
     /// The bundled glyph (`Scripts/make-menubar-icon.swift` builds it from `Design/MenuBarIcon.png`).
     /// Falls back to an SF Symbol so a missing resource degrades to a plain icon, not an empty item.
@@ -32,62 +35,125 @@ public enum MenuBarIcon {
         return image
     }()
 
-    /// One full cycle of the syncing animation, rendered once and reused.
+    /// One full lap of the syncing animation, rendered once and reused. Frame 0 starts from the
+    /// node's resting place, so the idle glyph flows straight into the animation.
     public static let syncingFrames: [NSImage] = (0..<frameCount).map {
-        syncingImage(phase: Double($0) / Double(frameCount))
+        syncingImage(progress: Double($0) / Double(frameCount))
     }
 
-    /// Reduce Motion gets the arrows without the movement.
-    public static let syncingStill: NSImage = syncingImage(phase: 0.5)
+    /// Reduce Motion gets the node moved off its resting place, without the movement.
+    public static let syncingStill: NSImage = syncingImage(progress: 0.25)
 
-    static func syncingImage(phase: Double) -> NSImage {
+    // MARK: - Artwork geometry
+
+    /// Measured on `Design/MenuBarIcon.png` (1024 px, y pointing down). Re-measure if the artwork
+    /// is redrawn; the generator script prints the crop.
+    nonisolated static let artworkCrop = CGRect(x: 142, y: 286, width: 738, height: 458)
+    nonisolated static let glyphFit = CGSize(width: 20, height: 16)
+    /// The infinity track as a generalised lemniscate,
+    /// x = cx + a·cos t / (1 + sin²t), y = cy + b·sin t·cos t / (1 + sin²t),
+    /// fitted to the stroke's centre line (mean offset 1.7 px against a 33 px stroke).
+    nonisolated static let track = (cx: 510.0, cy: 568.0, a: 350.0, b: 380.0)
+    nonisolated static let trackWidth = 33.0
+    nonisolated static let nodeCenter = CGPoint(x: 283, y: 696)
+    nonisolated static let nodeRadius = 46.0
+
+    nonisolated static var artworkScale: CGFloat {
+        min(glyphFit.width / artworkCrop.width, glyphFit.height / artworkCrop.height)
+    }
+
+    /// Artwork pixel (y down) to canvas point (y up), as the generator placed the glyph.
+    nonisolated static func canvasPoint(_ point: CGPoint) -> CGPoint {
+        let scale = artworkScale
+        let originX = (canvas.width - artworkCrop.width * scale) / 2
+        let originY = (canvas.height - artworkCrop.height * scale) / 2
+        return CGPoint(x: originX + (point.x - artworkCrop.minX) * scale, y: originY + (artworkCrop.maxY - point.y) * scale)
+    }
+
+    nonisolated static func trackPoint(_ t: Double) -> CGPoint {
+        let sine = sin(t), denominator = 1 + sine * sine
+        return CGPoint(x: track.cx + track.a * cos(t) / denominator, y: track.cy + track.b * sine * cos(t) / denominator)
+    }
+
+    /// The track sampled evenly by length, starting where the node rests and running the way the
+    /// artwork's motion trail points (away from the trail, round the left loop first).
+    nonisolated static let lap: [CGPoint] = {
+        let samples = 1_440
+        var restT = 0.0, restDistance = Double.infinity
+        for index in 0..<samples {
+            let t = Double(index) / Double(samples) * 2 * .pi
+            let point = trackPoint(t)
+            let distance = hypot(point.x - nodeCenter.x, point.y - nodeCenter.y)
+            if distance < restDistance { restDistance = distance; restT = t }
+        }
+        // Decreasing t from the resting place heads for the left end of the track.
+        let raw = (0...samples).map { trackPoint(restT - Double($0) / Double(samples) * 2 * .pi) }
+        var lengths = [0.0]
+        for index in 1..<raw.count { lengths.append(lengths[index - 1] + hypot(raw[index].x - raw[index - 1].x, raw[index].y - raw[index - 1].y)) }
+        let total = lengths.last ?? 1
+        var even: [CGPoint] = []
+        var cursor = 0
+        for step in 0..<samples {
+            let target = Double(step) / Double(samples) * total
+            while cursor < lengths.count - 2 && lengths[cursor + 1] < target { cursor += 1 }
+            let span = max(lengths[cursor + 1] - lengths[cursor], .ulpOfOne)
+            let fraction = (target - lengths[cursor]) / span
+            even.append(CGPoint(x: raw[cursor].x + (raw[cursor + 1].x - raw[cursor].x) * fraction, y: raw[cursor].y + (raw[cursor + 1].y - raw[cursor].y) * fraction))
+        }
+        return even
+    }()
+
+    /// The node's position (artwork pixels) after `progress` of a lap, wrapping both ways.
+    nonisolated static func nodePosition(_ progress: Double) -> CGPoint {
+        let wrapped = progress - progress.rounded(.down)
+        return lap[min(lap.count - 1, Int(wrapped * Double(lap.count)))]
+    }
+
+    /// Fading copies behind the node: (lap distance behind, size, opacity).
+    nonisolated static let tail: [(behind: Double, size: Double, opacity: Double)] = [(0.02, 0.8, 0.5), (0.04, 0.62, 0.3), (0.06, 0.46, 0.15)]
+
+    static func syncingImage(progress: Double) -> NSImage {
         let base = base
         let image = NSImage(size: canvas, flipped: false) { rect in
             base.draw(in: rect)
-            // Measured from the generated glyph: the cloud is open from y ≈ 2.0 to 7.7 pt around
-            // x 6–9 and to ≈ 6.3 pt by x 11, so the pair sits low and left of centre. Re-measure
-            // if Design/MenuBarIcon.png is redrawn.
-            let box = NSRect(x: 5.75, y: 2.9, width: 4.9, height: 3.6)
-            // Cut first, paint after, so the arrows never blend into the glyph's ink.
+            let scale = artworkScale
+            let rest = canvasPoint(nodeCenter)
+            // Lift the resting node off the track, then restore the stretch of track it covered.
+            // The bundled glyph is downsampled (one Retina pixel spans about 18 artwork pixels),
+            // so the node's soft edge reaches well past its 46 px radius; a tighter cut left a
+            // faint ring behind. The repair is clipped wider than the cut, so it meets the
+            // original stroke where that stroke is still whole and leaves no seam.
+            let cut = (nodeRadius + 24) * scale, repair = (nodeRadius + 36) * scale
             NSGraphicsContext.current?.compositingOperation = .destinationOut
-            drawArrows(in: box, phase: phase, cut: true)
+            NSBezierPath(ovalIn: NSRect(x: rest.x - cut, y: rest.y - cut, width: cut * 2, height: cut * 2)).fill()
             NSGraphicsContext.current?.compositingOperation = .sourceOver
-            drawArrows(in: box, phase: phase, cut: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(ovalIn: NSRect(x: rest.x - repair, y: rest.y - repair, width: repair * 2, height: repair * 2)).addClip()
+            let path = NSBezierPath()
+            for (index, point) in lap.enumerated() {
+                let canvasPoint = canvasPoint(point)
+                index == 0 ? path.move(to: canvasPoint) : path.line(to: canvasPoint)
+            }
+            path.close()
+            path.lineWidth = trackWidth * scale
+            path.lineJoinStyle = .round
+            NSColor.black.setStroke()
+            path.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+
+            func node(at progress: Double, size: Double, opacity: Double) {
+                let center = canvasPoint(nodePosition(progress))
+                let radius = nodeRadius * scale * size
+                NSColor.black.withAlphaComponent(opacity).setFill()
+                NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)).fill()
+            }
+            for piece in tail.reversed() { node(at: progress - piece.behind, size: piece.size, opacity: piece.opacity) }
+            node(at: progress, size: 1, opacity: 1)
             return true
         }
         image.isTemplate = true
         image.accessibilityDescription = "NimbusSync – Syncing"
         return image
-    }
-
-    /// An up arrow and a down arrow side by side, drifting in opposite directions and trading
-    /// brightness, so the pair reads as traffic both ways.
-    private static func drawArrows(in box: NSRect, phase: Double, cut: Bool) {
-        let lineWidth: CGFloat = 1.0, gap: CGFloat = 0.5, wingSpan: CGFloat = 1.25, amplitude: CGFloat = 0.35
-        func arrow(centerX: CGFloat, up: Bool, phase: Double) {
-            let travel = (CGFloat(phase) * 2 - 1) * amplitude      // -amplitude → +amplitude per cycle
-            let shift = up ? travel : -travel
-            let alpha = 0.45 + 0.55 * sin(.pi * phase)
-            let top = box.maxY - amplitude, bottom = box.minY + amplitude
-            let tip = up ? top : bottom, tail = up ? bottom : top
-            let wing = wingSpan * (up ? -1 : 1)
-
-            let path = NSBezierPath()
-            // A cut is the same path stroked wider at full opacity: a half-faded arrow must not
-            // leave a half-faded gap.
-            path.lineWidth = cut ? lineWidth + 2 * gap : lineWidth
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.move(to: NSPoint(x: centerX, y: tail + shift))
-            path.line(to: NSPoint(x: centerX, y: tip + shift))
-            path.move(to: NSPoint(x: centerX - wingSpan, y: tip + shift + wing))
-            path.line(to: NSPoint(x: centerX, y: tip + shift))
-            path.line(to: NSPoint(x: centerX + wingSpan, y: tip + shift + wing))
-            NSColor.black.withAlphaComponent(cut ? 1 : alpha).setStroke()
-            path.stroke()
-        }
-        arrow(centerX: box.minX + wingSpan, up: true, phase: phase)
-        arrow(centerX: box.maxX - wingSpan, up: false, phase: (phase + 0.5).truncatingRemainder(dividingBy: 1))
     }
 }
 

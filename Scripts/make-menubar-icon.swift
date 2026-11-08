@@ -6,9 +6,9 @@
 // Run from the repository root:  swift Scripts/make-menubar-icon.swift
 //
 // The status item draws the icon as a template, so the output's alpha *is* the shape macOS tints
-// for a light bar, a dark bar and a highlighted item. The source is a flattened export (dark ink on
-// near-white paper, no alpha channel), so the paper is keyed out here rather than shipped as an
-// opaque square.
+// for a light bar, a dark bar and a highlighted item. A source may be a flattened export (dark ink
+// on near-white paper) or already transparent; either way the ink becomes the alpha here, so no
+// opaque square is ever shipped.
 
 import CoreGraphics
 import Foundation
@@ -24,10 +24,13 @@ let output = root.appendingPathComponent("Packages/NimbusSyncDesignSystem/Source
 let inkLevel = 32.0
 let paperLevel = 236.0
 
-/// 18 pt is the status-item convention; the glyph fills 16 of it so it carries the same optical
-/// weight as the system items beside it.
-let canvasPoints = 18
-let glyphPoints = 16.0
+/// The glyph is a wide cloud-and-infinity mark (about 1.6 : 1). Squeezed into the usual 18 pt
+/// square its strokes came out near 0.7 pt and read faint beside the system items, so the canvas
+/// is 22 × 18 pt and the glyph fits within 20 × 16 pt of it. `MenuBarIcon.canvas` must match.
+let canvasWidthPoints = 22
+let canvasHeightPoints = 18
+let glyphWidthPoints = 20.0
+let glyphHeightPoints = 16.0
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("error: \(message)\n".utf8))
@@ -83,22 +86,22 @@ guard let provider = CGDataProvider(data: Data(pixels) as CFData),
 print("artwork \(glyph.width)×\(glyph.height) px inside \(width)×\(height)")
 
 try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+print("crop origin (\(minX), \(minY)) size \(glyph.width)×\(glyph.height): MenuBarIcon.artworkCrop must match")
 for scale in 1...3 {
-    let canvas = canvasPoints * scale
-    let fit = glyphPoints * Double(scale)
-    let factor = fit / Double(max(glyph.width, glyph.height))
+    let canvasWidth = canvasWidthPoints * scale, canvasHeight = canvasHeightPoints * scale
+    let factor = min(glyphWidthPoints / Double(glyph.width), glyphHeightPoints / Double(glyph.height)) * Double(scale)
     let drawWidth = Double(glyph.width) * factor, drawHeight = Double(glyph.height) * factor
     guard let context = CGContext(
-        data: nil, width: canvas, height: canvas, bitsPerComponent: 8, bytesPerRow: 0,
+        data: nil, width: canvasWidth, height: canvasHeight, bitsPerComponent: 8, bytesPerRow: 0,
         space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else { fail("could not make a \(canvas)² canvas") }
+    ) else { fail("could not make a \(canvasWidth)×\(canvasHeight) canvas") }
     context.interpolationQuality = .high
-    context.draw(glyph, in: CGRect(x: (Double(canvas) - drawWidth) / 2, y: (Double(canvas) - drawHeight) / 2, width: drawWidth, height: drawHeight))
+    context.draw(glyph, in: CGRect(x: (Double(canvasWidth) - drawWidth) / 2, y: (Double(canvasHeight) - drawHeight) / 2, width: drawWidth, height: drawHeight))
     guard let rendered = context.makeImage() else { fail("could not render @\(scale)x") }
     let suffix = scale == 1 ? "" : "@\(scale)x"
     let url = output.appendingPathComponent("MenuBarIcon\(suffix).png")
     guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { fail("could not write \(url.path)") }
     CGImageDestinationAddImage(destination, rendered, nil)
     guard CGImageDestinationFinalize(destination) else { fail("could not finalise \(url.path)") }
-    print("wrote \(url.path.replacingOccurrences(of: root.path + "/", with: "")) (\(canvas)×\(canvas))")
+    print("wrote \(url.path.replacingOccurrences(of: root.path + "/", with: "")) (\(canvasWidth)×\(canvasHeight))")
 }
