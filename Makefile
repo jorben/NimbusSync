@@ -40,6 +40,15 @@ XCODEBUILD := xcodebuild \
 	-scheme NimbusSync \
 	-destination platform=macOS
 
+# Quit the running app, wait until it has really exited, then open the new
+# build. Opening while the old instance is still terminating makes
+# LaunchServices fail with -600 (procNotFound), so retry once after a pause.
+RELAUNCH = relaunch() { \
+		pkill -x NimbusSync 2>/dev/null || true; \
+		i=0; while pgrep -x NimbusSync >/dev/null 2>&1 && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i + 1)); done; \
+		open "$$1" || { sleep 1; open "$$1"; }; \
+	}; relaunch
+
 .DEFAULT_GOAL := help
 .PHONY: help dev dev-unsigned build test test-swift lint \
 	clean clean-swift clean-dist
@@ -54,8 +63,7 @@ dev: ## Build via Scripts/build.sh (signed per local config) and launch it
 	@if ! codesign -dv "$(DIST_DIR)/NimbusSync.app" 2>&1 | grep -Eq '^TeamIdentifier=[A-Z0-9]+'; then \
 		printf 'WARNING: unsigned/ad-hoc build — Finder will report the File Provider extension as unavailable.\n' >&2; \
 	fi
-	@pkill -x NimbusSync 2>/dev/null || true
-	@open "$(DIST_DIR)/NimbusSync.app"
+	@$(RELAUNCH) "$(DIST_DIR)/NimbusSync.app"
 	@printf 'launched: %s\n' "$(DIST_DIR)/NimbusSync.app"
 
 dev-unsigned: ## Fast UI-only build; File Provider extension will NOT load
@@ -65,8 +73,7 @@ dev-unsigned: ## Fast UI-only build; File Provider extension will NOT load
 		-quiet \
 		CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 	@printf 'WARNING: unsigned build — Finder will report the File Provider extension as unavailable.\n' >&2
-	@pkill -x NimbusSync 2>/dev/null || true
-	@open '$(DEV_UNSIGNED_APP)'
+	@$(RELAUNCH) '$(DEV_UNSIGNED_APP)'
 	@printf 'launched: %s\n' '$(DEV_UNSIGNED_APP)'
 
 build: ## Unified build via Scripts/build.sh (scans + Dist/ artifacts)
