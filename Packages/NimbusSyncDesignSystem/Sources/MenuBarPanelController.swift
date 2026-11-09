@@ -26,6 +26,8 @@ public final class MenuBarPanelController: NSObject, NSWindowDelegate {
     private var outsideClickMonitor: Any?
     private var lastDismissedAt: Date?
     private var isClosing = false
+    /// The latest measured content size, waiting to be applied to the panel.
+    private var pendingContentSize: CGSize?
 
     public init<Content: View>(icon: MenuBarIconAnimator, @ViewBuilder content: () -> Content) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -52,7 +54,7 @@ public final class MenuBarPanelController: NSObject, NSWindowDelegate {
         panel.onCancel = { [weak self] in self?.close() }
         panel.contentView = Self.makeContainer(
             content: content(),
-            onSizeChange: { [weak self] size in self?.resizePanel(to: size) }
+            onSizeChange: { [weak self] size in self?.scheduleResize(to: size) }
         )
 
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(dismissForNotification(_:)), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
@@ -82,6 +84,7 @@ public final class MenuBarPanelController: NSObject, NSWindowDelegate {
 
     public func open() {
         guard !panel.isVisible else { return }
+        applyPendingResize()
         positionPanel()
         panel.makeKeyAndOrderFront(nil)
         statusItem.button?.highlight(true)
@@ -170,6 +173,26 @@ public final class MenuBarPanelController: NSObject, NSWindowDelegate {
         image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
         image.resizingMode = .stretch
         return image
+    }
+
+    /// The size arrives from SwiftUI's geometry callback, which runs while the hosting view is
+    /// rendering. Resizing the panel there lays the hosting view out reentrantly; AppKit skips that
+    /// pass and SwiftUI keeps the previous size, so content that shrank and grew again is drawn
+    /// shifted up, with an empty band at the bottom and nothing left to scroll. The resize waits
+    /// for the render to finish, and only the latest size is applied.
+    private func scheduleResize(to size: CGSize) {
+        let isScheduled = pendingContentSize != nil
+        pendingContentSize = size
+        guard !isScheduled else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.applyPendingResize() }
+        }
+    }
+
+    private func applyPendingResize() {
+        guard let size = pendingContentSize else { return }
+        pendingContentSize = nil
+        resizePanel(to: size)
     }
 
     /// Keeps the panel's top edge where it is, so content growing or shrinking moves the bottom.
