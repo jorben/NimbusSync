@@ -1689,15 +1689,21 @@ public enum FileProviderErrorMapper {
         if mapped.domain == NSFileProviderErrorDomain, (error as NSError).domain != NSFileProviderErrorDomain {
             let correlation = (mapped.userInfo["correlationID"] as? String) ?? "-"
             logger.error("fp.error.mapped fp_code=\(mapped.code, privacy: .public) source=\(diagnosticSummary(error), privacy: .public) correlationID=\(correlation, privacy: .public)")
-            if mapped.code == NSFileProviderError.syncAnchorExpired.rawValue {
+            if mapped.code == NSFileProviderError.syncAnchorExpired.rawValue, isExpectedAnchorExpiry(error) {
                 // Expected after the sync epoch rotates (the server folder moved, or the journal
                 // was compacted past Finder's position): the system re-reads the Domain.
+                // A malformed, tampered or unsupported anchor also maps to syncAnchorExpired but
+                // is not expected, so it stays an error.
                 ActivityLog.shared.info("file-provider", "Finder's sync position expired; re-reading the domain · \(diagnosticSummary(error))")
             } else {
                 ActivityLog.shared.error("file-provider", "File Provider error \(mapped.code) · \(diagnosticSummary(error))")
             }
         }
         return mapped
+    }
+
+    private static func isExpectedAnchorExpiry(_ error: Error) -> Bool {
+        (error as? AnchorValidationError) == .expired || (error as? StoreBridgeError) == .anchorExpired
     }
 
     private static func mapWithoutLogging(_ error: Error) -> NSError {
