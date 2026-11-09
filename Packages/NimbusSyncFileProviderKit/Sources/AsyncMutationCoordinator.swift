@@ -199,6 +199,15 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
             try store.updateTransferTask(taskID: task.taskID, state: "succeeded", bytes: task.totalBytes ?? 0, totalBytes: task.totalBytes)
             return ModifyOutcome(item: committed)
         } catch {
+            if let failure = error as? CoreFailure, failure.isRemoteObjectGone {
+                // The backend found the item stale (its path is empty or holds another object)
+                // and deleted it rather than act on the path. Nothing failed that a retry or the user could fix, so no
+                // upload failure or open operation is left behind.
+                try? store.deleteTransferTask(taskID: task.taskID)
+                try? store.clearPending(item.itemIdentifier)
+                try? store.commitOperation(operationID: operationID, state: "cancelled", itemIdentifier: item.itemIdentifier)
+                throw error
+            }
             if let failure = error as? CoreFailure, failure.code == .versionConflict, fields.contains(.contents), let contents {
                 // The server moved on while this edit was pending. Keep both:
                 // the local bytes become a sibling conflict copy, and the

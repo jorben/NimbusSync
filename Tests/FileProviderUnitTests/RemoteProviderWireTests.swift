@@ -210,6 +210,127 @@ final class RemoteProviderWireTests: XCTestCase {
         }
     }
 
+    /// Delete names its target by path. A stale item shares its path with the real file (the old
+    /// upload-placeholder bug), so deleting it must never delete that file; it is gone already.
+    func testDeletingAStaleItemNeverDeletesTheFileNowAtItsPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        stale.canTrash = true
+        try SQLiteStateStore(url: fixture.storeURL).insertItem(stale)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+
+        try await backend!.delete(DeleteRequest(itemIdentifier: stale.itemIdentifier, expectedVersion: stale.version.content, recursive: false, replayKey: "delete-stale"), context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+        backend = nil
+
+        XCTAssertTrue(protocolState.requests.contains { $0.url.path == "/api/v4/file/info" }, "the path is checked first")
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" }, "the file now at the path is left alone")
+    }
+
+    func testDeletingTheCurrentObjectStillDeletesByPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        var current = fixture.template
+        current.remoteID = "remote-wire-remote"
+        current.canTrash = true
+        try SQLiteStateStore(url: fixture.storeURL).insertItem(current)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+
+        try await backend!.delete(DeleteRequest(itemIdentifier: current.itemIdentifier, expectedVersion: current.version.content, recursive: false, replayKey: "delete-current"), context: fixture.makeContext(itemIdentifier: current.itemIdentifier))
+        backend = nil
+
+        let deletion = try XCTUnwrap(protocolState.requests.first { $0.url.path == "/api/v4/file" && $0.method == "DELETE" })
+        let body = try XCTUnwrap(deletion.body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(body["uris"] as? [String], [current.uri])
+        XCTAssertEqual(body["skip_soft_delete"] as? Bool, false, "still soft-deleted into the server trash")
+    }
+
+    /// Moving a stale item to the trash must not trash the real file at its path either. The stale
+    /// item is deleted instead and the deletion is journaled for the working set.
+    func testTrashingAStaleItemDeletesItInsteadOfTrashingTheFileAtItsPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        stale.canTrash = true
+        try store.insertItem(stale)
+        let workingSet = NSFileProviderItemIdentifier.workingSet.rawValue
+        let before = try store.currentAnchor(domainIdentifier: fixture.domainIdentifier, scope: workingSet)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+
+        do {
+            _ = try await backend!.trash(TrashRequest(item: stale, expectedVersion: stale.version.content, replayKey: "trash-stale"), context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+            XCTFail("the path now belongs to another object")
+        } catch let failure as CoreFailure {
+            XCTAssertTrue(failure.isRemoteIdentityChanged)
+        }
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" }, "the file now at the path is not trashed")
+        XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.tombstone, true)
+        let changes = try store.enumerateChanges(domainIdentifier: fixture.domainIdentifier, scope: workingSet, from: before).changes
+        XCTAssertTrue(changes.contains { $0.itemIdentifier == stale.itemIdentifier && $0.kind == "deleted" })
+    }
+
+    /// Cloudreve answers 40016 when nothing is at the path (or its parent). The item is gone, so
+    /// delete succeeds locally and trash deletes it instead of failing with an unknown outcome.
+    func testDeleteAndTrashTreatAnEmptyPathAsGone() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        var moved = fixture.template
+        moved.remoteID = "remote-moved-away"
+        moved.canTrash = true
+        try store.insertItem(moved)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.fileInfoAPICode = 40016
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        let context = fixture.makeContext(itemIdentifier: moved.itemIdentifier)
+
+        try await backend!.delete(DeleteRequest(itemIdentifier: moved.itemIdentifier, expectedVersion: moved.version.content, recursive: false, replayKey: "delete-moved"), context: context)
+        do {
+            _ = try await backend!.trash(TrashRequest(item: moved, expectedVersion: moved.version.content, replayKey: "trash-moved"), context: context)
+            XCTFail("nothing is at the path to trash")
+        } catch let failure as CoreFailure {
+            XCTAssertTrue(failure.isRemotePathEmpty)
+            XCTAssertTrue(failure.isRemoteObjectGone)
+            XCTAssertFalse(failure.isRemoteIdentityChanged)
+        }
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" }, "nothing is deleted by path")
+        XCTAssertEqual(try store.item(identifier: moved.itemIdentifier)?.tombstone, true)
+    }
+
+    /// Any other `file/info` failure proves nothing about the object, so nothing is deleted.
+    func testDeleteFailsClosedWhenThePathCannotBeChecked() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        var item = fixture.template
+        item.remoteID = "remote-wire-remote"
+        item.canTrash = true
+        try SQLiteStateStore(url: fixture.storeURL).insertItem(item)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.fileInfoAPICode = 50001
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+
+        do {
+            try await backend!.delete(DeleteRequest(itemIdentifier: item.itemIdentifier, expectedVersion: item.version.content, recursive: false, replayKey: "delete-unchecked"), context: fixture.makeContext(itemIdentifier: item.itemIdentifier))
+            XCTFail("the identity could not be confirmed")
+        } catch let failure as CoreFailure {
+            XCTAssertFalse(failure.isRemoteObjectGone)
+            XCTAssertEqual(failure.redactedContext["api_code"], "50001")
+        }
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" })
+    }
+
     func testQiniuAsyncUploadUsesOneBasedPartsAndUpTokenOnStorageOnly() async throws {
         let fixture = try UploadWireFixture(provider: "qiniu", chunkSize: 4)
         defer { fixture.cleanup() }
@@ -841,7 +962,7 @@ private final class UploadWireFixture {
 
     private static func capabilities(provider: String) -> CapabilitySnapshot {
         let providerCapability = CapabilitySnapshot.Provider(name: provider, read: .verified, write: .verified, resumable: .verified, zeroByte: .verified, crypto: .verified)
-        let operations = CapabilitySnapshot.OperationCapabilities(collisionSafeCreate: .verified, conditionalModify: .verified, metadataMove: .verified, zeroByte: .verified, resumable: .verified)
+        let operations = CapabilitySnapshot.OperationCapabilities(collisionSafeCreate: .verified, conditionalModify: .verified, metadataMove: .verified, trash: .verified, zeroByte: .verified, resumable: .verified)
         return CapabilitySnapshot(
             revision: 1,
             stableItemIdentity: .verified,
@@ -853,6 +974,7 @@ private final class UploadWireFixture {
             uploadCompletionQueryableProviders: [provider],
             zeroByteWriteProviders: [provider],
             resolvedUploadPolicyKinds: [provider],
+            trashRestore: .verified,
             providers: [providerCapability],
             operations: operations
         )
@@ -884,6 +1006,7 @@ private final class UploadWireURLProtocol: URLProtocol {
         private var sessionsCreated = 0
         private var storageStatusValue = 200
         private var uploadSessionAPICodeValue: Int?
+        private var fileInfoAPICodeValue: Int?
 
         init(provider: String, sourceSize: Int, mimeType: String = "text/plain", chunkSize: Int64 = 4) {
             self.provider = provider
@@ -902,6 +1025,12 @@ private final class UploadWireURLProtocol: URLProtocol {
         var uploadSessionAPICode: Int? {
             get { lock.lock(); defer { lock.unlock() }; return uploadSessionAPICodeValue }
             set { lock.lock(); uploadSessionAPICodeValue = newValue; lock.unlock() }
+        }
+
+        /// Cloudreve envelope code `file/info` answers with instead of the file; nil serves the file.
+        var fileInfoAPICode: Int? {
+            get { lock.lock(); defer { lock.unlock() }; return fileInfoAPICodeValue }
+            set { lock.lock(); fileInfoAPICodeValue = newValue; lock.unlock() }
         }
 
         /// Each `PUT file/upload` gets its own session ID so tests can tell which one was cancelled.
@@ -999,6 +1128,9 @@ private final class UploadWireURLProtocol: URLProtocol {
         if path == "/api/v4/file/upload", request.httpMethod == "DELETE" {
             return (200, Data(#"{"code":0}"#.utf8))
         }
+        if path == "/api/v4/file", request.httpMethod == "DELETE" {
+            return (200, Data(#"{"code":0}"#.utf8))
+        }
         if path == "/api/v4/file/upload", let code = state.uploadSessionAPICode {
             return (200, Data("{\"code\":\(code),\"msg\":\"rejected\"}".utf8))
         }
@@ -1031,6 +1163,9 @@ private final class UploadWireURLProtocol: URLProtocol {
                 ]
             ]
             return (200, try! JSONSerialization.data(withJSONObject: policy))
+        }
+        if path == "/api/v4/file/info", let code = state.fileInfoAPICode {
+            return (200, Data("{\"code\":\(code),\"msg\":\"not found\"}".utf8))
         }
         if path == "/api/v4/file/info" {
             let response: [String: Any] = [

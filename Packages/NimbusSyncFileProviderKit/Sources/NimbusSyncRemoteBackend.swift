@@ -1406,7 +1406,9 @@ private func mapAPIError(_ code: Int, message: String? = nil) -> CoreFailure {
     case 40081:
         return CoreFailure(code: .unknownOutcome, retryable: true)
     default:
-        return CoreFailure(code: .unknownOutcome, retryable: false)
+        // The code is kept so a caller can tell a known answer (40016: nothing at the path or
+        // its parent) from a truly unknown one without changing what other callers see.
+        return CoreFailure(code: .unknownOutcome, retryable: false, redactedContext: ["api_code": String(code)])
     }
 }
 
@@ -1887,6 +1889,27 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         guard let current = try store.item(identifier: request.item.itemIdentifier) else { throw CoreFailure(code: .notFound, retryable: false) }
         guard current.canTrash else { throw CoreFailure(code: .permissionDenied, retryable: false, userActionRequired: true) }
         if let expectedVersion = request.expectedVersion, expectedVersion != current.version.content { throw CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true) }
+        do {
+            try await requireSameRemoteObjectAtPathAsync(current, context: context)
+        } catch let failure as CoreFailure where failure.isRemoteObjectGone {
+            // Trashing by path would move another object to the trash, or fail on an empty path.
+            // The item stands for an object already gone, so it is deleted here and the system
+            // hears about it, exactly as when a download finds it stale. Nothing on the server is
+            // touched; if the object only moved, the next full check brings it back.
+            do {
+                let change = try store.deleteSystemHeldItem(identifier: current.itemIdentifier, origin: "trash")
+                ActivityLog.shared.debug("file-provider", Self.staleDeletionSummary(identifier: current.itemIdentifier, alreadyDeleted: current.tombstone, change: change))
+            } catch {
+                ActivityLog.shared.error("file-provider", "Could not delete a stale item · item=\(current.itemIdentifier) \(FileProviderErrorMapper.diagnosticSummary(error))")
+            }
+            let reason = failure.isRemoteIdentityChanged ? "the server holds another file at its path" : "nothing is at its path on the server"
+            if current.tombstone {
+                ActivityLog.shared.debug("file-provider", "Did not trash a deleted item: \(reason) · item=\(current.itemIdentifier)")
+            } else {
+                ActivityLog.shared.warning("file-provider", "Removed an item instead of trashing it: \(reason) · item=\(current.itemIdentifier)")
+            }
+            throw failure
+        }
         let _: EmptyResponse = try await requestAsync(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": false], authenticated: true, context: context)
         var trashed = current
         trashed.trashed = true
@@ -1912,6 +1935,20 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
     public func delete(_ request: DeleteRequest, context: FileProviderOperationContext) async throws {
         guard let current = try store.item(identifier: request.itemIdentifier) else { return }
         let skipSoftDelete = try deletionMode(for: current, expectedVersion: request.expectedVersion, recursive: request.recursive)
+        if !current.trashed {
+            do {
+                try await requireSameRemoteObjectAtPathAsync(current, context: context)
+            } catch let failure as CoreFailure where failure.isRemoteObjectGone {
+                // Nothing at the path, or another object there: what the item stood for is gone
+                // either way, and deleting by path must never touch the other object.
+                if failure.isRemoteIdentityChanged {
+                    ActivityLog.shared.warning("file-provider", "Deleted a stale item locally only: the server holds another file at its path · item=\(current.itemIdentifier)")
+                } else {
+                    ActivityLog.shared.debug("file-provider", "Deleted an item locally only: nothing is at its path on the server · item=\(current.itemIdentifier)")
+                }
+                return
+            }
+        }
         do {
             let _: EmptyResponse = try await requestAsync(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": skipSoftDelete], authenticated: true, context: context)
         } catch let failure as CoreFailure where failure.code == .notFound {
@@ -2468,6 +2505,26 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         guard let expected = stored.remoteID, !expected.isEmpty, dto.id != expected else { return }
         ActivityLog.shared.debug("file-provider", "Remote identity changed · item=\(stored.itemIdentifier) stored=\(expected) current=\(dto.id)")
         throw CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "remote_identity_changed"])
+    }
+
+    /// Delete and trash name their target by path. Before acting, confirm the path still holds the
+    /// object the item stands for: after the old upload-placeholder bug a stale item can share its
+    /// path with the real file, and deleting by path would remove that file instead. Items with no
+    /// recorded remote ID are not checked. Throws `remote_path_empty` when nothing is at the path
+    /// (404, or Cloudreve's 40016 for a missing object or parent) and `remote_identity_changed`
+    /// when another object is there. Any other failure is passed on: without proof of identity
+    /// nothing is deleted.
+    private func requireSameRemoteObjectAtPathAsync(_ stored: RemoteItem, context: FileProviderOperationContext) async throws {
+        guard let expected = stored.remoteID, !expected.isEmpty else { return }
+        let dto: RemoteFileDTO
+        do {
+            dto = try await requestAsync(path: "file/info", method: "GET", query: [
+                URLQueryItem(name: "uri", value: try canonicalRemoteURI(stored.uri))
+            ], body: nil, authenticated: true, context: context)
+        } catch let failure as CoreFailure where failure.code == .notFound || failure.redactedContext["api_code"] == "40016" {
+            throw CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "remote_path_empty"])
+        }
+        try Self.requireSameRemoteObject(dto, as: stored)
     }
 
     /// What the stale-item deletion wrote: the journal row the system should hear about and whether

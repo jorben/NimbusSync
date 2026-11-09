@@ -285,6 +285,16 @@ extension CoreFailure {
     public var isRemoteIdentityChanged: Bool {
         code == .notFound && redactedContext["stage"] == "remote_identity_changed"
     }
+
+    /// Nothing is at the item's path on the server any more (deleted, or moved where the item no
+    /// longer points).
+    public var isRemotePathEmpty: Bool {
+        code == .notFound && redactedContext["stage"] == "remote_path_empty"
+    }
+
+    /// What the item stood for is no longer at its path, so acting on the path cannot help: the
+    /// item is deleted locally instead.
+    public var isRemoteObjectGone: Bool { isRemoteIdentityChanged || isRemotePathEmpty }
 }
 
 private final class RegisteredTaskLimiter: @unchecked Sendable {
