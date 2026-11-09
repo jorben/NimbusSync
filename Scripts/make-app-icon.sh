@@ -1,54 +1,59 @@
 #!/bin/sh
-# Regenerates the app icon set from its design source.
+# Regenerates the app icon from its design sources.
 #
-#   Design/AppIcon.png (1024 × 1024, opaque, full bleed)
-#     -> Apps/NimbusSync/Assets.xcassets/AppIcon.appiconset/
+#   Design/AppIcon-Light.png (1024 × 1024, opaque, full bleed)  -> light appearance (default)
+#   Design/AppIcon-Dark.png  (1024 × 1024, opaque, full bleed)  -> dark appearance
+#     -> Apps/NimbusSync/AppIcon.icon  (Icon Composer document)
 #
 # Run from the repository root:  Scripts/make-app-icon.sh
 #
 # The artwork is a full-bleed square on purpose: macOS 26 and later mask app icons to their own
 # rounded shape, and an icon that already carries a transparent margin and corners is shrunk into
 # a grey tile instead.
+#
+# An asset-catalog app icon set cannot carry a dark variant on macOS, so the icon is an Icon
+# Composer document: one layer whose image switches with the appearance, with Liquid Glass
+# effects off so the artwork renders as drawn. actool also derives AppIcon.icns from the light
+# rendering for macOS releases before 26, which have no dark app icons.
 set -eu
 
-source=Design/AppIcon.png
-set_dir=Apps/NimbusSync/Assets.xcassets/AppIcon.appiconset
+light=Design/AppIcon-Light.png
+dark=Design/AppIcon-Dark.png
+icon=Apps/NimbusSync/AppIcon.icon
 
-[ -f "$source" ] || { echo "error: $source is missing" >&2; exit 1; }
-width=$(sips -g pixelWidth "$source" | awk '/pixelWidth/ { print $2 }')
-height=$(sips -g pixelHeight "$source" | awk '/pixelHeight/ { print $2 }')
-[ "$width" = 1024 ] && [ "$height" = 1024 ] || { echo "error: $source must be 1024 × 1024 (is $width × $height)" >&2; exit 1; }
-
-mkdir -p "$set_dir"
-for points in 16 32 128 256 512; do
-    for scale in 1 2; do
-        pixels=$((points * scale))
-        if [ "$scale" = 1 ]; then name="icon_${points}x${points}.png"; else name="icon_${points}x${points}@2x.png"; fi
-        sips -s format png -z "$pixels" "$pixels" "$source" --out "$set_dir/$name" >/dev/null
-        echo "wrote $set_dir/$name ($pixels px)"
-    done
+for source in "$light" "$dark"; do
+    [ -f "$source" ] || { echo "error: $source is missing" >&2; exit 1; }
+    width=$(sips -g pixelWidth "$source" | awk '/pixelWidth/ { print $2 }')
+    height=$(sips -g pixelHeight "$source" | awk '/pixelHeight/ { print $2 }')
+    [ "$width" = 1024 ] && [ "$height" = 1024 ] || { echo "error: $source must be 1024 × 1024 (is $width × $height)" >&2; exit 1; }
 done
 
-cat > "$set_dir/Contents.json" <<'JSON'
+rm -rf "$icon"
+mkdir -p "$icon/Assets"
+sips -s format png "$light" --out "$icon/Assets/AppIcon-Light.png" >/dev/null
+sips -s format png "$dark" --out "$icon/Assets/AppIcon-Dark.png" >/dev/null
+
+cat > "$icon/icon.json" <<'JSON'
 {
-  "images" : [
-    { "filename" : "icon_16x16.png", "idiom" : "mac", "scale" : "1x", "size" : "16x16" },
-    { "filename" : "icon_16x16@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "16x16" },
-    { "filename" : "icon_32x32.png", "idiom" : "mac", "scale" : "1x", "size" : "32x32" },
-    { "filename" : "icon_32x32@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "32x32" },
-    { "filename" : "icon_128x128.png", "idiom" : "mac", "scale" : "1x", "size" : "128x128" },
-    { "filename" : "icon_128x128@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "128x128" },
-    { "filename" : "icon_256x256.png", "idiom" : "mac", "scale" : "1x", "size" : "256x256" },
-    { "filename" : "icon_256x256@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "256x256" },
-    { "filename" : "icon_512x512.png", "idiom" : "mac", "scale" : "1x", "size" : "512x512" },
-    { "filename" : "icon_512x512@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "512x512" }
+  "fill" : "automatic",
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name-specializations" : [
+            { "value" : "AppIcon-Light.png" },
+            { "appearance" : "dark", "value" : "AppIcon-Dark.png" }
+          ],
+          "name" : "Artwork"
+        }
+      ],
+      "shadow" : { "kind" : "none", "opacity" : 0.5 },
+      "specular" : false,
+      "translucency" : { "enabled" : false, "value" : 0.5 }
+    }
   ],
-  "info" : { "author" : "xcode", "version" : 1 }
+  "supported-platforms" : { "squares" : [ "macOS" ] }
 }
 JSON
-cat > "$(dirname "$set_dir")/Contents.json" <<'JSON'
-{
-  "info" : { "author" : "xcode", "version" : 1 }
-}
-JSON
-echo "wrote $set_dir/Contents.json"
+echo "wrote $icon"

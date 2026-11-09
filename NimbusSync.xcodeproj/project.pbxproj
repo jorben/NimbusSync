@@ -18,12 +18,14 @@
 		A1000000000000000000000B /* CloudreveDomainService in Frameworks */ = {isa = PBXBuildFile; productRef = A50000000000000000000005 /* CloudreveDomainService */; };
 		A10000000000000000000009 /* NimbusSyncFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* NimbusSyncFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* Assets.xcassets */; };
+		A1000000000000000000000D /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* AppIcon.icon */; };
 		A1000000000000000000000A /* NimbusSyncFileProviderUI.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* NimbusSyncFileProviderUI.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* NimbusSyncApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NimbusSyncApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20000000000000000000015 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		A20000000000000000000002 /* FileProviderExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderExtension.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* ActionViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionViewController.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* NimbusSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NimbusSyncTests.swift; sourceTree = "<group>"; };
@@ -57,7 +59,7 @@
 		A40000000000000000000004 /* Config */ = {isa = PBXGroup; children = (A20000000000000000000009, A2000000000000000000000A, A2000000000000000000000B, A2000000000000000000000C, A2000000000000000000000E, A2000000000000000000000F, A20000000000000000000010, A20000000000000000000011, A20000000000000000000012, A20000000000000000000013, ); path = Config; sourceTree = "<group>"; };
 		A40000000000000000000005 /* Tests */ = {isa = PBXGroup; children = (A4000000000000000000000B, ); path = Tests; sourceTree = "<group>"; };
 		A40000000000000000000006 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000005, A20000000000000000000006, A20000000000000000000007, A20000000000000000000008, ); name = Products; sourceTree = "<group>"; };
-		A40000000000000000000008 /* NimbusSync */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000014, ); path = NimbusSync; sourceTree = "<group>"; };
+		A40000000000000000000008 /* NimbusSync */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000014, A20000000000000000000015, ); path = NimbusSync; sourceTree = "<group>"; };
 		A40000000000000000000009 /* NimbusSyncFileProvider */ = {isa = PBXGroup; children = (A20000000000000000000002, ); path = NimbusSyncFileProvider; sourceTree = "<group>"; };
 		A4000000000000000000000A /* NimbusSyncFileProviderUI */ = {isa = PBXGroup; children = (A20000000000000000000003, ); path = NimbusSyncFileProviderUI; sourceTree = "<group>"; };
 		A4000000000000000000000B /* SwiftUnitTests */ = {isa = PBXGroup; children = (A20000000000000000000004, ); path = SwiftUnitTests; sourceTree = "<group>"; };
@@ -75,7 +77,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A30000000000000000000006 /* NimbusSync Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, ); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000006 /* NimbusSync Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000008 /* NimbusSyncFileProvider Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A3000000000000000000000A /* NimbusSyncFileProviderUI Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A3000000000000000000000C /* NimbusSyncTests Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
