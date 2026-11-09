@@ -983,6 +983,12 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                     // Finder asked for the same file twice at once. The download already running
                     // owns the item's state and its own task; this attempt leaves no trace.
                     if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
+                } else if (error as? CoreFailure)?.isRemoteIdentityChanged == true {
+                    // The backend deleted the stale item; tell the system so it leaves Finder.
+                    // Nothing is left to retry, so nothing is listed as an issue either.
+                    try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .none)
+                    if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
+                    try? await NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet)
                 } else {
                     try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .failed, error: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
                     if let transferTask {

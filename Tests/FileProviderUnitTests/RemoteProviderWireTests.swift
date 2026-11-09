@@ -167,6 +167,9 @@ final class RemoteProviderWireTests: XCTestCase {
         backend = nil
 
         XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.remoteID, "remote-deleted-placeholder", "the stale item keeps its own identity")
+        XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.tombstone, true, "the stale item is deleted, so the system stops asking for it")
+        XCTAssertTrue(CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "remote_identity_changed"]).isRemoteIdentityChanged)
+        XCTAssertFalse(CoreFailure(code: .notFound, retryable: false).isRemoteIdentityChanged, "a plain 404 may be a stale path, left to the next check")
         XCTAssertNil(try store.itemIdentifier(forRemoteID: "remote-wire-remote"))
         XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file/url" }, "nothing is downloaded for a gone item")
         XCTAssertEqual(FileProviderErrorMapper.map(CoreFailure(code: .notFound, retryable: false)).code, NSFileProviderError.noSuchItem.rawValue)

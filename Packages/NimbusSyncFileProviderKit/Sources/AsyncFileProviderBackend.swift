@@ -279,6 +279,12 @@ extension CoreFailure {
     public var isAlreadyRegisteredTransfer: Bool {
         code == .cannotSynchronize && redactedContext["stage"] == "task_already_registered"
     }
+
+    /// The server holds a different object at the item's path: the one the item stood for was
+    /// deleted or replaced, so the item is stale for good and asking again cannot help.
+    public var isRemoteIdentityChanged: Bool {
+        code == .notFound && redactedContext["stage"] == "remote_identity_changed"
+    }
 }
 
 private final class RegisteredTaskLimiter: @unchecked Sendable {

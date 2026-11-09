@@ -1786,7 +1786,20 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             return refreshed
         } catch let error as DownloadHTTPError {
             throw CoreFailure(code: .network, retryable: true, redactedContext: ["http-status": String(error.statusCode), "stage": stage])
+        } catch let failure as CoreFailure where failure.isRemoteIdentityChanged {
+            // Left in place, the stale item keeps its place in Finder and the system keeps asking
+            // for it, failing the same way each time. Delete it here, as a full check would; the
+            // object now at its path arrives with live updates or the next check.
+            try? tombstoneStaleItem(identifier: identifier)
+            throw failure
         }
+    }
+
+    private func tombstoneStaleItem(identifier: String) throws {
+        guard var item = try store.item(identifier: identifier), !item.tombstone else { return }
+        let parent = item.parentIdentifier
+        item.tombstone = true
+        _ = try store.commitProviderChange(item: item, oldParentIdentifier: parent, newParentIdentifier: nil, kind: "deleted", origin: "fetch_contents")
     }
 
     public func create(_ request: CreateRequest, context: FileProviderOperationContext) async throws -> RemoteItem {
