@@ -3,52 +3,6 @@ import Combine
 import AppKit
 import CloudreveDomainKit
 
-public struct OnboardingView: View {
-    @State private var origin = ""
-    @FocusState private var originFieldIsFocused: Bool
-    public let onContinue: (String) -> Void
-    public let onCancel: () -> Void
-    public let isWorking: Bool
-    public let errorMessage: String?
-    public init(isWorking: Bool = false, errorMessage: String? = nil, onCancel: @escaping () -> Void = {}, onContinue: @escaping (String) -> Void) { self.isWorking = isWorking; self.errorMessage = errorMessage; self.onCancel = onCancel; self.onContinue = onContinue }
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-			Label("NimbusSync", systemImage: "externaldrive").font(.title2)
-            Text("Connect a Cloudreve domain to use it in Finder.").foregroundStyle(.secondary)
-            TextField("Cloudreve URL", text: $origin)
-                .textFieldStyle(.roundedBorder)
-                .focused($originFieldIsFocused)
-            if let errorMessage { Text(errorMessage).foregroundStyle(.red).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                if isWorking {
-                    ProgressView()
-                        .controlSize(.small)
-                    Button("Cancel", action: onCancel).buttonStyle(.bordered)
-                }
-                Button("Continue") { onContinue(origin) }.buttonStyle(.borderedProminent).disabled(origin.isEmpty || isWorking)
-            }
-        }
-        .padding(24)
-        .frame(width: 480)
-        .tint(Color(red: 5 / 255, green: 111 / 255, blue: 238 / 255))
-        .accessibilityElement(children: .contain)
-        .onAppear(perform: focusOriginField)
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
-            guard let window = notification.object as? NSWindow,
-                  window.title == "Welcome to NimbusSync" else { return }
-            focusOriginField()
-        }
-    }
-
-    private func focusOriginField() {
-        originFieldIsFocused = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) {
-            originFieldIsFocused = true
-        }
-    }
-}
-
 public struct ConflictCenterView: View {
     @Binding public var conflicts: [ProductConflict]
     public let onKeepRemote: (ProductConflict) -> Void

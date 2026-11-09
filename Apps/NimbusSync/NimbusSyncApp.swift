@@ -215,21 +215,27 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         guard isPrimaryInstance, let runtime else { return }
         NSApp.activate(ignoringOtherApps: true)
         if onboardingWindowController == nil {
-            let contentSize = NSSize(width: 520, height: 390)
+            let contentSize = NSSize(width: 580, height: 510)
             let window = NSWindow(
                 contentRect: NSRect(origin: .zero, size: contentSize),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
-            let hostingView = NSHostingView(rootView: OnboardingWindowContent(runtime: runtime))
+            let hostingView = NSHostingView(rootView: OnboardingWindowContent(runtime: runtime, onClose: { [weak self] in
+                self?.onboardingWindowController?.close()
+            }))
             hostingView.frame = NSRect(origin: .zero, size: contentSize)
             hostingView.autoresizingMask = [.width, .height]
             window.contentView = hostingView
-            window.title = "Welcome to NimbusSync"
+            // The title stays for the Window menu and accessibility; the header draws its own.
+            window.title = AddDomainText.windowTitle
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
             window.delegate = self
-            window.contentMinSize = NSSize(width: 520, height: 360)
-            window.contentMaxSize = NSSize(width: 680, height: 600)
+            window.contentMinSize = NSSize(width: 520, height: 470)
+            window.contentMaxSize = NSSize(width: 760, height: 680)
             window.isReleasedWhenClosed = false
             window.center()
             onboardingWindowController = NSWindowController(window: window)
@@ -242,6 +248,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         guard let window = notification.object as? NSWindow,
               window === onboardingWindowController?.window else { return }
         runtime?.cancelDomainSetup()
+        runtime?.onboardingOrigin = ""
     }
 
     func openConflictsWindow() {
@@ -365,109 +372,35 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
 
 private struct OnboardingWindowContent: View {
     @ObservedObject var runtime: NimbusSyncAppState
+    let onClose: () -> Void
 
-    private var displayNameBinding: Binding<String> {
-        Binding(
-            get: { runtime.pendingDomainSetup?.displayName ?? "" },
-            set: { runtime.updatePendingDomainDisplayName($0) }
+    var body: some View {
+        AddDomainView(
+            // Editing the address clears the error it caused.
+            origin: Binding(
+                get: { runtime.onboardingOrigin },
+                set: { value in
+                    if value != runtime.onboardingOrigin { runtime.onboardingError = nil }
+                    runtime.onboardingOrigin = value
+                }
+            ),
+            displayName: Binding(
+                get: { runtime.pendingDomainSetup?.displayName ?? "" },
+                set: { runtime.updatePendingDomainDisplayName($0) }
+            ),
+            authorizationPhase: runtime.authorizationPhase,
+            review: runtime.pendingDomainSetup.map {
+                AddDomainReview(origin: $0.origin.absoluteString, serverVersion: $0.serverVersion, remotePath: $0.remotePath)
+            },
+            isAdding: runtime.isProvisioningDomain,
+            errorMessage: runtime.onboardingError,
+            onContinue: runtime.addDomain,
+            onCancelSignIn: runtime.cancelAuthorization,
+            onBack: runtime.cancelDomainSetup,
+            onAdd: runtime.finishDomainSetup,
+            onClose: onClose,
+            onOpenFileProviderSettings: runtime.openFileProviderSettings
         )
-    }
-
-    var body: some View {
-        Group {
-            if let setup = runtime.pendingDomainSetup {
-                DomainSetupReviewView(
-                    displayName: displayNameBinding,
-                    remotePath: setup.remotePath,
-                    isWorking: runtime.isProvisioningDomain,
-                    errorMessage: runtime.onboardingError,
-                    onBack: runtime.cancelDomainSetup,
-                    onFinish: runtime.finishDomainSetup,
-                    onOpenFileProviderSettings: runtime.openFileProviderSettings
-                )
-            } else {
-                OnboardingView(
-                    isWorking: runtime.isAuthorizing,
-                    errorMessage: runtime.onboardingError,
-                    onCancel: runtime.cancelAuthorization,
-                    onContinue: runtime.addDomain
-                )
-            }
-        }
-        .tint(NimbusSyncDesignTokens.brandColor)
-    }
-}
-
-private struct DomainSetupReviewView: View {
-    @Binding var displayName: String
-    let remotePath: String
-    let isWorking: Bool
-    let errorMessage: String?
-    let onBack: () -> Void
-    let onFinish: () -> Void
-    let onOpenFileProviderSettings: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label("Add to Finder", systemImage: "externaldrive.badge.checkmark")
-                .font(.title2)
-            Text("Authorization succeeded. Confirm how this Domain appears on your Mac.")
-                .foregroundStyle(.secondary)
-
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                GridRow {
-                    Text("Name")
-                        .foregroundStyle(.secondary)
-                    TextField("Domain name", text: $displayName)
-                        .textFieldStyle(.roundedBorder)
-                }
-                GridRow {
-                    Text("Remote path")
-                        .foregroundStyle(.secondary)
-                    Text(remotePath)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                GridRow {
-                    Text("Mac location")
-                        .foregroundStyle(.secondary)
-                    Text("Finder > Locations > \(displayName)")
-                        .lineLimit(1)
-                }
-            }
-
-            Text("macOS manages the local File Provider location. NimbusSync does not sync into an arbitrary local folder.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let errorMessage {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(errorMessage)
-                        .font(.callout)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                    Button("Open File Provider Settings", action: onOpenFileProviderSettings)
-                        .buttonStyle(.link)
-                }
-            }
-
-            HStack {
-                Button("Back", action: onBack)
-                    .disabled(isWorking)
-                Spacer()
-                if isWorking {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                Button("Add to Finder", action: onFinish)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
-            }
-        }
-        .padding(24)
-        .frame(width: 480)
     }
 }
 
@@ -582,6 +515,17 @@ private func userFacingError(_ error: Error) -> String {
     return "NimbusSync could not complete the operation (\(nsError.domain):\(nsError.code))."
 }
 
+/// Plain words for what usually goes wrong while adding a Domain, falling back to the generic text.
+private func onboardingErrorMessage(_ error: Error) -> String {
+    if let failure = error as? CoreFailure, let message = AddDomainText.message(for: failure.code) {
+        return message
+    }
+    if let urlError = error as? URLError, let message = AddDomainText.message(forURLError: urlError.code) {
+        return message
+    }
+    return userFacingError(error)
+}
+
 private final class FinderSystemDomainBox: @unchecked Sendable {
     let domain: NSFileProviderDomain
 
@@ -602,6 +546,15 @@ private func configuredSystemDomain(for descriptor: DomainDescriptor) -> NSFileP
 private final class NimbusSyncAppState: ObservableObject {
     @Published var snapshot = ProductSnapshot()
     @Published var isAuthorizing = false
+    /// Which part of signing in the Add Domain window is waiting on; nil when it is not signing in.
+    @Published var authorizationPhase: AddDomainAuthorizationPhase?
+    /// The address typed in the Add Domain window, kept while the window is open so Back and a
+    /// failed attempt return to it.
+    @Published var onboardingOrigin = ""
+    /// The running sign-in, so Cancel can stop it before the browser opens; and its attempt, so a
+    /// superseded one cannot overwrite the window's state when it finally finishes.
+    private var addDomainTask: Task<Void, Never>?
+    private var addDomainAttempt: UUID?
     @Published var isProvisioningDomain = false
     @Published var onboardingError: String?
     @Published var finderError: String?
@@ -861,19 +814,26 @@ private final class NimbusSyncAppState: ObservableObject {
         let correlation = correlationID.uuidString.lowercased()
         onboardingError = nil
         isAuthorizing = true
+        authorizationPhase = .checkingServer
+        addDomainAttempt = correlationID
         oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.started")
-        Task {
+        addDomainTask = Task {
             var stage = "registry"
             do {
                 guard registry != nil else { throw StoreBridgeError.openFailed("App Group is unavailable") }
                 stage = "site_validation"
                 let site = try await SiteService().validate(origin: rawOrigin)
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.site_validation.succeeded")
+                // Cancelled while the server was being checked: do not open the browser.
+                try Task.checkCancellation()
                 let origin = site.origin
                 stage = "authorization_callback"
+                authorizationPhase = .waitingForBrowser
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.waiting_for_callback")
                 let authorization = try await oauth.authorize(origin: origin, correlationID: correlationID)
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.callback_accepted")
+                try Task.checkCancellation()
+                authorizationPhase = .finishingSignIn
                 stage = "token_exchange"
                 let credential = try await OAuthTokenExchange().exchange(origin: origin, callback: authorization.callback, verifier: authorization.verifier, correlationID: correlationID)
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.token_exchange_succeeded")
@@ -884,6 +844,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 let requestedRoot = authorization.callback.remotePath?.isEmpty == false ? authorization.callback.remotePath! : "/"
                 let scope = try RemoteScope(origin: origin.absoluteString, accountID: accountID, rootURI: requestedRoot)
                 let name = authorization.callback.displayNameHint?.isEmpty == false ? authorization.callback.displayNameHint! : (site.title ?? origin.host ?? "Cloudreve")
+                try Task.checkCancellation()
                 pendingDomainSetup = PendingDomainSetup(
                     displayName: name,
                     origin: origin,
@@ -896,14 +857,28 @@ private final class NimbusSyncAppState: ObservableObject {
                 onboardingError = nil
             } catch {
                 logOAuthFailure(error, stage: stage, correlation: correlation)
-                if error as? OAuthAuthorizationSessionError == .cancelled {
+                guard addDomainAttempt == correlationID else { return }
+                if error is CancellationError || error as? OAuthAuthorizationSessionError == .cancelled {
                     onboardingError = nil
                 } else {
-                    onboardingError = userFacingError(error)
+                    onboardingError = onboardingErrorMessage(error)
                 }
             }
+            guard addDomainAttempt == correlationID else { return }
             isAuthorizing = false
+            authorizationPhase = nil
+            addDomainTask = nil
         }
+    }
+
+    /// Stops signing in and returns the Add Domain window to the address, at once.
+    private func abandonAuthorization() {
+        addDomainTask?.cancel()
+        addDomainTask = nil
+        addDomainAttempt = nil
+        oauth.cancel()
+        isAuthorizing = false
+        authorizationPhase = nil
     }
 
     func updatePendingDomainDisplayName(_ displayName: String) {
@@ -940,11 +915,12 @@ private final class NimbusSyncAppState: ObservableObject {
                 oauthLogger.info("[\(correlation, privacy: .public)] oauth.add_domain.provisioning_succeeded")
                 enableLaunchAtLoginOnce()
                 pendingDomainSetup = nil
+                onboardingOrigin = ""
                 reload()
                 onDomainProvisioned?(descriptor)
             } catch {
                 logOAuthFailure(error, stage: "domain_provisioning", correlation: correlation)
-                onboardingError = userFacingError(error)
+                onboardingError = onboardingErrorMessage(error)
             }
             isProvisioningDomain = false
         }
@@ -952,10 +928,9 @@ private final class NimbusSyncAppState: ObservableObject {
 
     func cancelDomainSetup() {
         guard !isProvisioningDomain else { return }
-        oauth.cancel()
+        abandonAuthorization()
         pendingDomainSetup = nil
         onboardingError = nil
-        isAuthorizing = false
     }
 
     @discardableResult
@@ -967,7 +942,8 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     func cancelAuthorization() {
-        oauth.cancel()
+        abandonAuthorization()
+        onboardingError = nil
     }
 
     func quitApplication() {
