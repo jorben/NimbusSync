@@ -1,173 +1,178 @@
 import AppKit
+import CloudreveDomainKit
 import SwiftUI
 
-/// The menu bar glyph and its syncing animation.
+/// What the menu bar glyph shows, from the most to the least urgent.
+///
+/// - `attention`: a conflict waits for the user, or a Domain needs them (sign-in expired, folder
+///   gone, permanent error…). It outranks syncing, as the status summary's headline does.
+/// - `syncing`: `ProductSnapshot.isSyncing`, a transfer is queued or running, or a Domain is
+///   applying or checking remote changes.
+/// - `paused`: a Domain is offline, so its syncing waits for the network. NimbusSync has no
+///   user-facing pause; offline is the state that actually holds syncing back.
+/// - `upToDate`: everything else, including no Domains yet.
+public enum MenuBarIconState: Equatable, Sendable {
+    case upToDate, syncing, paused, attention
+
+    public init(domains: [DomainDescriptor], isSyncing: Bool, hasActionableConflicts: Bool) {
+        if hasActionableConflicts || domains.contains(where: { $0.status.needsAttention && $0.status != .offline }) {
+            self = .attention
+        } else if isSyncing {
+            self = .syncing
+        } else if domains.contains(where: { $0.status == .offline }) {
+            self = .paused
+        } else {
+            self = .upToDate
+        }
+    }
+
+    public var accessibilityLabel: String {
+        switch self {
+        case .upToDate: "NimbusSync – Up to date"
+        case .syncing: "NimbusSync – Syncing"
+        case .paused: "NimbusSync – Paused"
+        case .attention: "NimbusSync – Needs attention"
+        }
+    }
+}
+
+/// The menu bar glyphs and the syncing animation.
 ///
 /// **Always a template.** A template image is drawn in the menu bar's own ink, which is what keeps
 /// the icon right on a light bar, a dark one, a highlighted item and under reduced transparency.
-/// The syncing state therefore adds motion, not colour: the glyph is a cloud over an infinity
-/// track carrying two nodes, and while syncing the filled node runs laps of the track with a short
-/// fading tail, the way the app icon's artwork draws it in motion. The ring stays put: it is where
-/// the cloud joins the track.
+/// States therefore differ by the mark inside the cloud, and syncing adds motion, not colour: the
+/// arc arrow inside the cloud is drawn on from its tail to its head, holds, then is wiped away
+/// tail first, so it reads as one stroke flowing round in the arrow's direction. The cloud and
+/// its return arrow stay put.
 ///
-/// The size never changes while animating; a status item that widened during every transfer would
-/// shove its neighbours along with it.
+/// Every glyph shares one canvas and one cloud (see `Scripts/make-menubar-icon.swift`), so
+/// switching state never changes the status item's width or shoves its neighbours along.
 @MainActor
 public enum MenuBarIcon {
-    public static let frameCount = 36
-    /// One lap every 2.4 s.
-    public static let frameInterval: TimeInterval = 1.0 / 15
-    /// Matches `Scripts/make-menubar-icon.swift`: the wide glyph fits 20 × 16 pt of it.
-    public nonisolated static let canvas = NSSize(width: 22, height: 18)
+    /// One draw-on / wipe-off cycle every 1.6 s.
+    public static let frameCount = 32
+    public static let frameInterval: TimeInterval = 1.0 / 20
+    public nonisolated static let canvas = NSSize(width: generatedCanvas.width, height: generatedCanvas.height)
 
-    /// The bundled glyph (`Scripts/make-menubar-icon.swift` builds it from `Design/MenuBarIcon.png`).
-    /// Falls back to an SF Symbol so a missing resource degrades to a plain icon, not an empty item.
-    public static let base: NSImage = {
-        let image: NSImage
-        if let bundled = Bundle.module.image(forResource: "MenuBarIcon") {
-            bundled.size = canvas
-            image = bundled
-        } else {
-            image = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: nil) ?? NSImage(size: canvas)
-        }
-        image.isTemplate = true
-        image.accessibilityDescription = "NimbusSync"
-        return image
-    }()
+    public static let upToDate = glyph("MenuBarUpToDate", state: .upToDate, fallback: "checkmark.icloud")
+    public static let paused = glyph("MenuBarPaused", state: .paused, fallback: "pause.circle")
+    public static let attention = glyph("MenuBarAttention", state: .attention, fallback: "exclamationmark.icloud")
+    /// The cloud with its return arrow, without the arc arrow; also the neutral glyph shown before
+    /// the first status arrives.
+    public static let syncingShell = glyph("MenuBarSyncingShell", state: nil, fallback: "icloud")
+    static let syncingArrow: NSImage? = Bundle.module.image(forResource: "MenuBarSyncingArrow")
 
-    /// One full lap of the syncing animation, rendered once and reused. Frame 0 starts from the
-    /// node's resting place, so the idle glyph flows straight into the animation.
+    /// One cycle of the syncing animation, rendered once and reused. Frame 0 is the bare cloud, so
+    /// the arrow always enters from its tail.
     public static let syncingFrames: [NSImage] = (0..<frameCount).map {
         syncingImage(progress: Double($0) / Double(frameCount))
     }
 
-    /// Reduce Motion gets the node moved off its resting place, without the movement.
-    public static let syncingStill: NSImage = syncingImage(progress: 0.25)
+    /// Reduce Motion gets the whole syncing glyph, without the movement.
+    public static let syncingStill: NSImage = syncingImage(visible: 0...1)
 
-    // MARK: - Artwork geometry
-
-    /// Measured on `Design/MenuBarIcon.png` (1024 px, y pointing down) after the generator grows
-    /// the ink by `strokeGrowth` (18 px). Re-measure if the artwork or the growth changes; the
-    /// generator script prints the crop.
-    nonisolated static let artworkCrop = CGRect(x: 125, y: 269, width: 772, height: 492)
-    nonisolated static let glyphFit = CGSize(width: 20, height: 16)
-    /// The infinity track as a generalised lemniscate,
-    /// x = cx + a·cos t / (1 + sin²t), y = cy + b·sin t·cos t / (1 + sin²t),
-    /// fitted to the stroke's centre line (mean offset 1.7 px against the source's 33 px stroke).
-    /// Growing the ink keeps the centre line, so the fit still holds.
-    nonisolated static let track = (cx: 510.0, cy: 568.0, a: 350.0, b: 380.0)
-    /// The source's 33 px stroke and 46 px node, each grown by the generator's 18 px per edge.
-    nonisolated static let trackWidth = 69.0
-    nonisolated static let nodeCenter = CGPoint(x: 283, y: 696)
-    nonisolated static let nodeRadius = 64.0
-
-    nonisolated static var artworkScale: CGFloat {
-        min(glyphFit.width / artworkCrop.width, glyphFit.height / artworkCrop.height)
-    }
-
-    /// Artwork pixel (y down) to canvas point (y up), as the generator placed the glyph.
-    nonisolated static func canvasPoint(_ point: CGPoint) -> CGPoint {
-        let scale = artworkScale
-        let originX = (canvas.width - artworkCrop.width * scale) / 2
-        let originY = (canvas.height - artworkCrop.height * scale) / 2
-        return CGPoint(x: originX + (point.x - artworkCrop.minX) * scale, y: originY + (artworkCrop.maxY - point.y) * scale)
-    }
-
-    nonisolated static func trackPoint(_ t: Double) -> CGPoint {
-        let sine = sin(t), denominator = 1 + sine * sine
-        return CGPoint(x: track.cx + track.a * cos(t) / denominator, y: track.cy + track.b * sine * cos(t) / denominator)
-    }
-
-    /// The track sampled evenly by length, starting where the node rests and running the way the
-    /// artwork's motion trail points (away from the trail, round the left loop first).
-    nonisolated static let lap: [CGPoint] = {
-        let samples = 1_440
-        var restT = 0.0, restDistance = Double.infinity
-        for index in 0..<samples {
-            let t = Double(index) / Double(samples) * 2 * .pi
-            let point = trackPoint(t)
-            let distance = hypot(point.x - nodeCenter.x, point.y - nodeCenter.y)
-            if distance < restDistance { restDistance = distance; restT = t }
+    /// The still glyph for a state; syncing animates through `syncingFrames` instead.
+    public static func still(_ state: MenuBarIconState) -> NSImage {
+        switch state {
+        case .upToDate: upToDate
+        case .syncing: syncingStill
+        case .paused: paused
+        case .attention: attention
         }
-        // Decreasing t from the resting place heads for the left end of the track.
-        let raw = (0...samples).map { trackPoint(restT - Double($0) / Double(samples) * 2 * .pi) }
-        var lengths = [0.0]
-        for index in 1..<raw.count { lengths.append(lengths[index - 1] + hypot(raw[index].x - raw[index - 1].x, raw[index].y - raw[index - 1].y)) }
-        let total = lengths.last ?? 1
-        var even: [CGPoint] = []
-        var cursor = 0
-        for step in 0..<samples {
-            let target = Double(step) / Double(samples) * total
-            while cursor < lengths.count - 2 && lengths[cursor + 1] < target { cursor += 1 }
-            let span = max(lengths[cursor + 1] - lengths[cursor], .ulpOfOne)
-            let fraction = (target - lengths[cursor]) / span
-            even.append(CGPoint(x: raw[cursor].x + (raw[cursor + 1].x - raw[cursor].x) * fraction, y: raw[cursor].y + (raw[cursor + 1].y - raw[cursor].y) * fraction))
-        }
-        return even
-    }()
+    }
 
-    /// The node's position (artwork pixels) after `progress` of a lap, wrapping both ways.
-    nonisolated static func nodePosition(_ progress: Double) -> CGPoint {
+    /// A bundled glyph (`Scripts/make-menubar-icon.swift` builds them from `Design/MenuBarIcons.png`).
+    /// Falls back to an SF Symbol so a missing resource degrades to a plain icon, not an empty item.
+    private static func glyph(_ name: String, state: MenuBarIconState?, fallback: String) -> NSImage {
+        let image: NSImage
+        if let bundled = Bundle.module.image(forResource: name) {
+            bundled.size = canvas
+            image = bundled
+        } else {
+            image = NSImage(systemSymbolName: fallback, accessibilityDescription: nil) ?? NSImage(size: canvas)
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = state?.accessibilityLabel ?? "NimbusSync"
+        return image
+    }
+
+    // MARK: - Syncing animation
+
+    private nonisolated static let drawOnEnd = 0.45, holdEnd = 0.6
+    /// How far the tail retracts while the arrow leaves; the head is never sliced, it fades.
+    private nonisolated static let wipeReach = 0.7
+
+    private nonisolated static func ease(_ t: Double) -> Double { let t = max(0, min(1, t)); return t * t * (3 - 2 * t) }
+
+    /// The stretch of the arc arrow shown at `progress` through a cycle, as fractions of its
+    /// length from tail (0) to head (1): drawn on, held, then retracted tail first.
+    public nonisolated static func visibleSpan(_ progress: Double) -> ClosedRange<Double>? {
         let wrapped = progress - progress.rounded(.down)
-        return lap[min(lap.count - 1, Int(wrapped * Double(lap.count)))]
+        let span: ClosedRange<Double>
+        if wrapped < drawOnEnd {
+            span = 0...ease(wrapped / drawOnEnd)
+        } else if wrapped < holdEnd {
+            span = 0...1
+        } else {
+            span = (wipeReach * ease((wrapped - holdEnd) / (1 - holdEnd)))...1
+        }
+        return span.upperBound - span.lowerBound > 0.001 ? span : nil
     }
 
-    /// Fading copies behind the node: (lap distance behind, size, opacity).
-    nonisolated static let tail: [(behind: Double, size: Double, opacity: Double)] = [(0.02, 0.8, 0.5), (0.04, 0.62, 0.3), (0.06, 0.46, 0.15)]
+    /// The arrow's opacity at `progress`: whole until the retracting tail is halfway, then fading
+    /// to nothing by the end of the cycle.
+    public nonisolated static func arrowOpacity(_ progress: Double) -> Double {
+        let wrapped = progress - progress.rounded(.down)
+        guard wrapped >= holdEnd else { return 1 }
+        return 1 - ease(((wrapped - holdEnd) / (1 - holdEnd) - 0.35) / 0.65)
+    }
 
     static func syncingImage(progress: Double) -> NSImage {
-        let base = base
-        let image = NSImage(size: canvas, flipped: false) { rect in
-            base.draw(in: rect)
-            let scale = artworkScale
-            let rest = canvasPoint(nodeCenter)
-            // Lift the resting node off the track, then restore the stretch of track it covered.
-            // The bundled glyph is downsampled (one Retina pixel spans about 18 artwork pixels),
-            // so the node's soft edge reaches well past its radius; a tighter cut left a
-            // faint ring behind. The repair is clipped wider than the cut, so it meets the
-            // original stroke where that stroke is still whole and leaves no seam.
-            let cut = (nodeRadius + 24) * scale, repair = (nodeRadius + 36) * scale
-            NSGraphicsContext.current?.compositingOperation = .destinationOut
-            NSBezierPath(ovalIn: NSRect(x: rest.x - cut, y: rest.y - cut, width: cut * 2, height: cut * 2)).fill()
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(ovalIn: NSRect(x: rest.x - repair, y: rest.y - repair, width: repair * 2, height: repair * 2)).addClip()
-            let path = NSBezierPath()
-            for (index, point) in lap.enumerated() {
-                let canvasPoint = canvasPoint(point)
-                index == 0 ? path.move(to: canvasPoint) : path.line(to: canvasPoint)
-            }
-            path.close()
-            path.lineWidth = trackWidth * scale
-            path.lineJoinStyle = .round
-            NSColor.black.setStroke()
-            path.stroke()
-            NSGraphicsContext.restoreGraphicsState()
+        let opacity = arrowOpacity(progress)
+        guard let span = visibleSpan(progress), opacity > 0.02 else { return syncingShell }
+        return syncingImage(visible: span, opacity: opacity)
+    }
 
-            func node(at progress: Double, size: Double, opacity: Double) {
-                let center = canvasPoint(nodePosition(progress))
-                let radius = nodeRadius * scale * size
-                NSColor.black.withAlphaComponent(opacity).setFill()
-                NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)).fill()
-            }
-            for piece in tail.reversed() { node(at: progress - piece.behind, size: piece.size, opacity: piece.opacity) }
-            node(at: progress, size: 1, opacity: 1)
+    /// The cloud plus the part of the arc arrow inside `visible`. The arrow is clipped to a wedge
+    /// around a pivot below it; every ray from the pivot crosses the arrow once, so the wedge's
+    /// angle maps straight to a position along it.
+    static func syncingImage(visible: ClosedRange<Double>, opacity: Double = 1) -> NSImage {
+        let shell = syncingShell
+        guard let arrow = syncingArrow else { return shell }
+        let image = NSImage(size: canvas, flipped: false) { rect in
+            shell.draw(in: rect)
+            // A few degrees past each end, so the tail's round cap and the head's tip are whole.
+            let margin: CGFloat = 4
+            let tail = arrowTailAngle + margin, head = arrowHeadAngle - margin
+            func angle(_ fraction: Double) -> CGFloat { tail - (tail - head) * CGFloat(fraction) }
+            let wedge = NSBezierPath()
+            wedge.move(to: arrowSweepPivot)
+            wedge.appendArc(withCenter: arrowSweepPivot, radius: canvas.width * 2, startAngle: angle(visible.upperBound), endAngle: angle(visible.lowerBound))
+            wedge.close()
+            NSGraphicsContext.saveGraphicsState()
+            wedge.addClip()
+            arrow.draw(in: rect, from: .zero, operation: .sourceOver, fraction: opacity)
+            NSGraphicsContext.restoreGraphicsState()
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "NimbusSync – Syncing"
+        image.accessibilityDescription = MenuBarIconState.syncing.accessibilityLabel
         return image
     }
 }
 
-/// Drives the menu bar image from a single "is anything syncing" flag.
+/// Drives the menu bar image from the current `MenuBarIconState`.
 ///
-/// The image is a function of that flag, never of an event: it animates while the flag is true and
-/// returns to the plain glyph the moment it turns false, with nothing to dismiss.
+/// The image is a function of the state, never of an event: it animates while syncing and settles
+/// on the state's still glyph the moment syncing ends, with nothing to dismiss.
 @MainActor
 public final class MenuBarIconAnimator: ObservableObject {
-    @Published public private(set) var image: NSImage = MenuBarIcon.base
+    @Published public private(set) var image: NSImage = MenuBarIcon.syncingShell
+    /// Nil until the first status arrives.
+    @Published public private(set) var state: MenuBarIconState?
     @Published public private(set) var isSyncing = false
+    /// The status item's VoiceOver label.
+    @Published public private(set) var accessibilityLabel = "NimbusSync"
     /// The status item's hover text (see `MenuBarStatusSummary.tooltip`).
     @Published public private(set) var tooltip = "NimbusSync"
     private var timer: Timer?
@@ -179,10 +184,17 @@ public final class MenuBarIconAnimator: ObservableObject {
         if text != tooltip { tooltip = text }
     }
 
-    public func setSyncing(_ syncing: Bool) {
-        guard syncing != isSyncing else { return }
-        isSyncing = syncing
-        syncing ? start() : stop()
+    public func setState(_ next: MenuBarIconState) {
+        guard next != state else { return }
+        state = next
+        isSyncing = next == .syncing
+        accessibilityLabel = next.accessibilityLabel
+        if next == .syncing {
+            start()
+        } else {
+            stop()
+            image = MenuBarIcon.still(next)
+        }
     }
 
     private func start() {
@@ -208,6 +220,5 @@ public final class MenuBarIconAnimator: ObservableObject {
     private func stop() {
         timer?.invalidate()
         timer = nil
-        image = MenuBarIcon.base
     }
 }

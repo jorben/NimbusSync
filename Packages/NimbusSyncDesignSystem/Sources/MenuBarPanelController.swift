@@ -44,8 +44,8 @@ public final class MenuBarPanelController: NSObject, NSWindowDelegate {
         icon.$tooltip
             .sink { [weak self] text in self?.statusItem.button?.toolTip = text }
             .store(in: &cancellables)
-        icon.$isSyncing
-            .sink { [weak self] syncing in self?.statusItem.button?.setAccessibilityLabel(syncing ? "NimbusSync – Syncing" : "NimbusSync") }
+        icon.$accessibilityLabel
+            .sink { [weak self] label in self?.statusItem.button?.setAccessibilityLabel(label) }
             .store(in: &cancellables)
 
         panel.delegate = self

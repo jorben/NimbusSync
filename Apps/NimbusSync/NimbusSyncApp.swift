@@ -611,7 +611,7 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
-    /// The menu bar image; animates while `snapshot.isSyncing`.
+    /// The menu bar image: up to date, syncing (animated), paused or needs attention.
     let menuBarIcon = MenuBarIconAnimator()
     /// The newest raw log lines from the app and the File Provider extension, for Settings.
     @Published private(set) var recentLogLines: [String] = []
@@ -725,7 +725,7 @@ private final class NimbusSyncAppState: ObservableObject {
             let next = await productStore.snapshot()
             let previous = snapshot
             snapshot = next
-            menuBarIcon.setSyncing(next.isSyncing)
+            menuBarIcon.setState(MenuBarIconState(domains: next.domains, isSyncing: next.isSyncing, hasActionableConflicts: !next.actionableConflicts.isEmpty))
             menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
             let lines = await Task.detached(priority: .utility) { ActivityLog.shared.recentLines(limit: Self.settingsLogLineLimit) }.value
             if lines != recentLogLines { recentLogLines = lines }

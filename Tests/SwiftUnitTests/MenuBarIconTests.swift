@@ -17,13 +17,17 @@ final class MenuBarIconTests: XCTestCase {
         return Array(UnsafeBufferPointer(start: rep.bitmapData, count: side * side * 4))
     }
 
-    func testBaseIsTheBundledTemplateGlyph() {
-        let base = MenuBarIcon.base
-        XCTAssertTrue(base.isTemplate)
-        XCTAssertEqual(base.size, MenuBarIcon.canvas)
-        // The bundled PNGs, not the SF Symbol fallback.
-        let widths = Set(base.representations.compactMap { ($0 as? NSBitmapImageRep)?.pixelsWide })
-        XCTAssertTrue(widths.isSuperset(of: [22, 44]), "bundled reps: \(widths)")
+    func testStateGlyphsAreTheBundledTemplates() {
+        let glyphs = [MenuBarIcon.upToDate, MenuBarIcon.paused, MenuBarIcon.attention, MenuBarIcon.syncingShell]
+        for glyph in glyphs {
+            XCTAssertTrue(glyph.isTemplate)
+            XCTAssertEqual(glyph.size, MenuBarIcon.canvas, "every state keeps the status item's width")
+            // The bundled PNGs, not the SF Symbol fallback.
+            let widths = Set(glyph.representations.compactMap { ($0 as? NSBitmapImageRep)?.pixelsWide })
+            XCTAssertTrue(widths.isSuperset(of: [22, 44]), "bundled reps: \(widths)")
+        }
+        let drawn = glyphs.map(pixels)
+        XCTAssertEqual(Set(drawn).count, glyphs.count, "each state draws a different mark")
     }
 
     func testSyncingFramesKeepSizeAndTemplateAndMove() {
@@ -33,23 +37,60 @@ final class MenuBarIconTests: XCTestCase {
             XCTAssertEqual(frame.size, MenuBarIcon.canvas, "the status item must not change width")
             XCTAssertTrue(frame.isTemplate)
         }
-        XCTAssertNotEqual(pixels(frames[0]), pixels(frames[MenuBarIcon.frameCount / 2]), "the node moves along the track")
-        XCTAssertNotEqual(pixels(frames[0]), pixels(MenuBarIcon.base), "a syncing frame differs from the idle glyph")
+        XCTAssertEqual(pixels(frames[0]), pixels(MenuBarIcon.syncingShell), "a cycle starts from the bare cloud")
+        XCTAssertNotEqual(pixels(frames[MenuBarIcon.frameCount / 4]), pixels(frames[MenuBarIcon.frameCount / 2]), "the arrow is drawn on")
+        XCTAssertEqual(pixels(frames[MenuBarIcon.frameCount / 2]), pixels(MenuBarIcon.syncingStill), "the whole arrow shows mid-cycle")
+        XCTAssertNotEqual(pixels(frames[MenuBarIcon.frameCount * 3 / 4]), pixels(MenuBarIcon.syncingStill), "then it is wiped away")
         writePreviewIfRequested(frames)
     }
 
-    func testAnimatorFollowsSyncingFlag() {
-        let animator = MenuBarIconAnimator()
-        XCTAssertFalse(animator.isSyncing)
-        XCTAssertTrue(animator.image === MenuBarIcon.base)
+    func testSyncingSpanDrawsOnHoldsThenWipesTailFirst() throws {
+        XCTAssertNil(MenuBarIcon.visibleSpan(0))
+        let early = try XCTUnwrap(MenuBarIcon.visibleSpan(0.2))
+        XCTAssertEqual(early.lowerBound, 0)
+        XCTAssertLessThan(early.upperBound, 1)
+        XCTAssertEqual(MenuBarIcon.visibleSpan(0.5), 0...1)
+        let late = try XCTUnwrap(MenuBarIcon.visibleSpan(0.8))
+        XCTAssertGreaterThan(late.lowerBound, 0)
+        XCTAssertEqual(late.upperBound, 1, "the head goes last")
+    }
 
-        animator.setSyncing(true)
+    func testAnimatorFollowsState() {
+        let animator = MenuBarIconAnimator()
+        XCTAssertNil(animator.state)
+        XCTAssertTrue(animator.image === MenuBarIcon.syncingShell)
+
+        animator.setState(.syncing)
         XCTAssertTrue(animator.isSyncing)
+        XCTAssertEqual(animator.accessibilityLabel, "NimbusSync – Syncing")
         XCTAssertTrue(MenuBarIcon.syncingFrames.contains { $0 === animator.image } || animator.image === MenuBarIcon.syncingStill)
 
-        animator.setSyncing(false)
-        XCTAssertFalse(animator.isSyncing)
-        XCTAssertTrue(animator.image === MenuBarIcon.base)
+        for (state, still) in [(MenuBarIconState.upToDate, MenuBarIcon.upToDate), (.paused, MenuBarIcon.paused), (.attention, MenuBarIcon.attention)] {
+            animator.setState(state)
+            XCTAssertFalse(animator.isSyncing)
+            XCTAssertTrue(animator.image === still, "\(state)")
+            XCTAssertEqual(animator.accessibilityLabel, state.accessibilityLabel)
+        }
+    }
+
+    func testIconStateRanksAttentionThenSyncingThenPaused() throws {
+        let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: CloudreveRemoteURI.canonical("/", accountID: "account"))
+        func domain(_ status: DomainStatus) -> DomainDescriptor {
+            var descriptor = DomainDescriptor(displayName: "d", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "s")
+            descriptor.status = status
+            return descriptor
+        }
+        func state(_ statuses: [DomainStatus], syncing: Bool = false, conflicts: Bool = false) -> MenuBarIconState {
+            MenuBarIconState(domains: statuses.map(domain), isSyncing: syncing, hasActionableConflicts: conflicts)
+        }
+        XCTAssertEqual(state([]), .upToDate)
+        XCTAssertEqual(state([.healthy, .eventDegraded]), .upToDate)
+        XCTAssertEqual(state([.healthy], syncing: true), .syncing)
+        XCTAssertEqual(state([.offline]), .paused)
+        XCTAssertEqual(state([.offline, .healthy], syncing: true), .syncing, "another Domain is still syncing")
+        XCTAssertEqual(state([.healthy], syncing: true, conflicts: true), .attention)
+        XCTAssertEqual(state([.authExpired, .offline], syncing: true), .attention)
+        XCTAssertEqual(state([.permanentError]), .attention)
     }
 
     func testSnapshotSyncingCoversTransfersAndRemoteWorkOnly() throws {
@@ -104,10 +145,10 @@ final class MenuBarIconTests: XCTestCase {
     }
 
     /// `NIMBUSSYNC_ICON_PREVIEW=/path/preview.png swift test --filter MenuBarIconTests` writes an
-    /// enlarged contact sheet (idle + every frame, light and dark bar) for a visual check.
+    /// enlarged contact sheet (each still state + every syncing frame, light and dark bar) for a visual check.
     private func writePreviewIfRequested(_ frames: [NSImage]) {
         guard let path = ProcessInfo.processInfo.environment["NIMBUSSYNC_ICON_PREVIEW"] else { return }
-        let images = [MenuBarIcon.base] + frames
+        let images = [MenuBarIcon.upToDate, MenuBarIcon.paused, MenuBarIcon.attention, MenuBarIcon.syncingStill] + frames
         let zoom: CGFloat = 8, cellWidth = MenuBarIcon.canvas.width * zoom + 16, cell = MenuBarIcon.canvas.height * zoom + 16
         let sheet = NSImage(size: NSSize(width: cellWidth * CGFloat(images.count), height: cell * 2), flipped: false) { _ in
             for (row, (background, ink)) in [(NSColor(white: 0.93, alpha: 1), NSColor.black), (NSColor(white: 0.17, alpha: 1), NSColor.white)].enumerated() {
