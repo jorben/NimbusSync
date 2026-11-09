@@ -1181,6 +1181,8 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     private func markCheckFailed() {
+        // A retired runtime's failed check is not the replacement's connection problem.
+        guard !retired else { return }
         writeDomainStatus(.eventDegraded)
         try? store.updateSyncState(reconcileStatus: "event_degraded")
     }
@@ -1204,7 +1206,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     private func performFullCheck(reason: String) async {
-        writeDomainStatus(.reconciling)
+        if !retired { writeDomainStatus(.reconciling) }
         try? store.updateSyncState(reconcileStatus: "requested:\(reason)")
         do {
             guard let descriptor = try store.domain(identifier: domainIdentifier), let scope = try? RemoteScope(origin: descriptor.origin, accountID: descriptor.accountID, rootURI: descriptor.rootURI) else { throw CoreFailure(code: .unknownOutcome, retryable: true) }

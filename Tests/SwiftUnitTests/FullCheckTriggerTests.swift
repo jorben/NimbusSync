@@ -152,6 +152,25 @@ final class FullCheckTriggerTests: XCTestCase {
         XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .authExpired, "an expired sign-in still needs the user")
     }
 
+    /// A check still running on a retired runtime that fails must not mark the Domain
+    /// "checking" or "live updates unavailable" over the replacement's status.
+    func testRetiredRuntimesFailedCheckLeavesTheReplacementsStatus() async throws {
+        for retire in [false, true] {
+            let (store, descriptor) = try makeDomain()
+            let (registry, _) = try makeDomain()
+            try registry.setDomainStatus(identifier: descriptor.identifier, status: .healthy)
+            let runtime = try XCTUnwrap(DomainEventRuntime(descriptor: descriptor, store: store, registry: registry, vault: MemoryCredentialVault()))
+            // Without its per-domain row the check fails before reaching the server.
+            try store.removeDomainRecord(identifier: descriptor.identifier)
+            if retire { await runtime.retire() }
+
+            await runtime.reconcile(reason: "test")
+
+            let status = try registry.domain(identifier: descriptor.identifier)?.status
+            XCTAssertEqual(status, retire ? .healthy : .eventDegraded, retire ? "the replacement owns the Domain's status" : "a live runtime reports its failed check")
+        }
+    }
+
     func testRetiredCheckMayOnlySettleAStatusWaitingOnIt() {
         let replaceable = DomainEventRuntime.statusesRetiredCheckMayReplace
         XCTAssertTrue(replaceable.contains(.reconciling))
