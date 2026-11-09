@@ -78,8 +78,12 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         if let existing = try store.latestOperation(itemIdentifier: template.itemIdentifier), existing.operation.replayKey != replayKey, existing.operation.state != "cancelled" {
             // The system replays a create whose completion never arrived with other options
             // (`mayAlreadyExist`) or fields; the same template and source already committed.
+            // A replay that renamed or moved the template must not get the old name or parent
+            // back, otherwise the system reverts the user's change.
             if Self.isCommittedCreate(existing, templateIdentifier: template.itemIdentifier, sourceKey: sourceKey),
-               let result = try committedResult(existing) {
+               let result = try committedResult(existing),
+               result.name == template.name,
+               result.parentIdentifier == template.parentIdentifier {
                 return result
             }
             throw operationMismatchFailure(existing.operation.state, stage: "create_source_replay_mismatch")
@@ -88,11 +92,37 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         let operation = try begin(operationID: operationID, replayKey: replayKey, kind: "create", itemIdentifier: template.itemIdentifier, expectedVersion: template.version.content, changedFields: String(fields.rawValue))
         if let result = try committedResult(operation) { return result }
         try ensureLease(operation)
+        // The item identifier comes from the system template, so a stored remote ID means an
+        // earlier attempt for this template reached the server and its outcome was lost.
+        let hasPriorRemoteEvidence = !((try store.item(identifier: template.itemIdentifier))?.remoteID ?? "").isEmpty
+        if hasPriorRemoteEvidence && (template.kind == .folder || contents == nil) {
+            do {
+                // `refreshItem` reads the stored remote ID, so it must run before `insertItem`.
+                if let remote = try await backend.refreshItem(identifier: template.itemIdentifier, context: context),
+                   !remote.trashed, !remote.tombstone,
+                   remote.kind == template.kind,
+                   remote.name == template.name,
+                   remote.parentIdentifier == template.parentIdentifier {
+                    return try commitRemoteResult(operationID: operationID, item: remote, context: context)
+                }
+            } catch {
+                persistUploadFailure(store: store, itemIdentifier: template.itemIdentifier, error: error)
+                preserveUnknownOutcome(operationID: operationID, itemIdentifier: template.itemIdentifier, error: error)
+                throw error
+            }
+        }
         try store.insertItem(template)
         try store.setPending(template.itemIdentifier, templateIdentifier: template.itemIdentifier)
         let task = try store.createTransferTask(operationID: operationID, itemIdentifier: template.itemIdentifier, direction: "upload", totalBytes: sourceFingerprint?.size)
         do {
-            let item = try await backend.create(CreateRequest(template: template, contents: contents, replayKey: replayKey), context: context)
+            let item: RemoteItem
+            do {
+                item = try await backend.create(CreateRequest(template: template, contents: contents, replayKey: replayKey), context: context)
+            } catch let failure as CoreFailure where failure.code == .nameCollision && (hasPriorRemoteEvidence || options.contains(.mayAlreadyExist)) {
+                // The taken name may be this create's own earlier result. A filename collision
+                // would make the system rename and create a second remote object.
+                throw CoreFailure(code: .unknownOutcome, retryable: false, userActionRequired: true)
+            }
             let committed = try commitRemoteResult(operationID: operationID, item: item, context: context)
             try store.updateTransferTask(taskID: task.taskID, state: "succeeded", bytes: task.totalBytes ?? 0, totalBytes: task.totalBytes)
             return committed
