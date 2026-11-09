@@ -24,6 +24,42 @@ final class JournalChangeCollapseTests: XCTestCase {
         XCTAssertEqual(enumeratedChangesSummary(scope: "directory", from: 1, to: 1, updated: [], deleted: [], hidden: 0, moreComing: false), "Changes enumerated · scope=directory from=1 to=1 updates=0 deletes=0 hidden=0 more=false")
     }
 
+    /// The system asks for an item's metadata right after a failed download or update and keeps
+    /// whatever it is told. A deleted (tombstoned) item must answer noSuchItem, or the deletion the
+    /// working set announced is undone and the stale item comes back.
+    func testDeletedItemsAreNeverServedToTheSystem() throws {
+        var item = try makeItem(identifier: "cri-stale", parent: root, path: "/stale.html")
+        XCTAssertEqual(try itemServableToSystem(item).itemIdentifier, "cri-stale")
+
+        item.tombstone = true
+        XCTAssertThrowsError(try itemServableToSystem(item)) { error in
+            XCTAssertEqual((error as? CoreFailure)?.isDeletedItemAnswer, true)
+            XCTAssertEqual(FileProviderErrorMapper.map(error).code, NSFileProviderError.noSuchItem.rawValue)
+            XCTAssertTrue(FileProviderErrorMapper.isDeletionAnswer(error), "a deliberate answer, not logged as an error")
+        }
+        XCTAssertThrowsError(try itemServableToSystem(nil)) { error in
+            XCTAssertEqual((error as? CoreFailure)?.code, .notFound)
+            XCTAssertFalse(FileProviderErrorMapper.isDeletionAnswer(error), "an unknown identifier is still an error")
+        }
+
+        var trashed = try makeItem(identifier: "cri-trashed", parent: NSFileProviderItemIdentifier.trashContainer.rawValue, path: "/trashed.html")
+        trashed.trashed = true
+        XCTAssertEqual(try itemServableToSystem(trashed).itemIdentifier, "cri-trashed", "an item in the server trash still exists")
+    }
+
+    /// Stale items deleted instead of downloaded, trashed or deleted by path answer noSuchItem on
+    /// purpose; any other not-found stays an error in the activity log.
+    func testOnlyDeliberateDeletionAnswersAreKeptOutOfTheErrorLog() {
+        for stage in ["remote_identity_changed", "remote_path_empty", "deleted_item"] {
+            let failure = CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": stage])
+            XCTAssertTrue(FileProviderErrorMapper.isDeletionAnswer(failure), stage)
+            XCTAssertEqual(FileProviderErrorMapper.map(failure).code, NSFileProviderError.noSuchItem.rawValue, stage)
+        }
+        XCTAssertFalse(FileProviderErrorMapper.isDeletionAnswer(CoreFailure(code: .notFound, retryable: false)))
+        XCTAssertFalse(FileProviderErrorMapper.isDeletionAnswer(CoreFailure(code: .unknownOutcome, retryable: false, redactedContext: ["stage": "deleted_item"])))
+        XCTAssertFalse(FileProviderErrorMapper.isDeletionAnswer(URLError(.timedOut)))
+    }
+
     /// The stale-deletion debug line says which journal row was written and who it is for.
     func testStaleDeletionSummaryReportsSequenceAndAudience() throws {
         let item = try makeItem(identifier: "cri-stale", parent: root, path: "/stale.html")

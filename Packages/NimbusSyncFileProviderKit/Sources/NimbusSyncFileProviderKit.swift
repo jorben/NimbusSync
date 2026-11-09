@@ -733,6 +733,16 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
     }
 }
 
+/// What `item(for:)` may hand the system. A tombstoned row stays in the store for replay and
+/// remote-identity bookkeeping, but the item is deleted. Answering with it undoes the deletion the
+/// working set just announced: right after a failed download or update the system asks for the
+/// item's metadata and keeps whatever it is told, so the stale item would come back every time.
+func itemServableToSystem(_ item: RemoteItem?) throws -> RemoteItem {
+    guard let item else { throw CoreFailure(code: .notFound, retryable: false) }
+    guard !item.tombstone else { throw CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "deleted_item"]) }
+    return item
+}
+
 /// One debug line per change batch handed to the system: the journal range it covers and which
 /// items it reports updated or deleted. Identifiers are shortened to their first 12 characters
 /// (`cri-2cc9ed6d`) so a whole batch fits the activity log's line limit.
@@ -965,10 +975,11 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
             }
             do {
                 try self.store?.assertProcessUsable()
-                guard let item = try self.backend.item(identifier: identifier.rawValue) else {
-                    completion.call(nil, FileProviderErrorMapper.map(CoreFailure(code: .notFound, retryable: false)))
-                    return
+                let stored = try self.backend.item(identifier: identifier.rawValue)
+                if stored?.tombstone == true {
+                    ActivityLog.shared.debug("file-provider", "Answered a metadata request for a deleted item with noSuchItem · item=\(identifier.rawValue)")
                 }
+                let item = try itemServableToSystem(stored)
                 let projection = try self.store?.itemProjection(identifier: identifier.rawValue)
                 completion.call(NimbusSyncFileProviderItem(model: item, isDownloaded: projection?.localState.materialized ?? false, hasConflict: projection?.hasConflict ?? false, projection: projection, authenticated: self.currentAuthenticationState()), nil)
                 progress.completedUnitCount = 1
@@ -1717,6 +1728,12 @@ public enum FileProviderErrorMapper {
         let mapped = mapWithoutLogging(error)
         if mapped.domain == NSFileProviderErrorDomain, (error as NSError).domain != NSFileProviderErrorDomain {
             let correlation = (mapped.userInfo["correlationID"] as? String) ?? "-"
+            if isDeletionAnswer(error) {
+                // Not a failure: the extension itself decided the item is deleted (and told the
+                // working set). Whoever decided it already logged why, with the item.
+                logger.notice("fp.error.mapped fp_code=\(mapped.code, privacy: .public) source=\(diagnosticSummary(error), privacy: .public) correlationID=\(correlation, privacy: .public)")
+                return mapped
+            }
             logger.error("fp.error.mapped fp_code=\(mapped.code, privacy: .public) source=\(diagnosticSummary(error), privacy: .public) correlationID=\(correlation, privacy: .public)")
             if mapped.code == NSFileProviderError.syncAnchorExpired.rawValue, isExpectedAnchorExpiry(error) {
                 // Expected after the sync epoch rotates (the server folder moved, or the journal
@@ -1729,6 +1746,14 @@ public enum FileProviderErrorMapper {
             }
         }
         return mapped
+    }
+
+    /// noSuchItem answers for items the extension deleted on purpose: one it no longer serves
+    /// (`deleted_item`) or one whose path is empty or holds another object, which was deleted
+    /// locally instead of acted on. They report a decision, not a failure.
+    static func isDeletionAnswer(_ error: Error) -> Bool {
+        guard let failure = error as? CoreFailure else { return false }
+        return failure.isRemoteObjectGone || failure.isDeletedItemAnswer
     }
 
     private static func isExpectedAnchorExpiry(_ error: Error) -> Bool {

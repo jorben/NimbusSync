@@ -295,6 +295,11 @@ extension CoreFailure {
     /// What the item stood for is no longer at its path, so acting on the path cannot help: the
     /// item is deleted locally instead.
     public var isRemoteObjectGone: Bool { isRemoteIdentityChanged || isRemotePathEmpty }
+
+    /// The answer to a metadata request for an item the store holds as deleted.
+    public var isDeletedItemAnswer: Bool {
+        code == .notFound && redactedContext["stage"] == "deleted_item"
+    }
 }
 
 private final class RegisteredTaskLimiter: @unchecked Sendable {
