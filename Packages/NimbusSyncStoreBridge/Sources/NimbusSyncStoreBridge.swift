@@ -73,7 +73,10 @@ public struct JournalBatch: Equatable, Sendable {
     public let changes: [JournalChange]
     public let nextAnchor: SyncAnchor
     public let moreComing: Bool
-    public init(changes: [JournalChange], nextAnchor: SyncAnchor, moreComing: Bool) { self.changes = changes; self.nextAnchor = nextAnchor; self.moreComing = moreComing }
+    /// Journal rows scanned for this batch but not meant for its scope (another directory, or a
+    /// change journaled for nobody in the working set). Diagnostics only.
+    public let hiddenChanges: Int
+    public init(changes: [JournalChange], nextAnchor: SyncAnchor, moreComing: Bool, hiddenChanges: Int = 0) { self.changes = changes; self.nextAnchor = nextAnchor; self.moreComing = moreComing; self.hiddenChanges = hiddenChanges }
 }
 
 public struct DirectoryPage: Equatable, Sendable {
@@ -973,6 +976,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
             var changes: [JournalChange] = []
             var scannedLast = Int64(anchor.sequence)
             var hasMoreRows = false
+            var hidden = 0
             while changes.count < budget {
                 let statement = try prepare("SELECT sequence, epoch, item_uuid, old_parent_uuid, new_parent_uuid, change_kind, version, item_payload, item_version, origin, delivery_audience FROM change_journal WHERE sequence > \(scannedLast) ORDER BY sequence ASC LIMIT 1000")
                 var rowsInPage = 0
@@ -985,7 +989,10 @@ public final class SQLiteStateStore: @unchecked Sendable {
                     let newParent = columnString(statement, 4)
                     let kind = columnString(statement, 5) ?? ""
                     let deliveryAudience = columnString(statement, 10) ?? "none"
-                    guard try changeIsVisibleInScope(itemIdentifier: itemIdentifier, oldParent: oldParent, newParent: newParent, scope: scope, deliveryAudience: deliveryAudience) else { continue }
+                    guard try changeIsVisibleInScope(itemIdentifier: itemIdentifier, oldParent: oldParent, newParent: newParent, scope: scope, deliveryAudience: deliveryAudience) else {
+                        hidden += 1
+                        continue
+                    }
                     let itemVersion: ItemVersion?
                     if let encoded = sqlite3_column_type(statement, 8) == SQLITE_NULL ? nil : Optional(columnBlob(statement, 8)) {
                         itemVersion = try? JSONDecoder().decode(ItemVersion.self, from: encoded)
@@ -1002,7 +1009,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
                 if !hasMoreRows { break }
             }
             let remaining = Int(try scalar("SELECT COUNT(*) FROM change_journal WHERE sequence > \(scannedLast)") ?? "0") ?? 0
-            return JournalBatch(changes: changes, nextAnchor: SyncAnchor(domainIdentifier: domainIdentifier, scope: scope, epoch: current.epoch, sequence: UInt64(max(0, scannedLast)), projectionSchemaRevision: current.projectionSchemaRevision), moreComing: remaining > 0)
+            return JournalBatch(changes: changes, nextAnchor: SyncAnchor(domainIdentifier: domainIdentifier, scope: scope, epoch: current.epoch, sequence: UInt64(max(0, scannedLast)), projectionSchemaRevision: current.projectionSchemaRevision), moreComing: remaining > 0, hiddenChanges: hidden)
         }
     }
 

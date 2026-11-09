@@ -173,6 +173,26 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(batch.changes.first?.kind, "reconciled")
     }
 
+    func testWorkingSetBatchCountsChangesJournaledForNobody() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-working-set-hidden-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try SQLiteStateStore(url: url)
+        let domainID = CloudreveIdentifier.domain()
+        let scope = NSFileProviderItemIdentifier.workingSet.rawValue
+        let before = try store.currentAnchor(domainIdentifier: domainID, scope: scope)
+        let folder = RemoteItem(itemIdentifier: CloudreveIdentifier.item(), remoteID: "remote-folder", parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: "folder", uri: "/folder", kind: .folder, contentType: "public.folder", version: ItemVersion(content: Data("f1".utf8), metadata: Data("m1".utf8)), canRead: true)
+        // The system has never listed the folder, so a change inside it is journaled for nobody.
+        let unseen = RemoteItem(itemIdentifier: CloudreveIdentifier.item(), remoteID: "remote-unseen", parentIdentifier: folder.itemIdentifier, name: "unseen.txt", uri: "/folder/unseen.txt", kind: .file, contentType: "public.data", version: ItemVersion(content: Data("v1".utf8), metadata: Data("m1".utf8)), canRead: true)
+
+        _ = try store.commitProviderChange(item: folder, oldParentIdentifier: nil, newParentIdentifier: folder.parentIdentifier, kind: "reconciled", origin: "reconciliation")
+        let hiddenChange = try store.commitProviderChange(item: unseen, oldParentIdentifier: nil, newParentIdentifier: unseen.parentIdentifier, kind: "reconciled", origin: "reconciliation")
+
+        XCTAssertEqual(hiddenChange.providerVisible, false)
+        let batch = try store.enumerateChanges(domainIdentifier: domainID, scope: scope, from: before)
+        XCTAssertEqual(batch.changes.map(\.itemIdentifier), [folder.itemIdentifier])
+        XCTAssertEqual(batch.hiddenChanges, 1)
+    }
+
     func testSignalOutboxRetainsRevisionUntilWorkingSetSignalSucceeds() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-signal-outbox-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: url) }

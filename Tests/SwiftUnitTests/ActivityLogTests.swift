@@ -92,6 +92,45 @@ final class ActivityLogTests: XCTestCase {
         XCTAssertEqual(entries.last?.message, "last")
     }
 
+    func testMinimumLevelFromSharedDefaultsFiltersEveryLevel() throws {
+        let suite = "ActivityLogTests.level.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let log = ActivityLog(directory: directory, source: "app", levelDefaults: defaults)
+
+        XCTAssertEqual(log.minimumLevel, .info, "Info is the default")
+        var built = false
+        log.debug("test", { built = true; return "hidden" }())
+        XCTAssertFalse(built, "debug text is not even built below the minimum level")
+        log.info("test", "info shown")
+
+        defaults.set(ActivityLevel.debug.rawValue, forKey: ActivityLogLevelPreference.preferenceKey)
+        XCTAssertTrue(log.isEnabled(.debug))
+        log.debug("test", "debug shown")
+
+        defaults.set(ActivityLevel.error.rawValue, forKey: ActivityLogLevelPreference.preferenceKey)
+        log.info("test", "info hidden")
+        log.warning("test", "warning hidden")
+        log.error("test", "error shown")
+
+        defaults.set("bogus", forKey: ActivityLogLevelPreference.preferenceKey)
+        XCTAssertEqual(log.minimumLevel, ActivityLogLevelPreference.defaultValue, "an unknown value falls back to the default")
+        log.flush()
+
+        let entries = log.recent(minimumLevel: .debug)
+        XCTAssertEqual(entries.map(\.message), ["info shown", "debug shown", "error shown"])
+        XCTAssertEqual(entries.map(\.level), [.info, .debug, .error], "DEBUG lines parse back")
+        XCTAssertEqual(log.recent().map(\.message), ["info shown", "error shown"], "reading from Info hides debug lines")
+    }
+
+    func testLogWithoutLevelDefaultsKeepsEveryLevel() {
+        let log = ActivityLog(directory: directory, source: "app")
+        XCTAssertEqual(log.minimumLevel, .debug)
+        log.debug("test", "kept")
+        log.flush()
+        XCTAssertEqual(log.recent(minimumLevel: .debug).map(\.message), ["kept"])
+    }
+
     func testSharedLogIsInertOutsideNimbusSyncProcesses() {
         XCTAssertNil(ActivityLog.defaultSource(bundleIdentifier: "com.apple.dt.xctest.tool"))
         XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "ai.tiy.nimbussync"), "app")

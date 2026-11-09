@@ -1,17 +1,49 @@
 import Foundation
+import os
 import CloudreveDomainKit
 
-public enum ActivityLevel: String, Sendable, CaseIterable {
+public enum ActivityLevel: String, Sendable, CaseIterable, Identifiable {
+    case debug = "DEBUG"
     case info = "INFO"
     case warning = "WARN"
     case error = "ERROR"
 
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .debug: "Debug"
+        case .info: "Info"
+        case .warning: "Warning"
+        case .error: "Error"
+        }
+    }
+
     var rank: Int {
         switch self {
-        case .info: 0
-        case .warning: 1
-        case .error: 2
+        case .debug: 0
+        case .info: 1
+        case .warning: 2
+        case .error: 3
         }
+    }
+}
+
+/// The lowest level the activity log keeps, chosen in Settings › Diagnostics.
+///
+/// It lives in the App Group's defaults rather than the app's own, so the Finder extension honours
+/// the same choice as the app; a change applies to both processes without a restart.
+public enum ActivityLogLevelPreference {
+    public static let preferenceKey = "activityLogMinimumLevel"
+    public static let defaultValue: ActivityLevel = .info
+
+    /// The App Group's shared defaults; nil outside NimbusSync's own signed processes.
+    public static func sharedDefaults() -> UserDefaults? {
+        UserDefaults(suiteName: AppGroupPaths.identifier)
+    }
+
+    public static func stored(in defaults: UserDefaults?) -> ActivityLevel {
+        defaults?.string(forKey: preferenceKey).flatMap(ActivityLevel.init(rawValue:)) ?? defaultValue
     }
 }
 
@@ -45,19 +77,39 @@ public final class ActivityLog: @unchecked Sendable {
     /// so it never reaches into the App Group container.
     public static let shared: ActivityLog = {
         guard let source = defaultSource() else { return ActivityLog(directory: nil, source: "none") }
-        return ActivityLog(directory: AppGroupPaths.root()?.appendingPathComponent("Logs", isDirectory: true), source: source)
+        return ActivityLog(
+            directory: AppGroupPaths.root()?.appendingPathComponent("Logs", isDirectory: true),
+            source: source,
+            levelDefaults: ActivityLogLevelPreference.sharedDefaults()
+        )
     }()
 
     public let directory: URL?
     public let source: String
     private let maximumBytes: Int
+    /// Where the minimum level is read on every write. Nil keeps every level (tests, tools).
+    private let levelDefaults: UserDefaults?
     private let queue = DispatchQueue(label: "ai.tiy.nimbussync.activity-log", qos: .utility)
     static let maximumMessageLength = 600
+    /// Debug lines are also sent to unified logging, where `log show` reads them without access to
+    /// the App Group container. They carry the same redacted text as the file.
+    private static let debugMirror = Logger(subsystem: "ai.tiy.nimbussync", category: "activity-debug")
 
-    public init(directory: URL?, source: String, maximumBytes: Int = 1 << 20) {
+    public init(directory: URL?, source: String, maximumBytes: Int = 1 << 20, levelDefaults: UserDefaults? = nil) {
         self.directory = directory
         self.source = Self.sanitize(source, limit: 32)
         self.maximumBytes = max(256, maximumBytes)
+        self.levelDefaults = levelDefaults
+    }
+
+    /// The lowest level written now; changes in Settings apply from the next line.
+    public var minimumLevel: ActivityLevel {
+        levelDefaults.map { ActivityLogLevelPreference.stored(in: $0) } ?? .debug
+    }
+
+    /// Whether a line at `level` would be written. Check it before building costly debug text.
+    public func isEnabled(_ level: ActivityLevel) -> Bool {
+        directory != nil && level.rank >= minimumLevel.rank
     }
 
     public static func defaultSource(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> String? {
@@ -70,20 +122,25 @@ public final class ActivityLog: @unchecked Sendable {
 
     public var currentFileURL: URL? { directory?.appendingPathComponent("\(source).log") }
 
+    /// Diagnostic detail, written only while the log level is Debug. The message is built only then.
+    public func debug(_ category: String, _ message: @autoclosure () -> String) {
+        guard isEnabled(.debug) else { return }
+        record(.debug, category: category, message())
+    }
     public func info(_ category: String, _ message: String) { record(.info, category: category, message) }
     public func warning(_ category: String, _ message: String) { record(.warning, category: category, message) }
     public func error(_ category: String, _ message: String) { record(.error, category: category, message) }
 
-    /// Appends asynchronously; never blocks or throws into the caller.
+    /// Appends asynchronously; never blocks or throws into the caller. Lines below the chosen
+    /// minimum level are dropped.
     public func record(_ level: ActivityLevel, category: String, _ message: String, date: Date = Date()) {
-        guard directory != nil else { return }
-        let line = [
-            Self.timestamp(date),
-            level.rawValue,
-            source,
-            Self.sanitize(category, limit: 48),
-            Self.sanitize(SecretRedactor.redact(message), limit: Self.maximumMessageLength)
-        ].joined(separator: "\t") + "\n"
+        guard isEnabled(level) else { return }
+        let category = Self.sanitize(category, limit: 48)
+        let message = Self.sanitize(SecretRedactor.redact(message), limit: Self.maximumMessageLength)
+        if level == .debug {
+            Self.debugMirror.notice("\(category, privacy: .public) \(message, privacy: .public)")
+        }
+        let line = [Self.timestamp(date), level.rawValue, source, category, message].joined(separator: "\t") + "\n"
         queue.async { [self] in append(line) }
     }
 

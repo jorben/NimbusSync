@@ -712,6 +712,15 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
                     throw StoreBridgeError.schemaFenced
                 }
             }
+            ActivityLog.shared.debug("file-provider", enumeratedChangesSummary(
+                scope: containerKind.rawValue,
+                from: anchor.sequence,
+                to: batch.nextAnchor.sequence,
+                updated: updates.map { $0.itemIdentifier.rawValue },
+                deleted: deletes.map(\.rawValue),
+                hidden: batch.hiddenChanges,
+                moreComing: batch.moreComing
+            ))
             if !updates.isEmpty { observer.didUpdate(updates) }
             if !deletes.isEmpty { observer.didDeleteItems(withIdentifiers: deletes) }
             observer.finishEnumeratingChanges(upTo: NSFileProviderSyncAnchor(try batch.nextAnchor.encoded()), moreComing: batch.moreComing)
@@ -722,6 +731,21 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
         guard let store else { completionHandler(nil); return }
         do { completionHandler(NSFileProviderSyncAnchor(try store.currentAnchor(domainIdentifier: domainIdentifier, scope: parentIdentifier).encoded())) } catch { completionHandler(nil) }
     }
+}
+
+/// One debug line per change batch handed to the system: the journal range it covers and which
+/// items it reports updated or deleted. Identifiers are shortened to their first 12 characters
+/// (`cri-2cc9ed6d`) so a whole batch fits the activity log's line limit.
+func enumeratedChangesSummary(scope: String, from: UInt64, to: UInt64, updated: [String], deleted: [String], hidden: Int, moreComing: Bool) -> String {
+    var summary = "Changes enumerated · scope=\(scope) from=\(from) to=\(to) updates=\(updated.count) deletes=\(deleted.count) hidden=\(hidden) more=\(moreComing)"
+    if !deleted.isEmpty { summary += " deleted=" + shortIdentifierList(deleted, limit: 20) }
+    if !updated.isEmpty { summary += " updated=" + shortIdentifierList(updated, limit: 12) }
+    return summary
+}
+
+func shortIdentifierList(_ identifiers: [String], limit: Int) -> String {
+    let shown = identifiers.prefix(limit).map { String($0.prefix(12)) }.joined(separator: ",")
+    return identifiers.count > limit ? shown + ",+\(identifiers.count - limit)" : shown
 }
 
 /// One batch can hold several commits for the same item; the system must only see its final
@@ -1020,7 +1044,12 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                     // Nothing is left to retry, so nothing is listed as an issue either.
                     try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .none)
                     if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
-                    try? await NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet)
+                    do {
+                        try await NSFileProviderManager(for: domain)?.signalEnumerator(for: .workingSet)
+                        ActivityLog.shared.debug("file-provider", "Working set signalled for a stale item · item=\(itemIdentifier.rawValue)")
+                    } catch {
+                        ActivityLog.shared.debug("file-provider", "Working set signal failed for a stale item · item=\(itemIdentifier.rawValue) \(FileProviderErrorMapper.diagnosticSummary(error))")
+                    }
                 } else {
                     try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .failed, error: (error as? CoreFailure)?.code.rawValue ?? "download_failed")
                     if let transferTask {

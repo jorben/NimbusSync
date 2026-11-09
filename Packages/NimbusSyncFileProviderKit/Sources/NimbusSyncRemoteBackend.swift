@@ -1798,10 +1798,17 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             // object now at its path arrives with live updates or the next check.
             // The system asked for the item, so it holds it: the deletion is journaled for the
             // working set, and again on every attempt in case an earlier one went unheard.
+            let alreadyDeleted = (try? store.item(identifier: identifier))?.tombstone
+            if alreadyDeleted != true {
+                // Once per stale item; later attempts only repeat the deletion (debug below).
+                ActivityLog.shared.warning("file-provider", "Removed a stale item: the server holds another file at its path · item=\(identifier)")
+            }
             do {
-                try store.deleteSystemHeldItem(identifier: identifier, origin: "fetch_contents")
+                let change = try store.deleteSystemHeldItem(identifier: identifier, origin: "fetch_contents")
+                ActivityLog.shared.debug("file-provider", Self.staleDeletionSummary(identifier: identifier, alreadyDeleted: alreadyDeleted, change: change))
             } catch {
                 logger.error("download.stale_item.delete_failed")
+                ActivityLog.shared.error("file-provider", "Could not delete a stale item · item=\(identifier) \(FileProviderErrorMapper.diagnosticSummary(error))")
             }
             throw failure
         }
@@ -2459,7 +2466,19 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
     /// drop the stale item instead.
     private static func requireSameRemoteObject(_ dto: RemoteFileDTO, as stored: RemoteItem) throws {
         guard let expected = stored.remoteID, !expected.isEmpty, dto.id != expected else { return }
+        ActivityLog.shared.debug("file-provider", "Remote identity changed · item=\(stored.itemIdentifier) stored=\(expected) current=\(dto.id)")
         throw CoreFailure(code: .notFound, retryable: false, redactedContext: ["stage": "remote_identity_changed"])
+    }
+
+    /// What the stale-item deletion wrote: the journal row the system should hear about and whether
+    /// it is meant for the working set at all.
+    static func staleDeletionSummary(identifier: String, alreadyDeleted: Bool?, change: JournalChange?) -> String {
+        let previous = alreadyDeleted.map { $0 ? "yes" : "no" } ?? "unknown"
+        guard let change else {
+            return "Stale item deletion found no stored item · item=\(identifier) already_deleted=\(previous)"
+        }
+        let audience = change.providerVisible ? "working_set" : "none"
+        return "Stale item deletion journaled · item=\(identifier) seq=\(change.sequence) audience=\(audience) already_deleted=\(previous)"
     }
 
     private func fetchRemoteByURIAsync(uri: String, fallbackIdentifier: String, parentIdentifier: String, context: FileProviderOperationContext) async throws -> RemoteItem {

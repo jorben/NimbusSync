@@ -9,6 +9,32 @@ final class JournalChangeCollapseTests: XCTestCase {
     private let epoch = UUID()
     private let root = NSFileProviderItemIdentifier.rootContainer.rawValue
 
+    /// The debug line for a batch names the delivered deletions and updates by short identifier
+    /// and stays inside the activity log's 600-character line limit even for a full batch.
+    func testEnumeratedChangesSummaryNamesShortIdentifiersWithinTheLineLimit() {
+        let deleted = (0..<40).map { _ in CloudreveIdentifier.item() }
+        let updated = (0..<40).map { _ in CloudreveIdentifier.item() }
+        let summary = enumeratedChangesSummary(scope: "workingSet", from: 10, to: 90, updated: updated, deleted: deleted, hidden: 3, moreComing: true)
+
+        XCTAssertTrue(summary.hasPrefix("Changes enumerated · scope=workingSet from=10 to=90 updates=40 deletes=40 hidden=3 more=true"))
+        XCTAssertTrue(summary.contains("deleted=\(deleted[0].prefix(12)),"))
+        XCTAssertTrue(summary.contains(",+20 updated="), "deletions beyond 20 are counted, not listed")
+        XCTAssertTrue(summary.hasSuffix(",+28"), "updates beyond 12 are counted, not listed")
+        XCTAssertLessThanOrEqual(summary.count, 600)
+        XCTAssertEqual(enumeratedChangesSummary(scope: "directory", from: 1, to: 1, updated: [], deleted: [], hidden: 0, moreComing: false), "Changes enumerated · scope=directory from=1 to=1 updates=0 deletes=0 hidden=0 more=false")
+    }
+
+    /// The stale-deletion debug line says which journal row was written and who it is for.
+    func testStaleDeletionSummaryReportsSequenceAndAudience() throws {
+        let item = try makeItem(identifier: "cri-stale", parent: root, path: "/stale.html")
+        let visible = try change(sequence: 42, item: item, old: root, new: nil, kind: "deleted")
+        let hidden = JournalChange(sequence: 43, epoch: epoch, itemIdentifier: item.itemIdentifier, oldParentIdentifier: "folder", newParentIdentifier: nil, kind: "deleted", version: item.version.content, origin: "fetch_contents", providerVisible: false, itemPayload: try JSONEncoder().encode(item), itemVersion: item.version)
+
+        XCTAssertEqual(NimbusSyncRemoteBackend.staleDeletionSummary(identifier: "cri-stale", alreadyDeleted: true, change: visible), "Stale item deletion journaled · item=cri-stale seq=42 audience=working_set already_deleted=yes")
+        XCTAssertEqual(NimbusSyncRemoteBackend.staleDeletionSummary(identifier: "cri-stale", alreadyDeleted: false, change: hidden), "Stale item deletion journaled · item=cri-stale seq=43 audience=none already_deleted=no")
+        XCTAssertEqual(NimbusSyncRemoteBackend.staleDeletionSummary(identifier: "cri-stale", alreadyDeleted: nil, change: nil), "Stale item deletion found no stored item · item=cri-stale already_deleted=unknown")
+    }
+
     /// Repro A: an item hidden and shown again inside one batch must be reported once, as
     /// visible; reporting update-then-delete would hide an item that is visible.
     func testViewRemovedThenViewAddedCollapsesToFinalVisibleState() throws {

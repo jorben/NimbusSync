@@ -1758,6 +1758,8 @@ private struct SettingsView: View {
     @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
     @AppStorage(AppAppearance.preferenceKey) private var appearance = AppAppearance.system.rawValue
     @AppStorage(DockIconPreference.preferenceKey) private var showsDockIcon = DockIconPreference.defaultValue
+    /// Shared with the Finder extension through the App Group's defaults.
+    @AppStorage(ActivityLogLevelPreference.preferenceKey, store: ActivityLogLevelPreference.sharedDefaults()) private var logLevel = ActivityLogLevelPreference.defaultValue.rawValue
 
     init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
@@ -2042,6 +2044,23 @@ private struct SettingsView: View {
             Spacer(minLength: NimbusSyncDesignTokens.spacing12)
 
             HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                Picker("Log level", selection: Binding(
+                    get: { ActivityLevel(rawValue: logLevel) ?? ActivityLogLevelPreference.defaultValue },
+                    set: { level in
+                        logLevel = level.rawValue
+                        ActivityLog.shared.info("app", "Log level set to \(level.title)")
+                    }
+                )) {
+                    ForEach(ActivityLevel.allCases) { level in
+                        Text(level.title).tag(level)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .help("Lowest level NimbusSync and its Finder extension write to the log. Debug adds detailed sync diagnostics.")
+                .accessibilityLabel(Text("Log level"))
+
                 Button(action: copyLogs) {
                     Image(systemName: copiedLogs ? "checkmark" : "doc.on.doc")
                 }
