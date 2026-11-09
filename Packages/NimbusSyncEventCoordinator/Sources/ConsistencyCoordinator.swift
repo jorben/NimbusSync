@@ -25,13 +25,17 @@ public struct EventScopeGuard: Sendable {
 
     public mutating func accepts(remoteID: String?, fromURI: String?, toURI: String?) -> Bool {
         guard let remoteID, !remoteID.isEmpty, remoteID != rootRemoteID, !remoteID.contains(where: { $0.isWhitespace || $0 == "\0" }) else { rejectedCount += 1; return false }
-        let normalizedRoot = canonicalURI(rootURI)
-        guard normalizedRoot != nil else { rejectedCount += 1; return false }
-        // Cloudreve sends an empty `to` for create/modify/delete events; only
-        // a supplied path is evidence that the event crosses this scope.
+        guard let normalizedRoot = canonicalURI(rootURI) else { rejectedCount += 1; return false }
+        // Cloudreve names `from`/`to` relative to the subscribed folder, which is the Domain
+        // root (`/个人文件/a` for `<root>/个人文件/a`), so a plain path is inside the Domain by
+        // construction and only has to be well formed. Comparing it with the root URI rejected
+        // every real event. A full `cloudreve://` URI must still lie under the root. The
+        // enricher checks the server's own path for the item either way. `to` is empty for
+        // create/modify/delete events.
         for uri in [fromURI, toURI].compactMap({ $0 }).filter({ !$0.isEmpty }) {
-            guard let normalized = canonicalURI(uri), let normalizedRoot else { rejectedCount += 1; return false }
-            if normalizedRoot != "/" && normalized != normalizedRoot && !normalized.hasPrefix(normalizedRoot + "/") {
+            guard let normalized = canonicalURI(uri) else { rejectedCount += 1; return false }
+            guard normalized.hasPrefix("cloudreve://") else { continue }
+            if normalized != normalizedRoot && !normalized.hasPrefix(normalizedRoot + "/") {
                 rejectedCount += 1
                 return false
             }
@@ -1041,7 +1045,9 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         case .applied, .unchanged:
             try? store.updateSyncState(eventAt: Date(), reconcileStatus: "event_active")
         case .outsideScope:
-            break
+            // The server only sends changes under the subscribed root, so this should be rare;
+            // left silent, a guard that wrongly rejected every change once went unnoticed.
+            ActivityLog.shared.info("live-updates", "Ignored a change outside this domain")
         case .skipped(reason: "not_found"):
             // Expected after a delete on the server; not a fault worth a warning.
             ActivityLog.shared.info("live-updates", "A change named an item the server no longer has; the next full check removes it")

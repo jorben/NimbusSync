@@ -367,18 +367,26 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertNil(try backend.item(identifier: grandchild.itemIdentifier))
     }
 
-    func testEventScopeGuardRejectsRootAndOutOfScopeHints() {
-        var guarder = EventScopeGuard(rootRemoteID: "root", rootURI: "/team")
-        XCTAssertFalse(guarder.accepts(remoteID: "root", fromURI: "/team", toURI: nil))
-        XCTAssertFalse(guarder.accepts(remoteID: "child", fromURI: "/other/file", toURI: nil))
-        XCTAssertTrue(guarder.accepts(remoteID: "child", fromURI: "/team/file", toURI: "/team/new"))
-        XCTAssertEqual(guarder.rejectedCount, 2)
+    func testEventScopeGuardRejectsRootAndOutOfScopeHints() throws {
+        let rootURI = try CloudreveRemoteURI.canonical("/team", accountID: "account")
+        var guarder = EventScopeGuard(rootRemoteID: "root", rootURI: rootURI)
+        XCTAssertFalse(guarder.accepts(remoteID: "root", fromURI: "/", toURI: nil), "the Domain root itself")
+        XCTAssertFalse(guarder.accepts(remoteID: "child", fromURI: "/../other/file", toURI: nil), "a path climbing out of the root")
+        XCTAssertFalse(guarder.accepts(remoteID: "child", fromURI: "cloudreve://account@my/other/file", toURI: nil), "a full URI outside the root")
+        XCTAssertTrue(guarder.accepts(remoteID: "child", fromURI: "cloudreve://account@my/team/file", toURI: nil))
+        XCTAssertEqual(guarder.rejectedCount, 3)
     }
 
-    func testEventScopeGuardAcceptsCloudreveCreateWithEmptyDestination() {
-        var guarder = EventScopeGuard(rootRemoteID: "root", rootURI: "/team")
-        XCTAssertTrue(guarder.accepts(remoteID: "child", fromURI: "/team/new-file.dmg", toURI: ""))
-        XCTAssertEqual(guarder.rejectedCount, 0)
+    /// Cloudreve's `from`/`to` are relative to the subscribed folder (the Domain root): renaming
+    /// `<root>/个人文件/2022MEM` arrives as `/个人文件/2022MEM` -> `/个人文件/<new name>`. Every one of these was
+    /// once rejected for not starting with the root URI, so no file change was ever applied.
+    func testEventScopeGuardAcceptsCloudrevePathsRelativeToTheSubscribedRoot() throws {
+        for root in ["/team", "/", "/data"] {
+            var guarder = EventScopeGuard(rootRemoteID: "root", rootURI: try CloudreveRemoteURI.canonical(root, accountID: "account"))
+            XCTAssertTrue(guarder.accepts(remoteID: "child", fromURI: "/个人文件/2022MEM", toURI: "/个人文件/2022MEM-renamed"), "rename under \(root)")
+            XCTAssertTrue(guarder.accepts(remoteID: "child", fromURI: "/new-file.dmg", toURI: ""), "create under \(root)")
+            XCTAssertEqual(guarder.rejectedCount, 0)
+        }
     }
 
     func testCloudreveCreateWithEmptyDestinationCommitsItemAndSignalOutbox() async throws {
@@ -417,7 +425,8 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(repeated, .unchanged, "the same version twice writes once")
         let root = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "root"))
         XCTAssertEqual(root, .outsideScope)
-        let elsewhere = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "remote-b", fromURI: "/other/b.txt"))
+        // Plain paths are relative to the subscribed root, so only a full URI can name elsewhere.
+        let elsewhere = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "remote-b", fromURI: "cloudreve://account@my/other/b.txt"))
         XCTAssertEqual(elsewhere, .outsideScope)
 
         let missing = EventNormalizationPipeline(scopeGuard: EventScopeGuard(rootRemoteID: "root", rootURI: "/team"), enricher: MissingRemoteEventEnricher(), writer: EventJournalWriter(store: store))

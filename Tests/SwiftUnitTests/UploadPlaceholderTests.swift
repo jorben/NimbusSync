@@ -101,6 +101,30 @@ final class UploadPlaceholderTests: XCTestCase {
         XCTAssertEqual(change?.item.remoteID, "r-known")
     }
 
+    /// A folder renamed on the server arrives as Cloudreve sends it: `from`/`to` relative to the
+    /// subscribed root. It must be applied, folder and descendants, not dropped as out of scope.
+    func testLiveRenameRelativeToTheSubscribedRootIsApplied() async throws {
+        let store = try makeStore()
+        var folder = item(remoteID: "r-folder", name: "2022MEM")
+        folder.kind = .folder
+        folder.contentType = UTType.folder.identifier
+        try store.insertItem(folder)
+        let child = RemoteItem(remoteID: "r-child", parentIdentifier: folder.itemIdentifier, name: "notes.txt", uri: "\(folder.uri)/notes.txt", kind: .file, contentType: UTType.data.identifier, size: 3, version: ItemVersion(content: Data("c".utf8), metadata: Data("c".utf8)))
+        try store.insertItem(child)
+        PlaceholderWireURLProtocol.responder = { _ in Self.envelope(Self.folder(id: "r-folder", name: "2022MEM-renamed")) }
+        let vault = try vault()
+        let session = session()
+        let enricher = CloudreveEventEnricher(origin: origin, rootURI: rootURI, rootRemoteID: "root", store: store, vault: vault, credentialReference: "credential", capabilitySnapshot: .cloudreveV4(serverVersion: nil), session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        let pipeline = EventNormalizationPipeline(scopeGuard: EventScopeGuard(rootRemoteID: "root", rootURI: rootURI), enricher: enricher, writer: EventJournalWriter(store: store))
+
+        let result = await pipeline.consume(RemoteEventHint(kind: .file, remoteID: "r-folder", fromURI: "/2022MEM", toURI: "/2022MEM-renamed"))
+
+        XCTAssertEqual(result, .applied)
+        XCTAssertEqual(try store.item(identifier: folder.itemIdentifier)?.name, "2022MEM-renamed")
+        XCTAssertEqual(try store.item(identifier: child.itemIdentifier)?.uri, "\(rootURI)/2022MEM-renamed/notes.txt")
+        XCTAssertEqual(try store.pendingOutboxCount(), 1, "the system is told to look")
+    }
+
     // MARK: - Reconcile
 
     func testReconcileSkipsUnknownPlaceholderAndKeepsKnownOne() async throws {
