@@ -32,6 +32,16 @@ let canvasHeightPoints = 18
 let glyphWidthPoints = 20.0
 let glyphHeightPoints = 16.0
 
+/// The design source draws its track with a 33 px stroke (on a 1024 px canvas); at menu bar size
+/// that came out under 0.9 pt and read thin beside the system items. Every ink edge is pushed out
+/// by this many source pixels, so the stroke grows to 69 px: the grown glyph is wider, so it is drawn a little smaller, and
+/// 69 px is what lands at twice the old on-screen stroke (about 1.8 pt against 0.9 pt). Small enclosed holes
+/// (the open ring) are kept as drawn so the ring stays hollow instead of filling in.
+/// `MenuBarIcon.trackWidth`, `nodeRadius` and `artworkCrop` must match the grown glyph.
+let strokeGrowth = 18.0
+/// Enclosed background regions smaller than this (source px²) are holes to keep open.
+let preservedHoleArea = 8_000
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("error: \(message)\n".utf8))
     exit(1)
@@ -55,15 +65,76 @@ pixels.withUnsafeMutableBytes { buffer in
 
 // Key the paper out. Premultiplied, a pixel's ink coverage is its alpha minus its lightest-possible
 // channel, which also passes an export that already has transparency through unchanged.
-var minX = width, maxX = -1, minY = height, maxY = -1
+var coverage = [Double](repeating: 0, count: width * height)
 for y in 0..<height {
     for x in 0..<width {
         let i = (y * width + x) * 4
         let alpha = Double(pixels[i + 3])
         let value = Double(min(pixels[i], min(pixels[i + 1], pixels[i + 2])))
         let paper = paperLevel * alpha / 255, ink = inkLevel * alpha / 255
-        let coverage = max(0, min(1, (paper - value) / max(1, paper - ink))) * alpha / 255
-        let keyed = UInt8((coverage * 255).rounded())
+        coverage[y * width + x] = max(0, min(1, (paper - value) / max(1, paper - ink))) * alpha / 255
+    }
+}
+
+// Find the small enclosed holes before growing, so they can be left as drawn.
+var preserved = [Bool](repeating: false, count: width * height)
+do {
+    var label = [Int32](repeating: 0, count: width * height)
+    var nextLabel: Int32 = 0
+    for seed in 0..<(width * height) where label[seed] == 0 && coverage[seed] < 0.5 {
+        nextLabel += 1
+        var stack = [seed], members: [Int] = [], touchesBorder = false
+        label[seed] = nextLabel
+        while let index = stack.popLast() {
+            members.append(index)
+            let x = index % width, y = index / width
+            if x == 0 || y == 0 || x == width - 1 || y == height - 1 { touchesBorder = true }
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] where nx >= 0 && ny >= 0 && nx < width && ny < height {
+                let neighbour = ny * width + nx
+                if label[neighbour] == 0 && coverage[neighbour] < 0.5 { label[neighbour] = nextLabel; stack.append(neighbour) }
+            }
+        }
+        if !touchesBorder && members.count < preservedHoleArea { for index in members { preserved[index] = true } }
+    }
+}
+
+/// Squared Euclidean distance transform of one line (Felzenszwalb & Huttenlocher).
+func distanceTransform(_ f: [Double]) -> [Double] {
+    let n = f.count
+    var d = [Double](repeating: 0, count: n), v = [Int](repeating: 0, count: n), z = [Double](repeating: 0, count: n + 1)
+    var k = 0
+    z[0] = -.infinity; z[1] = .infinity
+    for q in 1..<n {
+        var s = ((f[q] + Double(q * q)) - (f[v[k]] + Double(v[k] * v[k]))) / Double(2 * q - 2 * v[k])
+        while s <= z[k] { k -= 1; s = ((f[q] + Double(q * q)) - (f[v[k]] + Double(v[k] * v[k]))) / Double(2 * q - 2 * v[k]) }
+        k += 1; v[k] = q; z[k] = s; z[k + 1] = .infinity
+    }
+    k = 0
+    for q in 0..<n {
+        while z[k + 1] < Double(q) { k += 1 }
+        d[q] = Double((q - v[k]) * (q - v[k])) + f[v[k]]
+    }
+    return d
+}
+
+// Grow the ink: each pixel's new coverage comes from its distance to the nearest solid ink pixel.
+let far = Double(width * width + height * height)
+var squared = coverage.map { $0 >= 0.5 ? 0 : far }
+for x in 0..<width {
+    let column = distanceTransform((0..<height).map { squared[$0 * width + x] })
+    for y in 0..<height { squared[y * width + x] = column[y] }
+}
+for y in 0..<height {
+    let row = distanceTransform(Array(squared[(y * width)..<((y + 1) * width)]))
+    for x in 0..<width { squared[y * width + x] = row[x] }
+}
+
+var minX = width, maxX = -1, minY = height, maxY = -1
+for y in 0..<height {
+    for x in 0..<width {
+        let index = y * width + x, i = index * 4
+        let grown = preserved[index] ? coverage[index] : max(coverage[index], min(1, max(0, strokeGrowth + 0.5 - squared[index].squareRoot())))
+        let keyed = UInt8((grown * 255).rounded())
         pixels[i] = 0; pixels[i + 1] = 0; pixels[i + 2] = 0; pixels[i + 3] = keyed
         if keyed >= 9 {
             minX = min(minX, x); maxX = max(maxX, x)

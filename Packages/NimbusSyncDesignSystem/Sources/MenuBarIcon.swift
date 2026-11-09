@@ -46,17 +46,20 @@ public enum MenuBarIcon {
 
     // MARK: - Artwork geometry
 
-    /// Measured on `Design/MenuBarIcon.png` (1024 px, y pointing down). Re-measure if the artwork
-    /// is redrawn; the generator script prints the crop.
-    nonisolated static let artworkCrop = CGRect(x: 142, y: 286, width: 738, height: 458)
+    /// Measured on `Design/MenuBarIcon.png` (1024 px, y pointing down) after the generator grows
+    /// the ink by `strokeGrowth` (18 px). Re-measure if the artwork or the growth changes; the
+    /// generator script prints the crop.
+    nonisolated static let artworkCrop = CGRect(x: 125, y: 269, width: 772, height: 492)
     nonisolated static let glyphFit = CGSize(width: 20, height: 16)
     /// The infinity track as a generalised lemniscate,
     /// x = cx + a·cos t / (1 + sin²t), y = cy + b·sin t·cos t / (1 + sin²t),
-    /// fitted to the stroke's centre line (mean offset 1.7 px against a 33 px stroke).
+    /// fitted to the stroke's centre line (mean offset 1.7 px against the source's 33 px stroke).
+    /// Growing the ink keeps the centre line, so the fit still holds.
     nonisolated static let track = (cx: 510.0, cy: 568.0, a: 350.0, b: 380.0)
-    nonisolated static let trackWidth = 33.0
+    /// The source's 33 px stroke and 46 px node, each grown by the generator's 18 px per edge.
+    nonisolated static let trackWidth = 69.0
     nonisolated static let nodeCenter = CGPoint(x: 283, y: 696)
-    nonisolated static let nodeRadius = 46.0
+    nonisolated static let nodeRadius = 64.0
 
     nonisolated static var artworkScale: CGFloat {
         min(glyphFit.width / artworkCrop.width, glyphFit.height / artworkCrop.height)
@@ -120,7 +123,7 @@ public enum MenuBarIcon {
             let rest = canvasPoint(nodeCenter)
             // Lift the resting node off the track, then restore the stretch of track it covered.
             // The bundled glyph is downsampled (one Retina pixel spans about 18 artwork pixels),
-            // so the node's soft edge reaches well past its 46 px radius; a tighter cut left a
+            // so the node's soft edge reaches well past its radius; a tighter cut left a
             // faint ring behind. The repair is clipped wider than the cut, so it meets the
             // original stroke where that stroke is still whole and leaves no seam.
             let cut = (nodeRadius + 24) * scale, repair = (nodeRadius + 36) * scale
