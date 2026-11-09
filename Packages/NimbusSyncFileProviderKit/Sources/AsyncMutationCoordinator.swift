@@ -203,11 +203,14 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         } catch {
             if let failure = error as? CoreFailure, failure.isRemoteObjectGone {
                 // The backend found the item stale (its path is empty or holds another object)
-                // and deleted it rather than act on the path. Nothing failed that a retry or the user could fix, so no
-                // upload failure or open operation is left behind.
-                try? store.deleteTransferTask(taskID: task.taskID)
+                // and deleted it rather than act on the path. Nothing failed that a retry or the
+                // user could fix, so no upload failure, open operation or earlier attempt's
+                // failure is left behind, and the operation leaves the activity list (the activity
+                // log records the removal).
+                try? store.deleteTransferTasks(operationID: operationID)
                 try? store.clearPending(item.itemIdentifier)
                 try? store.commitOperation(operationID: operationID, state: "cancelled", itemIdentifier: item.itemIdentifier)
+                try? store.hideOperationFromHistory(operationID: operationID)
                 throw error
             }
             if let failure = error as? CoreFailure, failure.code == .versionConflict, fields.contains(.contents), let contents {

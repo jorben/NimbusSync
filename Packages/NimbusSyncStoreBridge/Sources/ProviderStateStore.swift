@@ -460,6 +460,15 @@ public extension SQLiteStateStore {
         }
     }
 
+    /// Forgets every transfer recorded for an operation, earlier failed attempts included, once
+    /// nothing is left to retry or report for it. The task list shows an operation's latest
+    /// transfer, so a stale failure would otherwise outlive the operation's own outcome.
+    func deleteTransferTasks(operationID: UUID) throws {
+        try withLock {
+            try execute("DELETE FROM tasks WHERE operation_id = '\(operationID.uuidString)'")
+        }
+    }
+
     /// Forgets an item's failed transfers in one direction, when a new attempt takes their place.
     func deleteFailedTransferTasks(itemIdentifier: String, direction: String) throws {
         try withLock {

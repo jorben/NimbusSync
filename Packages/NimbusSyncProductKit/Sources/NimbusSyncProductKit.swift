@@ -32,6 +32,20 @@ public struct ProductTask: Identifiable, Codable, Equatable, Sendable {
     /// it through the File Provider manager rather than `ProductStore.retryTask`.
     public var isSystemDownload: Bool { !retryable && direction == .download && itemIdentifier != nil }
 
+    /// The error an operation shows in the activity list. Terminal failure states name their own;
+    /// an operation still on its way shows its latest transfer's error. One that finished,
+    /// succeeded or was cancelled shows none: a failed earlier attempt's transfer must not outlive
+    /// the outcome (a cancelled trash kept showing "Outcome unknown" from an attempt before it).
+    public static func errorCode(forOperationState state: String, latestTransferErrorCode: String?) -> String? {
+        switch state {
+        case "unknown_outcome": return "unknown_outcome"
+        case "conflict": return "version_conflict"
+        case "auth_expired": return "authentication_required"
+        case "committed", "resolved", "cancelled": return nil
+        default: return latestTransferErrorCode
+        }
+    }
+
     /// Drops failures nobody can retry once the same item later went through in the same
     /// direction: a download that failed and then succeeded is one success, not an issue.
     /// Retryable failures stay, since retrying them is still the user's call.
@@ -195,13 +209,7 @@ public actor ProductStore {
                 } else {
                     transfer = nil
                 }
-                let errorCode: String?
-                switch stored.operation.state {
-                case "unknown_outcome": errorCode = "unknown_outcome"
-                case "conflict": errorCode = "version_conflict"
-                case "auth_expired": errorCode = "authentication_required"
-                default: errorCode = transfer?.errorCode
-                }
+                let errorCode = ProductTask.errorCode(forOperationState: stored.operation.state, latestTransferErrorCode: transfer?.errorCode)
                 return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: itemName(stored.operation.itemIdentifier) ?? stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt, retryable: true)
             })
             let transferTasks: [TransferTaskSnapshot]
