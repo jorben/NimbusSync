@@ -128,7 +128,13 @@ private actor SSEStreamState {
                     else if error is CancellationError { reason = "cancelled" }
                     else { reason = String(describing: type(of: error)) }
                     logger.error("sse.stream.failed endpoint=file/events reason=\(reason, privacy: .public) lifetime_s=\(Int(Date().timeIntervalSince(startedAt)), privacy: .public)")
-                    ActivityLog.shared.warning("live-updates", "Live updates disconnected · reason=\(reason) after \(Int(Date().timeIntervalSince(startedAt)))s")
+                    let lifetime = Int(Date().timeIntervalSince(startedAt))
+                    if (error as? URLError)?.code == .cancelled || error is CancellationError {
+                        // NimbusSync closed the stream itself (a restart, a removed Domain, quitting).
+                        ActivityLog.shared.info("live-updates", "Live updates stopped · reason=\(reason) after \(lifetime)s")
+                    } else {
+                        ActivityLog.shared.warning("live-updates", "Live updates disconnected · reason=\(reason) after \(lifetime)s")
+                    }
                     await channel.finish(error)
                 }
         }

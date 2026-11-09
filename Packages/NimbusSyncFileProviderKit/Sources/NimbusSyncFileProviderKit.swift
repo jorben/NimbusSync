@@ -1689,7 +1689,13 @@ public enum FileProviderErrorMapper {
         if mapped.domain == NSFileProviderErrorDomain, (error as NSError).domain != NSFileProviderErrorDomain {
             let correlation = (mapped.userInfo["correlationID"] as? String) ?? "-"
             logger.error("fp.error.mapped fp_code=\(mapped.code, privacy: .public) source=\(diagnosticSummary(error), privacy: .public) correlationID=\(correlation, privacy: .public)")
-            ActivityLog.shared.error("file-provider", "File Provider error \(mapped.code) · \(diagnosticSummary(error))")
+            if mapped.code == NSFileProviderError.syncAnchorExpired.rawValue {
+                // Expected after the sync epoch rotates (the server folder moved, or the journal
+                // was compacted past Finder's position): the system re-reads the Domain.
+                ActivityLog.shared.info("file-provider", "Finder's sync position expired; re-reading the domain · \(diagnosticSummary(error))")
+            } else {
+                ActivityLog.shared.error("file-provider", "File Provider error \(mapped.code) · \(diagnosticSummary(error))")
+            }
         }
         return mapped
     }
