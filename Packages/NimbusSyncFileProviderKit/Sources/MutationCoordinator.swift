@@ -26,6 +26,23 @@ func storedOperationTerminalFailure(_ state: String) -> CoreFailure? {
     }
 }
 
+/// The part of a modify replay key that names what the callback asks for besides new contents.
+///
+/// A rename or move leaves the content version alone, so two renames of an unchanged item (or a
+/// move followed by a trash) used to share one key: the second was taken for a replay of the first
+/// and answered with its stored result without reaching the server, and the system then renamed
+/// the local item back. The target name and parent tell different requests apart; the base
+/// metadata version tells repeated requests for the same target apart (A→B, B→A, A→B). The system
+/// replaying the identical callback still produces the identical key. Names are base64-encoded so
+/// a `|` in a name cannot run into the next part.
+func modifyReplayTarget(item: RemoteItem, fields: NSFileProviderItemFields, baseMetadataVersion: Data?) -> String {
+    var parts: [String] = []
+    if let baseMetadataVersion { parts.append("m:" + baseMetadataVersion.base64EncodedString()) }
+    if fields.contains(.filename) { parts.append("n:" + Data(item.name.utf8).base64EncodedString()) }
+    if fields.contains(.parentItemIdentifier) { parts.append("p:" + Data((item.parentIdentifier ?? "").utf8).base64EncodedString()) }
+    return parts.joined(separator: "|")
+}
+
 public struct SourceFingerprint: Codable, Equatable, Sendable {
     public let size: Int64
     public let baseVersion: Data
@@ -89,7 +106,7 @@ public final class FileProviderMutationCoordinator: @unchecked Sendable {
             return try resolvePendingConflict(item: item, contents: contents, conflictID: pending.conflictID, resolution: pending.resolution, expectedRemoteVersion: pending.remoteVersion)
         }
         let fingerprint = SourceFingerprint(content: contents, baseVersion: baseVersion.contentVersion, sourceGeneration: 1)
-        let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.contentVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.edgeDigest.base64EncodedString())"
+        let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.contentVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.edgeDigest.base64EncodedString())|" + modifyReplayTarget(item: item, fields: fields, baseMetadataVersion: baseVersion.metadataVersion)
         let replay = MutationReplay(replayKey: replayKey, operationID: operationID(for: replayKey), sourceGeneration: fingerprint.sourceGeneration)
         let previousParent = (try? store?.item(identifier: item.itemIdentifier))??.parentIdentifier
         let operation = try begin(replay: replay, kind: .modify, itemIdentifier: item.itemIdentifier, expectedVersion: baseVersion.contentVersion, changedFields: String(fields.rawValue))

@@ -1124,6 +1124,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         let itemFilename = item.filename
         let itemParentIdentifier = item.parentItemIdentifier.rawValue
         let baseContentVersion = version.contentVersion
+        let baseMetadataVersion = version.metadataVersion
         let completion = MutationCompletion(completionHandler)
         let token = CancellationToken()
         let taskBox = TaskCancellationBox()
@@ -1148,7 +1149,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 let registrar: any URLSessionTaskRegistrar = FileProviderManagerTaskRegistrar(manager: manager)
                 let context = FileProviderOperationContext(itemIdentifier: NSFileProviderItemIdentifier(itemIdentifier), progress: progress, registrar: registrar, cancellation: token)
                 let asyncBackend: any CloudreveAsyncBackend = (backend as? any CloudreveAsyncBackend) ?? LegacyAsyncFileProviderBackendAdapter(backend: backend)
-                let outcome = try await AsyncFileProviderMutationCoordinator(store: self.store, backend: asyncBackend).modifyResolvingConflicts(item: model, baseVersion: baseContentVersion, fields: changedFields, contents: newContents, options: options, context: context)
+                let outcome = try await AsyncFileProviderMutationCoordinator(store: self.store, backend: asyncBackend).modifyResolvingConflicts(item: model, baseVersion: baseContentVersion, baseMetadataVersion: baseMetadataVersion, fields: changedFields, contents: newContents, options: options, context: context)
                 let updated = outcome.item
                 self.advanceDomainState()
                 let projection = try self.store?.itemProjection(identifier: updated.itemIdentifier)

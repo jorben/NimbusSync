@@ -331,6 +331,26 @@ final class RemoteProviderWireTests: XCTestCase {
         XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" })
     }
 
+    /// A rename or move the item already has is not sent again: the system may re-issue a committed
+    /// request on a newer base, and renaming to the current name (or moving into the current
+    /// folder) must neither reach the server nor fail.
+    func testRenameAndMoveToTheCurrentStateSendNothing() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        var item = fixture.template
+        item.remoteID = "remote-wire-remote"
+        try SQLiteStateStore(url: fixture.storeURL).insertItem(item)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+
+        let result = try await backend!.modify(ModifyRequest(item: item, expectedVersion: item.version.content, changedFields: [.filename, .parentItemIdentifier], contents: nil, options: [], replayKey: "no-op"), context: fixture.makeContext(itemIdentifier: item.itemIdentifier))
+        backend = nil
+
+        XCTAssertEqual(result.name, item.name)
+        XCTAssertEqual(result.parentIdentifier, item.parentIdentifier)
+        XCTAssertTrue(protocolState.requests.isEmpty, "nothing is sent for a rename or move already done")
+    }
+
     func testQiniuAsyncUploadUsesOneBasedPartsAndUpTokenOnStorageOnly() async throws {
         let fixture = try UploadWireFixture(provider: "qiniu", chunkSize: 4)
         defer { fixture.cleanup() }
@@ -968,6 +988,7 @@ private final class UploadWireFixture {
             stableItemIdentity: .verified,
             stableRootIdentity: .verified,
             conditionalContentWrite: .verified,
+            conditionalMetadataMutation: .verified,
             idempotentCreate: .verified,
             contentVersionSemantics: .verified,
             resumableUploadProviders: [provider],

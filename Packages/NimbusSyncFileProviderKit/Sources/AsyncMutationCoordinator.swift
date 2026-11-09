@@ -138,15 +138,17 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         }
     }
 
-    public func modify(item: RemoteItem, baseVersion: Data, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> RemoteItem {
-        try await modifyResolvingConflicts(item: item, baseVersion: baseVersion, fields: fields, contents: contents, options: options, context: context).item
+    public func modify(item: RemoteItem, baseVersion: Data, baseMetadataVersion: Data? = nil, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> RemoteItem {
+        try await modifyResolvingConflicts(item: item, baseVersion: baseVersion, baseMetadataVersion: baseMetadataVersion, fields: fields, contents: contents, options: options, context: context).item
     }
 
     /// Fields that are actually carried to Cloudreve. Everything else
     /// (xattrs, tags, dates, flags) stays local.
     public static let remoteModifyFields: NSFileProviderItemFields = [.contents, .filename, .parentItemIdentifier]
 
-    public func modifyResolvingConflicts(item: RemoteItem, baseVersion: Data, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> ModifyOutcome {
+    /// `baseVersion` is the content version the callback was based on; `baseMetadataVersion` its
+    /// metadata version, which tells repeated renames or moves to the same target apart.
+    public func modifyResolvingConflicts(item: RemoteItem, baseVersion: Data, baseMetadataVersion: Data? = nil, fields: NSFileProviderItemFields, contents: URL?, options: NSFileProviderModifyItemOptions, context: FileProviderOperationContext) async throws -> ModifyOutcome {
         try context.cancellation.throwIfCancelled()
         guard let store else {
             return ModifyOutcome(item: try await backend.modify(ModifyRequest(item: item, expectedVersion: baseVersion, changedFields: fields, contents: contents, options: options, replayKey: item.itemIdentifier), context: context))
@@ -174,7 +176,7 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         } else {
             fingerprint = (Data(), 0)
         }
-        let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.hash.base64EncodedString())|\(fingerprint.size)"
+        let replayKey = "modify|\(item.itemIdentifier)|\(baseVersion.base64EncodedString())|\(fields.rawValue)|\(fingerprint.hash.base64EncodedString())|\(fingerprint.size)|" + modifyReplayTarget(item: item, fields: fields, baseMetadataVersion: baseMetadataVersion)
         try store.supersedeStaleOperations(itemIdentifier: item.itemIdentifier, exceptReplayKey: replayKey)
         if let existing = try store.activeOperation(itemIdentifier: item.itemIdentifier), existing.operation.replayKey != replayKey {
             throw operationMismatchFailure(existing.operation.state, stage: "item_operation_in_flight")

@@ -465,12 +465,13 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
                 result = try uploadFile(uri: current.uri, content: content, previous: previousVersion, itemIdentifier: current.itemIdentifier, parentIdentifier: current.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue)
             }
         }
-        if changedFields.contains(.filename) {
+        // A rename or move the item already has is not sent again (see the async `modify`).
+        if changedFields.contains(.filename), item.name != result.name {
             try validateName(item.name)
             let dto: RemoteFileDTO = try request(path: "file/rename", method: "POST", query: [], body: ["uri": result.uri, "new_name": item.name], authenticated: true)
             result = try makeItem(dto, parentIdentifier: result.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, itemIdentifier: result.itemIdentifier)
         }
-        if changedFields.contains(.parentItemIdentifier) {
+        if changedFields.contains(.parentItemIdentifier), item.parentIdentifier != result.parentIdentifier {
             let destination = try parentURI(for: item.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue)
             let _: EmptyResponse = try request(path: "file/move", method: "POST", query: [], body: ["uris": [result.uri], "dst": destination, "copy": false], authenticated: true)
             result.parentIdentifier = item.parentIdentifier
@@ -1869,12 +1870,15 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                 throw CoreFailure(code: .unknownOutcome, retryable: false)
             }
         }
-        if request.changedFields.contains(.filename) {
+        // A rename or move the item already has is not sent again. The system may re-issue a
+        // committed request on a newer base (the reply was lost and the item changed since);
+        // renaming to the current name or moving into the current folder must not fail it.
+        if request.changedFields.contains(.filename), request.item.name != result.name {
             try validateName(request.item.name)
             let dto: RemoteFileDTO = try await requestAsync(path: "file/rename", method: "POST", query: [], body: ["uri": result.uri, "new_name": request.item.name], authenticated: true, context: context)
             result = try makeItem(dto, parentIdentifier: result.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, itemIdentifier: result.itemIdentifier)
         }
-        if request.changedFields.contains(.parentItemIdentifier) {
+        if request.changedFields.contains(.parentItemIdentifier), request.item.parentIdentifier != result.parentIdentifier {
             guard capabilitySnapshot.conditionalMetadataMutation == .verified, capabilitySnapshot.operations.metadataMove == .verified else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true) }
             let destination = try await parentURIAsync(for: request.item.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, context: context)
             let _: EmptyResponse = try await requestAsync(path: "file/move", method: "POST", query: [], body: ["uris": [result.uri], "dst": destination, "copy": false], authenticated: true, context: context)
