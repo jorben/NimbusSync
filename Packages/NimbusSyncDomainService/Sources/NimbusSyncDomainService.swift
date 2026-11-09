@@ -364,11 +364,11 @@ public actor DomainRenameService {
             if let domainStore { try domainStore(descriptor.identifier).updateDomainDisplayName(identifier: descriptor.identifier, displayName: name) }
             guard try store.updateDomainDisplayName(identifier: descriptor.identifier, displayName: name) else { throw StoreBridgeError.unknownDomain }
         } catch {
+            if let domainStore { _ = try? domainStore(descriptor.identifier).updateDomainDisplayName(identifier: descriptor.identifier, displayName: stored.displayName) }
             if systemRegistered {
                 var previous = descriptor
                 previous.displayName = stored.displayName
                 try? await updateSystemDomain(previous)
-                if let domainStore { _ = try? domainStore(descriptor.identifier).updateDomainDisplayName(identifier: descriptor.identifier, displayName: stored.displayName) }
             }
             throw error
         }

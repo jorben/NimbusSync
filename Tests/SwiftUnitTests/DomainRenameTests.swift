@@ -123,6 +123,33 @@ final class DomainRenameTests: XCTestCase {
         XCTAssertEqual(try registry.domain(identifier: domain.identifier)?.displayName, "Work")
     }
 
+    func testFailedRegistryUpdateRestoresThePerDomainStoreName() async throws {
+        let registry = try makeStore("registry-fails")
+        let domainStore = try makeStore("domain-restored")
+        let domain = try descriptor(name: "Work")
+        try registry.registerDomain(domain)
+        try domainStore.registerDomain(domain)
+        let service = DomainRenameService(
+            store: registry,
+            domainStore: { _ in domainStore },
+            // The registry row disappears after the rename was validated, so the registry
+            // update fails after the per-domain store was already renamed.
+            registeredDomains: {
+                try registry.removeDomainRecord(identifier: domain.identifier)
+                return []
+            },
+            updateSystemDomain: { _ in }
+        )
+
+        do {
+            try await service.rename(descriptor: domain, to: "Renamed")
+            XCTFail("a rename whose registry row is gone must fail")
+        } catch let error as StoreBridgeError {
+            guard case .unknownDomain = error else { return XCTFail("unexpected error: \(error)") }
+        }
+        XCTAssertEqual(try domainStore.domain(identifier: domain.identifier)?.displayName, "Work", "the per-domain store must be rolled back even without a Finder location")
+    }
+
     private func assertThrows(_ expected: DomainProvisioningError, file: StaticString = #filePath, line: UInt = #line, _ body: () async throws -> Void) async {
         do {
             try await body()

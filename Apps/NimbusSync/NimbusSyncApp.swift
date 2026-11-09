@@ -1400,7 +1400,7 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     func removeDomain(_ domain: DomainDescriptor) {
-        guard removingDomainIdentifier == nil else { return }
+        guard removingDomainIdentifier == nil, renamingDomainIdentifier == nil else { return }
         domainRemovalError = nil
         removingDomainIdentifier = domain.identifier
         Task {
@@ -1443,7 +1443,7 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     func finalizePreservedDomainRemoval(_ domain: DomainDescriptor) {
-        guard removingDomainIdentifier == nil, domain.status == .preservedRemoval else { return }
+        guard removingDomainIdentifier == nil, renamingDomainIdentifier == nil, domain.status == .preservedRemoval else { return }
         domainRemovalError = nil
         removingDomainIdentifier = domain.identifier
         Task {
@@ -2092,7 +2092,7 @@ private struct SettingsView: View {
             localPath: domainFolderPaths[domain.identifier],
             lastSyncedAt: lastSyncedAt[domain.identifier],
             isRemoving: removingDomainIdentifier == domain.identifier,
-            actionsDisabled: removingDomainIdentifier != nil,
+            actionsDisabled: removingDomainIdentifier != nil || renamingDomainIdentifier != nil,
             isRenaming: renamingDomainIdentifier == domain.identifier,
             onOpenFinder: { onOpenFinder(domain) },
             onOpenWeb: { onOpenWeb(domain) },

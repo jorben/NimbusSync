@@ -362,6 +362,7 @@ public struct SettingsDomainCard<MenuItems: View>: View {
                     Image(systemName: "folder")
                 }
                 .buttonStyle(SettingsIconButtonStyle())
+                .disabled(isRenaming)
                 .help("Open in Finder")
                 .accessibilityLabel(Text("Open \(domain.displayName) in Finder"))
 
