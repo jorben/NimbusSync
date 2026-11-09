@@ -177,7 +177,6 @@ public final class MenuBarIconAnimator: ObservableObject {
 
     public func setTooltip(_ text: String) {
         if text != tooltip { tooltip = text }
-        StatusItemToolTip.apply(text)
     }
 
     public func setSyncing(_ syncing: Bool) {
@@ -204,50 +203,11 @@ public final class MenuBarIconAnimator: ObservableObject {
     private func advance() {
         frame = (frame + 1) % MenuBarIcon.frameCount
         image = MenuBarIcon.syncingFrames[frame]
-        // A label redraw may reset the button; restoring is a string compare when nothing changed.
-        StatusItemToolTip.apply(tooltip)
     }
 
     private func stop() {
         timer?.invalidate()
         timer = nil
         image = MenuBarIcon.base
-    }
-}
-
-/// The `MenuBarExtra` label.
-public struct MenuBarIconLabel: View {
-    @ObservedObject private var animator: MenuBarIconAnimator
-
-    public init(animator: MenuBarIconAnimator) {
-        self.animator = animator
-    }
-
-    public var body: some View {
-        Image(nsImage: animator.image)
-            .renderingMode(.template)
-            .accessibilityLabel(animator.isSyncing ? "NimbusSync – Syncing" : "NimbusSync")
-            .help(animator.tooltip)
-    }
-}
-
-/// `MenuBarExtra` has no tooltip API. Its status item is an `NSStatusBarButton` inside this app's
-/// own `NSStatusBarWindow`, so the hover text is set on that button directly.
-@MainActor
-public enum StatusItemToolTip {
-    public static func apply(_ text: String) {
-        for window in NSApp?.windows ?? [] where window.className.contains("NSStatusBarWindow") {
-            guard let button = statusButton(in: window.contentView), button.toolTip != text else { continue }
-            button.toolTip = text
-        }
-    }
-
-    static func statusButton(in view: NSView?) -> NSStatusBarButton? {
-        guard let view else { return nil }
-        if let button = view as? NSStatusBarButton { return button }
-        for subview in view.subviews {
-            if let button = statusButton(in: subview) { return button }
-        }
-        return nil
     }
 }

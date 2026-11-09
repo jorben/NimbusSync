@@ -843,3 +843,35 @@ public enum AppAppearance: String, CaseIterable, Identifiable, Sendable {
         NSApp.appearance = appearanceName.flatMap(NSAppearance.init(named:))
     }
 }
+
+// MARK: - Dock icon
+
+/// Whether NimbusSync shows its icon in the Dock, chosen in Settings › General. The bundle is an
+/// LSUIElement agent, so the menu bar item is always there; this only adds or removes the Dock tile.
+public enum DockIconPreference {
+    public static let preferenceKey = "showsDockIcon"
+    public static let defaultValue = true
+
+    /// The stored choice; never having been set means the default (shown).
+    public static func stored(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: preferenceKey) as? Bool ?? defaultValue
+    }
+
+    public static func activationPolicy(showsDockIcon: Bool) -> NSApplication.ActivationPolicy {
+        showsDockIcon ? .regular : .accessory
+    }
+
+    /// Switches the Dock tile on or off. Dropping to `.accessory` deactivates the app, so the window
+    /// the user was working in (normally Settings) is brought back to the front.
+    @MainActor public static func apply(showsDockIcon: Bool) {
+        let policy = activationPolicy(showsDockIcon: showsDockIcon)
+        guard NSApp.activationPolicy() != policy else { return }
+        let keyWindow = NSApp.keyWindow
+        NSApp.setActivationPolicy(policy)
+        guard let keyWindow else { return }
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            keyWindow.makeKeyAndOrderFront(nil)
+        }
+    }
+}

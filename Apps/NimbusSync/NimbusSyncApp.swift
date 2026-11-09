@@ -25,24 +25,9 @@ struct NimbusSyncApp: App {
     }
 
     var body: some Scene {
+        // The menu bar item and its panel are AppKit-owned (see `MenuBarPanelController`), set up
+        // by the delegate for the primary instance only.
         let _ = appDelegate.configure(runtime: runtime)
-
-        MenuBarExtra(
-            isInserted: Binding(
-                get: { appDelegate.isPrimaryInstance },
-                set: { _ in }
-            )
-        ) {
-            StatusPopoverContent(
-                runtime: runtime,
-                onOpenSettings: { appDelegate.openSettingsWindow() },
-                onAddDomain: { appDelegate.openOnboardingWindow() },
-                onOpenConflicts: { appDelegate.openConflictsWindow() }
-            )
-        } label: {
-            MenuBarIconLabel(animator: runtime.menuBarIcon)
-        }
-        .menuBarExtraStyle(.window)
 
         Settings {
             settingsView(runtime: runtime, appDelegate: appDelegate)
@@ -103,6 +88,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     private var didFinishLaunching = false
     private var onboardingWindowController: NSWindowController?
     private var conflictsWindowController: NSWindowController?
+    private var menuBarPanel: MenuBarPanelController?
     private(set) var isPrimaryInstance: Bool
 
     override init() {
@@ -142,12 +128,28 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
             runtime.openFinder(domain: domain)
         }
         guard didFinishLaunching else { return }
+        installMenuBarPanelIfNeeded()
         startRuntimeIfNeeded()
         drainPendingExternalURLs()
     }
 
+    private func installMenuBarPanelIfNeeded() {
+        guard isPrimaryInstance, menuBarPanel == nil, let runtime else { return }
+        menuBarPanel = MenuBarPanelController(icon: runtime.menuBarIcon) {
+            StatusPopoverContent(
+                runtime: runtime,
+                onOpenSettings: { [weak self] in self?.openFromMenuBarPanel { $0.openSettingsWindow() } },
+                onAddDomain: { [weak self] in self?.openFromMenuBarPanel { $0.openOnboardingWindow() } },
+                onOpenConflicts: { [weak self] in self?.openFromMenuBarPanel { $0.openConflictsWindow() } }
+            )
+        }
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
-        guard !isPrimaryInstance else { return }
+        guard !isPrimaryInstance else {
+            DockIconPreference.apply(showsDockIcon: DockIconPreference.stored())
+            return
+        }
         NSApp.setActivationPolicy(.prohibited)
         closeSecondaryWindows()
         primaryApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
@@ -162,6 +164,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         UNUserNotificationCenter.current().delegate = self
         AppAppearance.stored().apply()
         didFinishLaunching = true
+        installMenuBarPanelIfNeeded()
         startRuntimeIfNeeded()
         drainPendingExternalURLs()
     }
@@ -205,7 +208,30 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // A Dock click shows or hides the menu bar panel, the same as clicking the status item.
+        if isPrimaryInstance, sender.activationPolicy() == .regular {
+            menuBarPanel?.toggle()
+        }
         return false
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard isPrimaryInstance else { return nil }
+        let menu = NSMenu()
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettingsFromDockMenu(_:)), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+        return menu
+    }
+
+    @objc private func openSettingsFromDockMenu(_ sender: Any?) {
+        openSettingsWindow()
+    }
+
+    /// The panel closes first, as `MenuBarExtra` did, so the window it opens is not covered.
+    private func openFromMenuBarPanel(_ open: (NimbusSyncAppDelegate) -> Void) {
+        menuBarPanel?.close()
+        open(self)
     }
 
     func openSettingsWindow() {
@@ -1731,6 +1757,7 @@ private struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
     @AppStorage(AppAppearance.preferenceKey) private var appearance = AppAppearance.system.rawValue
+    @AppStorage(DockIconPreference.preferenceKey) private var showsDockIcon = DockIconPreference.defaultValue
 
     init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
@@ -1903,6 +1930,13 @@ private struct SettingsView: View {
                         launchAtLogin = enabled
                         try? (enabled ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister())
                         launchAtLogin = SMAppService.mainApp.status == .enabled
+                    }))
+                }
+                SettingsRowDivider()
+                SettingsRow(symbol: "dock.rectangle", tint: .blue, title: "Show icon in Dock", subtitle: "When off, NimbusSync lives only in the menu bar.") {
+                    SettingsSwitch("Show NimbusSync icon in Dock", isOn: Binding(get: { showsDockIcon }, set: { shown in
+                        showsDockIcon = shown
+                        DockIconPreference.apply(showsDockIcon: shown)
                     }))
                 }
             }

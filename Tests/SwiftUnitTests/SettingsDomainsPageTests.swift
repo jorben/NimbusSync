@@ -102,4 +102,26 @@ final class SettingsDomainsPageTests: XCTestCase {
         XCTAssertEqual(AppAppearance.dark.appearanceName, .darkAqua)
         defaults.removePersistentDomain(forName: "SettingsDomainsPageTests.appearance")
     }
+
+    func testDockIconIsShownByDefault() throws {
+        let suite = "SettingsDomainsPageTests.dockIcon"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        XCTAssertTrue(DockIconPreference.stored(in: defaults), "never set means shown")
+        defaults.set(false, forKey: DockIconPreference.preferenceKey)
+        XCTAssertFalse(DockIconPreference.stored(in: defaults))
+        defaults.set(true, forKey: DockIconPreference.preferenceKey)
+        XCTAssertTrue(DockIconPreference.stored(in: defaults))
+        XCTAssertEqual(DockIconPreference.activationPolicy(showsDockIcon: true), .regular)
+        XCTAssertEqual(DockIconPreference.activationPolicy(showsDockIcon: false), .accessory)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    func testDockClickTogglesMenuBarPanel() {
+        let now = Date()
+        XCTAssertTrue(MenuBarPanelController.shouldOpenOnToggle(isPanelVisible: false, lastDismissedAt: nil, now: now), "closed panel opens")
+        XCTAssertFalse(MenuBarPanelController.shouldOpenOnToggle(isPanelVisible: true, lastDismissedAt: nil, now: now), "open panel closes")
+        XCTAssertFalse(MenuBarPanelController.shouldOpenOnToggle(isPanelVisible: false, lastDismissedAt: now.addingTimeInterval(-0.1), now: now), "the click that just dismissed the panel leaves it closed")
+        XCTAssertTrue(MenuBarPanelController.shouldOpenOnToggle(isPanelVisible: false, lastDismissedAt: now.addingTimeInterval(-5), now: now), "an old dismissal does not block reopening")
+    }
 }
