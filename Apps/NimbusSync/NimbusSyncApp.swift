@@ -1831,7 +1831,7 @@ private struct SettingsView: View {
                     .fixedSize()
                 }
             } footer: {
-                Text("Live updates keep your domains current. A full check catches anything they missed but uses more network and battery, so it runs at most this often while connected, counted from the last check. To check a domain right away, choose Check Now from its More menu on the Domains page.")
+                Text("Live updates keep your domains current. A full check catches anything they missed but uses more network and battery, so it runs at most this often while connected, counted from the last check. To check a domain right away, choose Full check now from its More menu on the Domains page.")
             }
 
             SettingsGroup("Notifications") {
@@ -2052,7 +2052,7 @@ private struct SettingsView: View {
                 Label("Reauthorize", systemImage: "person.crop.circle.badge.checkmark")
             }
             Button { onCheckNow(domain) } label: {
-                Label("Check Now", systemImage: "arrow.triangle.2.circlepath")
+                Label("Full check now", systemImage: "arrow.triangle.2.circlepath")
             }
             .disabled(!checkableDomainIdentifiers.contains(domain.identifier))
             Button { editingExclusionsDomainIdentifier = domain.identifier } label: {
