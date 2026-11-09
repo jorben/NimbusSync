@@ -150,12 +150,23 @@ public struct AppIconView: View {
         self.size = size
     }
 
+    /// The app bundles its icon rendered per appearance as `AppIconImage`, because
+    /// `applicationIconImage` follows the system appearance and ignores the app's own Theme.
+    private static let bundledImageName = "AppIconImage"
+    private static let hasBundledImage = NSImage(named: bundledImageName) != nil
+
     public var body: some View {
-        Image(nsImage: NSApplication.shared.applicationIconImage)
+        icon
             .resizable()
             .interpolation(.high)
             .frame(width: size, height: size)
             .accessibilityHidden(true)
+    }
+
+    private var icon: Image {
+        Self.hasBundledImage
+            ? Image(Self.bundledImageName, bundle: .main)
+            : Image(nsImage: NSApplication.shared.applicationIconImage)
     }
 }
 

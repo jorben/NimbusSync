@@ -4,6 +4,7 @@
 #   Design/AppIcon-Light.png (1024 × 1024, opaque, full bleed)  -> light appearance (default)
 #   Design/AppIcon-Dark.png  (1024 × 1024, opaque, full bleed)  -> dark appearance
 #     -> Apps/NimbusSync/AppIcon.icon  (Icon Composer document)
+#     -> Apps/NimbusSync/Assets.xcassets/AppIconImage.imageset  (in-app icon, light + dark)
 #
 # Run from the repository root:  Scripts/make-app-icon.sh
 #
@@ -15,6 +16,10 @@
 # Composer document: one layer whose image switches with the appearance, with Liquid Glass
 # effects off so the artwork renders as drawn. actool also derives AppIcon.icns from the light
 # rendering for macOS releases before 26, which have no dark app icons.
+#
+# NSApplication.applicationIconImage follows the system appearance, not the app's own Theme
+# setting, so views inside the app draw AppIconImage instead: the same document rendered by
+# ictool for each appearance, padded like the system icon (824 px artwork on a 1024 px canvas).
 set -eu
 
 light=Design/AppIcon-Light.png
@@ -57,3 +62,30 @@ cat > "$icon/icon.json" <<'JSON'
 }
 JSON
 echo "wrote $icon"
+
+ictool="$(xcode-select -p)/../Applications/Icon Composer.app/Contents/Executables/ictool"
+[ -x "$ictool" ] || { echo "error: ictool is missing (needs Xcode 26 or later): $ictool" >&2; exit 1; }
+imageset=Apps/NimbusSync/Assets.xcassets/AppIconImage.imageset
+rm -rf "$imageset"
+mkdir -p "$imageset"
+for rendition in Default Dark; do
+    out="$imageset/AppIconImage-$rendition.png"
+    "$ictool" "$icon" --export-image --output-file "$out" --platform macOS --rendition "$rendition" \
+        --width 824 --height 824 --scale 1 >/dev/null
+    sips --padToHeightWidth 1024 1024 "$out" --out "$out" >/dev/null
+    echo "wrote $out"
+done
+cat > "$imageset/Contents.json" <<'JSON'
+{
+  "images" : [
+    { "filename" : "AppIconImage-Default.png", "idiom" : "universal" },
+    {
+      "appearances" : [ { "appearance" : "luminosity", "value" : "dark" } ],
+      "filename" : "AppIconImage-Dark.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}
+JSON
+echo "wrote $imageset/Contents.json"
