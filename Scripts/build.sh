@@ -155,9 +155,15 @@ case "$SIGNING_MODE" in
         ;;
 esac
 
+app="$BUILD_ROOT/derived/Build/Products/$CONFIGURATION/NimbusSync.app"
+# Rebuild the app bundle every time so it never keeps an extension embedded by an
+# earlier incremental build. Xcode can skip re-copying an .appex whose only change is
+# its signature (for example a newly enabled hardened runtime), which leaves the old
+# signature inside a freshly signed app. Compiled objects stay incremental.
+rm -rf "$app"
+
 "$@"
 
-app="$BUILD_ROOT/derived/Build/Products/$CONFIGURATION/NimbusSync.app"
 [ -d "$app" ] || { printf '%s\n' "missing built app: $app" >&2; exit 1; }
 
 if [ "$SIGNING_MODE" = signed ]; then
