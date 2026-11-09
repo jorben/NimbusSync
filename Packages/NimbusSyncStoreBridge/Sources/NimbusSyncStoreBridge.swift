@@ -461,6 +461,15 @@ public final class SQLiteStateStore: @unchecked Sendable {
         }
     }
 
+    /// Changes only the Domain's local display name. Identity, scope, status, credentials and
+    /// sync state stay as they are. Returns false when this store has no row for the Domain.
+    @discardableResult
+    public func updateDomainDisplayName(identifier: String, displayName: String) throws -> Bool {
+        try withLock {
+            try executeReturningChanges("UPDATE domains SET display_name = '\(sql(displayName))' WHERE domain_id = '\(sql(identifier))'") > 0
+        }
+    }
+
     public func setDomainStatus(identifier: String, status: DomainStatus) throws {
         try withLock { try execute("UPDATE domains SET status = '\(status.rawValue)' WHERE domain_id = '\(sql(identifier))'") }
     }

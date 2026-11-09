@@ -78,6 +78,7 @@ public struct SettingsDomainsSummaryLine: View {
 
 // MARK: - Text
 
+
 public enum SettingsDomainText {
     /// "Last synced just now", "Last synced 2 min. ago", "Last synced Today, 09:12",
     /// "Last synced Yesterday, 18:40", "Last synced Nov 3, 09:12"; "Not synced yet" without a date.
@@ -99,6 +100,12 @@ public enum SettingsDomainText {
         let home = home.hasSuffix("/") ? String(home.dropLast()) : home
         guard !home.isEmpty, path == home || path.hasPrefix(home + "/") else { return path }
         return "~" + path.dropFirst(home.count)
+    }
+
+    /// The server folder a Domain is bound to, as a plain path: "/" for the whole drive,
+    /// "/Photos/2024" for a sub-folder. Falls back to the stored URI when it cannot be read.
+    public static func remotePath(of rootURI: String) -> String {
+        CloudreveRemoteURI.path(rootURI) ?? rootURI
     }
 
     /// The server's host for display: "cloudreve.example.com", keeping a non-default port.
@@ -148,9 +155,18 @@ public struct SettingsDomainCard<MenuItems: View>: View {
     public let isRemoving: Bool
     /// Another Domain is being removed; row actions wait for it.
     public let actionsDisabled: Bool
+    /// A rename for this Domain is being saved.
+    public let isRenaming: Bool
     public let onOpenFinder: () -> Void
     public let onOpenWeb: () -> Void
+    /// Saves a new local name; nil when this Domain cannot be renamed right now.
+    public let onRename: ((String) -> Void)?
     @ViewBuilder public let menuItems: () -> MenuItems
+
+    @State private var isEditingName = false
+    @State private var draftName = ""
+    @State private var isNameHovered = false
+    @FocusState private var nameFieldFocused: Bool
 
     public init(
         domain: DomainDescriptor,
@@ -160,8 +176,10 @@ public struct SettingsDomainCard<MenuItems: View>: View {
         lastSyncedAt: Date?,
         isRemoving: Bool,
         actionsDisabled: Bool,
+        isRenaming: Bool = false,
         onOpenFinder: @escaping () -> Void,
         onOpenWeb: @escaping () -> Void,
+        onRename: ((String) -> Void)? = nil,
         @ViewBuilder menuItems: @escaping () -> MenuItems
     ) {
         self.domain = domain
@@ -171,8 +189,10 @@ public struct SettingsDomainCard<MenuItems: View>: View {
         self.lastSyncedAt = lastSyncedAt
         self.isRemoving = isRemoving
         self.actionsDisabled = actionsDisabled
+        self.isRenaming = isRenaming
         self.onOpenFinder = onOpenFinder
         self.onOpenWeb = onOpenWeb
+        self.onRename = onRename
         self.menuItems = menuItems
     }
 
@@ -199,21 +219,27 @@ public struct SettingsDomainCard<MenuItems: View>: View {
             VStack(alignment: .leading, spacing: 4) {
                 // The badge never shrinks, so on a narrow card it moves under the name rather
                 // than squeezing the name down to an ellipsis.
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) {
-                        name.fixedSize()
-                        StatusBadge(status: domain.status)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        name
-                        StatusBadge(status: domain.status)
+                if isEditingName {
+                    nameField
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            name.fixedSize()
+                            StatusBadge(status: domain.status)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            name
+                            StatusBadge(status: domain.status)
+                        }
                     }
                 }
                 HStack(spacing: 7) {
                     ServerConnectionDot(connection: connection)
                     SettingsLinkButton(title: SettingsDomainText.host(of: domain.scope.origin), action: onOpenWeb)
+                        .layoutPriority(1)
                         .help("Open \(domain.scope.origin) in your browser")
                         .accessibilityLabel(Text("Open \(SettingsDomainText.host(of: domain.scope.origin)) in your browser"))
+                    remotePathItem
                 }
             }
 
@@ -223,12 +249,100 @@ public struct SettingsDomainCard<MenuItems: View>: View {
         }
     }
 
+    /// The server folder this Domain is bound to, beside the host it lives on.
+    private var remotePathItem: some View {
+        let path = SettingsDomainText.remotePath(of: domain.currentRootURI)
+        return HStack(spacing: 5) {
+            Text("·")
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Image(systemName: "externaldrive.connected.to.line.below")
+                .font(.system(size: 12))
+                .accessibilityHidden(true)
+            Text(path)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .help("Server folder: \(path)")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Server folder \(path)"))
+    }
+
+    private var canRename: Bool {
+        onRename != nil && !isRemoving && !actionsDisabled && !isRenaming
+    }
+
+    @ViewBuilder
     private var name: some View {
-        Text(domain.displayName)
-            .font(.system(size: 17, weight: .semibold))
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .help(domain.displayName)
+        let label = HStack(spacing: 6) {
+            Text(domain.displayName)
+                .font(.system(size: 17, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if isRenaming {
+                ProgressView().controlSize(.mini)
+            } else if canRename {
+                Image(systemName: "pencil")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .opacity(isNameHovered ? 1 : 0)
+                    .accessibilityHidden(true)
+            }
+        }
+        if canRename {
+            Button(action: beginEditingName) { label.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .onHover { isNameHovered = $0 }
+                .help("Click to rename \(domain.displayName)")
+                .accessibilityLabel(Text(domain.displayName))
+                .accessibilityHint(Text("Rename this domain"))
+        } else {
+            label.help(domain.displayName)
+        }
+    }
+
+    /// The name as an editable field: Return saves, Escape or an empty name cancels, and
+    /// clicking elsewhere saves too.
+    private var nameField: some View {
+        TextField("Domain name", text: $draftName)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 15, weight: .semibold))
+            .frame(maxWidth: 320)
+            .focused($nameFieldFocused)
+            .onSubmit(commitName)
+            .onExitCommand(perform: cancelEditingName)
+            .onChange(of: nameFieldFocused) { focused in
+                if !focused && isEditingName { commitName() }
+            }
+            .onChange(of: draftName) { value in
+                if value.count > DomainDescriptor.maxDisplayNameLength { draftName = String(value.prefix(DomainDescriptor.maxDisplayNameLength)) }
+            }
+            .accessibilityLabel(Text("Domain name"))
+    }
+
+    private func beginEditingName() {
+        guard canRename else { return }
+        draftName = domain.displayName
+        isEditingName = true
+        DispatchQueue.main.async { nameFieldFocused = true }
+    }
+
+    private func commitName() {
+        guard isEditingName else { return }
+        isEditingName = false
+        nameFieldFocused = false
+        let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != domain.displayName else { return }
+        onRename?(trimmed)
+    }
+
+    private func cancelEditingName() {
+        isEditingName = false
+        nameFieldFocused = false
+        draftName = domain.displayName
     }
 
     @ViewBuilder

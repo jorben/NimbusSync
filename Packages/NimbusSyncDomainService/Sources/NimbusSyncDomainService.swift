@@ -10,6 +10,8 @@ public enum DomainProvisioningError: Error, Equatable, LocalizedError, Sendable 
     case rootUnavailable
     case invalidDisplayName
     case displayNameUnavailable
+    case displayNameInUse
+    case renameUnavailable
     case system(String)
     case rollbackRequired(String)
 
@@ -25,6 +27,10 @@ public enum DomainProvisioningError: Error, Equatable, LocalizedError, Sendable 
             "Choose a non-empty domain name without control characters."
         case .displayNameUnavailable:
             "A Finder location with this name already exists. Choose a different name, or remove the old NimbusSync location in System Settings."
+        case .displayNameInUse:
+            "Another domain already uses this name. Choose a different name."
+        case .renameUnavailable:
+            "This domain can't be renamed while it is being removed or repaired."
         case .system:
             "NimbusSync could not complete the File Provider operation."
         case .rollbackRequired:
@@ -44,6 +50,10 @@ public enum DomainProvisioningError: Error, Equatable, LocalizedError, Sendable 
             "invalid_display_name"
         case .displayNameUnavailable:
             "display_name_unavailable"
+        case .displayNameInUse:
+            "display_name_in_use"
+        case .renameUnavailable:
+            "rename_unavailable"
         case let .system(detail), let .rollbackRequired(detail):
             detail
         }
@@ -133,12 +143,7 @@ public actor DomainRegistryService {
     }
 
     public func provision(displayName: String, scope: RemoteScope, credential: Credential, capabilitySnapshot: CapabilitySnapshot, iconURL: URL? = nil, resolveIdentity: @Sendable () async throws -> VerifiedDomainIdentity, firstRead: @Sendable () async throws -> Void) async throws -> DomainDescriptor {
-        let normalizedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedDisplayName.isEmpty,
-              normalizedDisplayName.count <= 128,
-              !normalizedDisplayName.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
-            throw DomainProvisioningError.invalidDisplayName
-        }
+        let normalizedDisplayName = try DomainDisplayName.normalized(displayName)
         let identity = try await resolveIdentity()
         guard identity.accountID == scope.accountID else { throw DomainProvisioningError.accountMismatch }
         guard !identity.rootRemoteID.isEmpty else { throw DomainProvisioningError.rootUnavailable }
@@ -288,6 +293,86 @@ public actor DomainRegistryService {
         }
         let nsError = error as NSError
         return "error:\(nsError.domain):\(nsError.code)"
+    }
+}
+
+/// The rules a Domain's user-visible name follows, shared by adding and renaming.
+public enum DomainDisplayName {
+    /// The trimmed name, or `invalidDisplayName` when it is empty, too long or has control characters.
+    public static func normalized(_ rawValue: String) throws -> String {
+        let name = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              name.count <= DomainDescriptor.maxDisplayNameLength,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw DomainProvisioningError.invalidDisplayName
+        }
+        return name
+    }
+}
+
+/// Renames a Domain locally: the registry and Domain database rows and, when macOS has it
+/// registered, the Finder location's display name. The Domain identifier, remote scope,
+/// credential reference, status and sync state are never touched, so syncing carries on.
+public actor DomainRenameService {
+    private let store: SQLiteStateStore
+    private let domainStore: (@Sendable (String) throws -> SQLiteStateStore)?
+    private let registeredDomains: @Sendable () async throws -> [RegisteredDomainSnapshot]
+    private let updateSystemDomain: @Sendable (DomainDescriptor) async throws -> Void
+
+    public init(
+        store: SQLiteStateStore,
+        domainStore: (@Sendable (String) throws -> SQLiteStateStore)? = nil,
+        lifecycle: DomainLifecycleService = DomainLifecycleService(),
+        registeredDomains: (@Sendable () async throws -> [RegisteredDomainSnapshot])? = nil,
+        updateSystemDomain: (@Sendable (DomainDescriptor) async throws -> Void)? = nil
+    ) {
+        self.store = store
+        self.domainStore = domainStore
+        self.registeredDomains = registeredDomains ?? { try await lifecycle.registeredDomains() }
+        // addDomain with an identifier macOS already knows only updates its display name
+        // (and hidden state); the replicated root and its contents stay where they are.
+        self.updateSystemDomain = updateSystemDomain ?? { descriptor in
+            let domain = try lifecycle.makeSystemDomain(for: descriptor, trashEnabled: descriptor.capabilitySnapshot.canTrash)
+            try await lifecycle.add(domain)
+        }
+    }
+
+    /// Returns the name that was stored (trimmed).
+    @discardableResult
+    public func rename(descriptor: DomainDescriptor, to rawName: String) async throws -> String {
+        let name = try DomainDisplayName.normalized(rawName)
+        guard let stored = try store.domain(identifier: descriptor.identifier) else { throw StoreBridgeError.unknownDomain }
+        guard !stored.status.isLifecycleHold else { throw DomainProvisioningError.renameUnavailable }
+        guard stored.displayName != name else { return name }
+        let others = try store.allDomains().filter { $0.identifier != descriptor.identifier }
+        guard !others.contains(where: { $0.displayName.caseInsensitiveCompare(name) == .orderedSame }) else {
+            throw DomainProvisioningError.displayNameInUse
+        }
+        // A leftover system location with the same name (one the registry no longer knows)
+        // would show two identical entries in Finder's sidebar.
+        let system = try await registeredDomains()
+        if system.contains(where: { $0.identifier != descriptor.identifier && $0.displayName.caseInsensitiveCompare(name) == .orderedSame }) {
+            throw DomainProvisioningError.displayNameUnavailable
+        }
+        // Only refresh a location macOS already has: adding an unknown identifier would
+        // create a new Finder location rather than rename one.
+        let systemRegistered = system.contains { $0.identifier == descriptor.identifier }
+        var renamed = descriptor
+        renamed.displayName = name
+        if systemRegistered { try await updateSystemDomain(renamed) }
+        do {
+            if let domainStore { try domainStore(descriptor.identifier).updateDomainDisplayName(identifier: descriptor.identifier, displayName: name) }
+            guard try store.updateDomainDisplayName(identifier: descriptor.identifier, displayName: name) else { throw StoreBridgeError.unknownDomain }
+        } catch {
+            if systemRegistered {
+                var previous = descriptor
+                previous.displayName = stored.displayName
+                try? await updateSystemDomain(previous)
+                if let domainStore { _ = try? domainStore(descriptor.identifier).updateDomainDisplayName(identifier: descriptor.identifier, displayName: stored.displayName) }
+            }
+            throw error
+        }
+        return name
     }
 }
 

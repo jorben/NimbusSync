@@ -59,6 +59,9 @@ struct NimbusSyncApp: App {
             domainRemovalError: Binding<String?>(get: { runtime.domainRemovalError }, set: { runtime.domainRemovalError = $0 }),
             exclusionError: Binding<String?>(get: { runtime.exclusionError }, set: { runtime.exclusionError = $0 }),
             removingDomainIdentifier: runtime.removingDomainIdentifier,
+            renamingDomainIdentifier: runtime.renamingDomainIdentifier,
+            domainRenameError: Binding<String?>(get: { runtime.domainRenameError }, set: { runtime.domainRenameError = $0 }),
+            onRename: runtime.renameDomain,
             onOpenFinder: runtime.openFinder,
             onOpenFileProviderSettings: runtime.openFileProviderSettings,
             onRemove: runtime.removeDomain,
@@ -576,6 +579,8 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published var domainRemovalError: String?
     @Published var exclusionError: String?
     @Published private(set) var removingDomainIdentifier: String?
+    @Published private(set) var renamingDomainIdentifier: String?
+    @Published var domainRenameError: String?
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
@@ -1415,6 +1420,28 @@ private final class NimbusSyncAppState: ObservableObject {
         }
     }
 
+    /// Renames a Domain locally and in Finder's sidebar. Identifier, server binding,
+    /// credentials and sync state are unchanged, so no supervisor restart is needed.
+    func renameDomain(_ domain: DomainDescriptor, to name: String) {
+        guard renamingDomainIdentifier == nil, removingDomainIdentifier == nil else { return }
+        domainRenameError = nil
+        renamingDomainIdentifier = domain.identifier
+        Task {
+            do {
+                guard let registry else { throw StoreBridgeError.openFailed("App Group is unavailable") }
+                let factory = self.factory
+                let service = DomainRenameService(store: registry, domainStore: { try factory.domainStore(identifier: $0) })
+                try await service.rename(descriptor: domain, to: name)
+                lifecycleLogger.info("domain.renamed domain=\(domain.identifier, privacy: .public)")
+            } catch {
+                domainRenameError = userFacingError(error)
+            }
+            renamingDomainIdentifier = nil
+            reload()
+            refreshFinderIntegration()
+        }
+    }
+
     func finalizePreservedDomainRemoval(_ domain: DomainDescriptor) {
         guard removingDomainIdentifier == nil, domain.status == .preservedRemoval else { return }
         domainRemovalError = nil
@@ -1631,6 +1658,9 @@ private struct SettingsView: View {
     @Binding var domainRemovalError: String?
     @Binding var exclusionError: String?
     let removingDomainIdentifier: String?
+    let renamingDomainIdentifier: String?
+    @Binding var domainRenameError: String?
+    let onRename: (DomainDescriptor, String) -> Void
     let onOpenFinder: (DomainDescriptor) -> Void
     let onOpenFileProviderSettings: () -> Void
     let onRemove: (DomainDescriptor) -> Void
@@ -1662,7 +1692,7 @@ private struct SettingsView: View {
     @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
     @AppStorage(AppAppearance.preferenceKey) private var appearance = AppAppearance.system.rawValue
 
-    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
         self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
@@ -1671,6 +1701,9 @@ private struct SettingsView: View {
         _domainRemovalError = domainRemovalError
         _exclusionError = exclusionError
         self.removingDomainIdentifier = removingDomainIdentifier
+        self.renamingDomainIdentifier = renamingDomainIdentifier
+        _domainRenameError = domainRenameError
+        self.onRename = onRename
         self.onOpenFinder = onOpenFinder
         self.onOpenFileProviderSettings = onOpenFileProviderSettings
         self.onRemove = onRemove
@@ -1745,6 +1778,11 @@ private struct SettingsView: View {
             Button("OK", role: .cancel) { domainRemovalError = nil }
         } message: {
             Text(domainRemovalError ?? "The domain could not be removed.")
+        }
+        .alert("Unable to rename domain", isPresented: Binding(get: { domainRenameError != nil }, set: { if !$0 { domainRenameError = nil } })) {
+            Button("OK", role: .cancel) { domainRenameError = nil }
+        } message: {
+            Text(domainRenameError ?? "The domain could not be renamed.")
         }
         .alert("Unable to update exclusions", isPresented: Binding(get: { exclusionError != nil }, set: { if !$0 { exclusionError = nil } })) {
             Button("OK", role: .cancel) { exclusionError = nil }
@@ -1844,7 +1882,7 @@ private struct SettingsView: View {
                     .fixedSize()
                 }
             } footer: {
-                Text("Live updates keep your domains current. A full check catches anything they missed but uses more network and battery, so it runs at most this often while connected, counted from the last check. To check a domain right away, choose Full check now from its More menu on the Domains page.")
+                Text("Catches anything live updates missed, at some cost in network and battery. To check a domain now, choose Full check now from its More menu.")
             }
 
             SettingsGroup("Notifications") {
@@ -2055,8 +2093,10 @@ private struct SettingsView: View {
             lastSyncedAt: lastSyncedAt[domain.identifier],
             isRemoving: removingDomainIdentifier == domain.identifier,
             actionsDisabled: removingDomainIdentifier != nil,
+            isRenaming: renamingDomainIdentifier == domain.identifier,
             onOpenFinder: { onOpenFinder(domain) },
-            onOpenWeb: { onOpenWeb(domain) }
+            onOpenWeb: { onOpenWeb(domain) },
+            onRename: domain.status.isLifecycleHold || renamingDomainIdentifier != nil ? nil : { onRename(domain, $0) }
         ) {
             Button { onOpenWeb(domain) } label: {
                 Label("Open Cloudreve", systemImage: "safari")

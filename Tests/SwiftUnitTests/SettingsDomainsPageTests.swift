@@ -51,6 +51,13 @@ final class SettingsDomainsPageTests: XCTestCase {
         XCTAssertEqual(SettingsDomainText.displayPath("/Volumes/Data", home: ""), "/Volumes/Data")
     }
 
+    func testRemotePathShowsTheBoundServerFolder() throws {
+        let root = try RemoteScope(origin: "https://cloud.example.com", accountID: "account", rootURI: "cloudreve://my/")
+        XCTAssertEqual(SettingsDomainText.remotePath(of: root.rootURI), "/")
+        let folder = try RemoteScope(origin: "https://cloud.example.com", accountID: "account", rootURI: "/Photos/2024")
+        XCTAssertEqual(SettingsDomainText.remotePath(of: folder.rootURI), "/Photos/2024")
+    }
+
     func testHostKeepsANonDefaultPort() {
         XCTAssertEqual(SettingsDomainText.host(of: "https://cloudreve.example.com"), "cloudreve.example.com")
         XCTAssertEqual(SettingsDomainText.host(of: "https://nas.example.org:5212"), "nas.example.org:5212")

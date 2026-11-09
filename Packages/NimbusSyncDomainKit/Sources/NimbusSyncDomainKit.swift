@@ -896,6 +896,9 @@ public enum DomainHealthReducer {
 }
 
 public struct DomainDescriptor: Codable, Equatable, Sendable {
+    /// The longest user-visible Domain name, for adding and renaming alike.
+    public static let maxDisplayNameLength = 128
+
     public let identifier: String
     public var displayName: String
     public var iconURL: URL?
