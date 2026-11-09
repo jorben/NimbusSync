@@ -572,6 +572,7 @@ private final class NimbusSyncAppState: ObservableObject {
     /// superseded one cannot overwrite the window's state when it finally finishes.
     private var addDomainTask: Task<Void, Never>?
     private var addDomainAttempt: UUID?
+    private var liveUpdateSkipReasons: [String: String] = [:]
     @Published var isProvisioningDomain = false
     @Published var onboardingError: String?
     @Published var finderError: String?
@@ -664,7 +665,30 @@ private final class NimbusSyncAppState: ObservableObject {
         }
         if let registry {
             let service = DomainRegistryService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
-            Task { await service.recoverProvisioning(); await service.removeOrphanedSystemDomains(); reload() }
+            Task {
+                await service.recoverProvisioning()
+                await logDomainInventory(service)
+                reload()
+            }
+        }
+    }
+
+    /// Which Domains the registry and macOS each know, and what the startup cleanup did about the
+    /// difference. A Domain only macOS knows keeps serving Finder from its own database with no
+    /// live updates or full checks; without this line nothing would show it exists.
+    private func logDomainInventory(_ service: DomainRegistryService) async {
+        for row in await service.unreadableDomains() {
+            lifecycleLogger.error("domain.inventory.unreadable domain=\(row.identifier, privacy: .public) status=\(row.status, privacy: .public) reason=\(row.reason, privacy: .public)")
+            ActivityLog.shared.error("lifecycle", "Domain record unreadable, so it is neither listed nor synced · domain=\(row.identifier) status=\(row.status) reason=\(row.reason)")
+        }
+        let report = await service.removeOrphanedSystemDomains()
+        let summary = report.summary
+        if report.failed.isEmpty && report.outcome == .checked {
+            lifecycleLogger.info("domain.inventory \(summary, privacy: .public)")
+            ActivityLog.shared.info("lifecycle", "Domain inventory · \(summary)")
+        } else {
+            lifecycleLogger.error("domain.inventory \(summary, privacy: .public)")
+            ActivityLog.shared.warning("lifecycle", "Domain inventory · \(summary)")
         }
     }
 
@@ -775,6 +799,15 @@ private final class NimbusSyncAppState: ObservableObject {
         return ServerConnectionDisplay(kind: kind, since: status.since, lastConnectedAt: status.lastConnectedAt)
     }
 
+    /// Why a Domain gets no live updates or full checks, logged when the reason changes rather
+    /// than on every refresh.
+    private func noteLiveUpdatesSkipped(_ descriptor: DomainDescriptor, reason: String) {
+        guard liveUpdateSkipReasons[descriptor.identifier] != reason else { return }
+        liveUpdateSkipReasons[descriptor.identifier] = reason
+        lifecycleLogger.error("domain.live_updates.skipped domain=\(descriptor.identifier, privacy: .public) reason=\(reason, privacy: .public)")
+        ActivityLog.shared.warning("lifecycle", "No live updates or full checks for a domain · domain=\(descriptor.identifier) reason=\(reason)")
+    }
+
     private func syncEventSupervisors(for domains: [DomainDescriptor]) {
         let desired = Set(domains.map(\.identifier))
         for identifier in Array(eventSupervisors.keys) where !desired.contains(identifier) {
@@ -783,6 +816,7 @@ private final class NimbusSyncAppState: ObservableObject {
         for descriptor in domains {
             if descriptor.status.isLifecycleHold {
                 if let supervisor = detachEventSupervisor(descriptor.identifier) { Task { await supervisor.stop() } }
+                noteLiveUpdatesSkipped(descriptor, reason: "status_\(descriptor.status.rawValue)")
                 continue
             }
             if eventSupervisors[descriptor.identifier] != nil, eventRootURIs[descriptor.identifier] != descriptor.currentRootURI,
@@ -790,9 +824,11 @@ private final class NimbusSyncAppState: ObservableObject {
                 Task { await supervisor.stop() }
             }
             guard eventSupervisors[descriptor.identifier] == nil else { continue }
-            guard let origin = URL(string: descriptor.scope.origin), let store = try? factory.domainStore(identifier: descriptor.identifier), (try? KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()).read(reference: descriptor.secretReference)) != nil else { continue }
+            guard let origin = URL(string: descriptor.scope.origin) else { noteLiveUpdatesSkipped(descriptor, reason: "origin"); continue }
+            guard let store = try? factory.domainStore(identifier: descriptor.identifier) else { noteLiveUpdatesSkipped(descriptor, reason: "domain_store"); continue }
+            guard (try? KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()).read(reference: descriptor.secretReference)) != nil else { noteLiveUpdatesSkipped(descriptor, reason: "credential_missing"); continue }
             let vault = KeychainCredentialVault(accessGroup: KeychainAccessGroup.current())
-            guard let clientID = try? store.ensureEventClientID() else { continue }
+            guard let clientID = try? store.ensureEventClientID() else { noteLiveUpdatesSkipped(descriptor, reason: "client_id"); continue }
             let streamFactory = CloudreveEventStreamFactory(origin: origin, uri: descriptor.currentRootURI, clientID: clientID, vault: vault, credentialReference: descriptor.secretReference)
             let identifier = descriptor.identifier
             let token = UUID()
@@ -801,7 +837,8 @@ private final class NimbusSyncAppState: ObservableObject {
                 await self?.reload()
             }, onConnectionStateChanged: { [weak self] state in
                 await self?.recordConnectionState(state, domainIdentifier: identifier, token: token)
-            }) else { continue }
+            }) else { noteLiveUpdatesSkipped(descriptor, reason: "runtime"); continue }
+            liveUpdateSkipReasons[descriptor.identifier] = nil
             let supervisor = EventSupervisor(factory: streamFactory, delegate: runtime)
             eventSupervisors[descriptor.identifier] = supervisor
             eventSupervisorTokens[descriptor.identifier] = token

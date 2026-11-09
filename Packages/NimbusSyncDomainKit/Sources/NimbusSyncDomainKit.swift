@@ -50,6 +50,17 @@ public struct RemoteScope: Codable, Hashable, Sendable {
 
     public var key: String { "\(origin)\u{0}\(accountID)\u{0}\(rootURI)" }
 
+    /// Why these parts do not make a scope, as a fixed word safe to log; nil when they do.
+    public static func invalidityReason(origin: String, accountID: String, rootURI: String) -> String? {
+        if (try? RemoteScope(origin: origin, accountID: accountID, rootURI: rootURI)) != nil { return nil }
+        if accountID.isEmpty || accountID.contains(where: { $0 == "\0" || $0.isWhitespace }) { return "account" }
+        guard let components = URLComponents(string: origin), let host = components.host, !host.isEmpty else { return "origin_unparsable" }
+        if components.scheme?.lowercased() != "https" { return "origin_not_https" }
+        if components.user != nil || components.password != nil || components.query != nil || components.fragment != nil { return "origin_extra_parts" }
+        if (try? CloudreveRemoteURI.canonical(rootURI, accountID: accountID)) == nil { return "root_uri:\(CloudreveRemoteURI.diagnosticShape(rootURI))" }
+        return "unknown"
+    }
+
     public func overlaps(_ other: RemoteScope) -> Bool {
         guard origin == other.origin, accountID == other.accountID else { return false }
         return CloudreveRemoteURI.overlaps(rootURI, other.rootURI)

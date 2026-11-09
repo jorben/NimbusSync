@@ -249,27 +249,50 @@ public actor DomainRegistryService {
     /// removal always preserves dirty user data (on macOS 14 and later; on
     /// older systems it fails closed and leaves the domain registered).
     @discardableResult
-    public func removeOrphanedSystemDomains() async -> [(identifier: String, preservedLocation: URL?)] {
-        guard let storedDomains = try? store.allDomains() else { return [] }
+    public func removeOrphanedSystemDomains() async -> OrphanedDomainCleanupReport {
+        let storedDomains: [StoredDomain]
+        do { storedDomains = try store.allDomains() } catch { return OrphanedDomainCleanupReport(outcome: .registryUnreadable) }
+        let registryIdentifiers = storedDomains.map(\.identifier)
         // An empty registry next to registered system domains is far more
         // likely a recreated/reset App Group database than a user who removed
         // every location; removing them all would make every sync location
         // disappear from Finder. Only prune when the registry has content.
-        guard !storedDomains.isEmpty else { return [] }
-        guard let systemDomains = try? await lifecycle.registeredDomains() else { return [] }
-        let registryIdentifiers = Set(storedDomains.map(\.identifier))
-        let orphanedIdentifiers = OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: registryIdentifiers)
-        var removed: [(identifier: String, preservedLocation: URL?)] = []
+        guard !storedDomains.isEmpty else { return OrphanedDomainCleanupReport(outcome: .registryEmpty) }
+        let systemDomains: [RegisteredDomainSnapshot]
+        do { systemDomains = try await lifecycle.registeredDomains() } catch {
+            return OrphanedDomainCleanupReport(outcome: .systemListingFailed, registryIdentifiers: registryIdentifiers, error: Self.errorCode(error))
+        }
+        let orphanedIdentifiers = OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: Set(registryIdentifiers))
+        var report = OrphanedDomainCleanupReport(outcome: .checked, registryIdentifiers: registryIdentifiers, systemIdentifiers: systemDomains.map(\.identifier))
         for snapshot in systemDomains where orphanedIdentifiers.contains(snapshot.identifier) {
             let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(snapshot.identifier), displayName: snapshot.displayName)
             do {
                 let preservedLocation = try await lifecycle.remove(domain, preserveDirtyData: true)
-                removed.append((snapshot.identifier, preservedLocation))
+                report.removed.append((snapshot.identifier, preservedLocation))
             } catch {
-                // Fail-closed: leave this domain registered and continue with the rest.
+                // Fail-closed: leave this domain registered and continue with the rest, but say
+                // why, or an orphan nobody manages keeps serving stale items without a trace.
+                report.failed.append((snapshot.identifier, Self.errorCode(error)))
             }
         }
-        return removed
+        return report
+    }
+
+    /// A redacted error code for diagnostics: the type, domain and code only, never a message.
+    static func errorCode(_ error: Error) -> String {
+        if let lifecycleError = error as? DomainLifecycleError { return lifecycleError.diagnosticDescription }
+        let nsError = error as NSError
+        return "\(nsError.domain):\(nsError.code)"
+    }
+
+    /// Registry rows that cannot be turned into a Domain, with which part is unreadable. They are
+    /// invisible everywhere else: not listed in Settings, never synced, yet never orphans either.
+    public func unreadableDomains() -> [(identifier: String, status: String, reason: String)] {
+        guard let stored = try? store.allDomains() else { return [] }
+        return stored.compactMap { domain in
+            guard let reason = RemoteScope.invalidityReason(origin: domain.origin, accountID: domain.accountID, rootURI: domain.rootURI) else { return nil }
+            return (domain.identifier, domain.status.rawValue, reason)
+        }
     }
 
     public func descriptors() throws -> [DomainDescriptor] {
@@ -482,5 +505,40 @@ public actor SafeDomainRemovalService {
         if store !== domainStore {
             try store.setDomainStatus(identifier: identifier, status: status)
         }
+    }
+}
+
+/// What the startup cleanup of system Domains without a registry record found and did.
+public struct OrphanedDomainCleanupReport: Sendable {
+    public enum Outcome: String, Sendable {
+        case checked
+        /// The registry could not be read; nothing was compared.
+        case registryUnreadable = "registry_unreadable"
+        /// The registry is empty, which looks like a reset database; nothing is removed.
+        case registryEmpty = "registry_empty"
+        case systemListingFailed = "system_listing_failed"
+    }
+
+    public var outcome: Outcome
+    public var registryIdentifiers: [String]
+    public var systemIdentifiers: [String]
+    public var removed: [(identifier: String, preservedLocation: URL?)] = []
+    public var failed: [(identifier: String, error: String)] = []
+    public var error: String?
+
+    public init(outcome: Outcome, registryIdentifiers: [String] = [], systemIdentifiers: [String] = [], error: String? = nil) {
+        self.outcome = outcome
+        self.registryIdentifiers = registryIdentifiers
+        self.systemIdentifiers = systemIdentifiers
+        self.error = error
+    }
+
+    /// One redacted line: identifiers and counts only.
+    public var summary: String {
+        var parts = ["outcome=\(outcome.rawValue)", "registry=\(registryIdentifiers.sorted().joined(separator: ","))", "system=\(systemIdentifiers.sorted().joined(separator: ","))"]
+        if !removed.isEmpty { parts.append("removed=\(removed.map(\.identifier).sorted().joined(separator: ","))") }
+        if !failed.isEmpty { parts.append("failed=\(failed.map { "\($0.identifier):\($0.error)" }.sorted().joined(separator: ","))") }
+        if let error { parts.append("error=\(error)") }
+        return parts.joined(separator: " ")
     }
 }
