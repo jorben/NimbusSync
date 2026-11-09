@@ -12,41 +12,66 @@ SIGNING_MODE=${SIGNING_MODE:-${NIMBUSSYNC_SIGNING_MODE:-unsigned}}
 APP_GROUP_IDENTIFIER=${APP_GROUP_IDENTIFIER:-${NIMBUSSYNC_APP_GROUP_IDENTIFIER:-group.ai.tiy.nimbussync}}
 CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY:-${CI_SIGNING_IDENTITY:-${NIMBUSSYNC_CODE_SIGN_IDENTITY:-}}}
 
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf '%s\n' "required tool not found: $1 ($2)" >&2
+        exit 127
+    }
+}
+
+# Fail closed: rg exits 0 when a forbidden pattern matches, 1 when the tree is
+# clean, and >=2 on any error (bad pattern, missing or unreadable path). Only a
+# clean "no match" may pass; every other status must stop the build.
+scan_forbidden() {
+    scan_message=$1
+    shift
+    scan_status=0
+    rg "$@" || scan_status=$?
+    case "$scan_status" in
+        0)
+            printf '%s\n' "$scan_message" >&2
+            return 1
+            ;;
+        1)
+            return 0
+            ;;
+        *)
+            printf '%s\n' "scan could not complete (rg exit $scan_status): $scan_message" >&2
+            return 1
+            ;;
+    esac
+}
+
 secret_scan() {
-    if rg -n \
+    scan_forbidden 'secret scan found a credential-like value' \
+        -n \
         --hidden \
         --glob '!Artifacts/**' \
         --glob '!.git/**' \
         --glob '!*.lock' \
         --glob '!Scripts/build.sh' \
         "(Bearer[[:space:]]+[A-Za-z0-9_-]{12,}|refresh_token[\"=:[:space:]]+[\"']?[A-Za-z0-9_-]{12,}[\"']?|signedUrl|signed_url)" \
-        "$ROOT"; then
-        printf '%s\n' 'secret scan found a credential-like value' >&2
-        return 1
-    fi
+        "$ROOT"
 }
 
 release_scan() {
-    if rg -n \
+    scan_forbidden 'release scan found a forbidden entitlement or transport exception' \
+        -n \
         'com\.apple\.developer\.fileprovider\.testing-mode|NSAllowsArbitraryLoads|allowInsecure|http://localhost|http://127\.0\.0\.1' \
         "$ROOT/Config/Release.xcconfig" \
         "$ROOT/Config/NimbusSyncRelease.entitlements" \
         "$ROOT/Config/NimbusSyncFileProviderRelease.entitlements" \
         "$ROOT/Config/NimbusSyncFileProviderUI.entitlements" \
-        "$ROOT/NimbusSync.xcodeproj"; then
-        printf '%s\n' 'release scan found a forbidden entitlement or transport exception' >&2
-        return 1
-    fi
+        "$ROOT/NimbusSync.xcodeproj"
 }
 
 artifact_scan() {
-    if [ -d "$ROOT/Artifacts" ] && rg -n \
+    [ -d "$ROOT/Artifacts" ] || return 0
+    scan_forbidden 'artifact scan found credential-like output' \
+        -n \
         --hidden \
         '(access_token|refresh_token|callback_secret|upload_urls|signed_url|signedUrl|Authorization)' \
-        "$ROOT/Artifacts"; then
-        printf '%s\n' 'artifact scan found credential-like output' >&2
-        return 1
-    fi
+        "$ROOT/Artifacts"
 }
 
 external_evidence_scan() {
@@ -66,6 +91,8 @@ external_evidence_scan() {
     fi
 }
 
+require_tool rg 'install with: brew install ripgrep'
+require_tool git 'install Xcode Command Line Tools'
 secret_scan
 release_scan
 artifact_scan
