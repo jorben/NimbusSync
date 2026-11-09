@@ -288,16 +288,16 @@ public final class SQLiteStateStore: @unchecked Sendable {
                     try executeRaw("ALTER TABLE domains ADD COLUMN icon_url TEXT")
                 }
                 if try !columnExists(table: "domain_actions", column: "created_at") {
-                    try executeRaw("ALTER TABLE domain_actions ADD COLUMN created_at INTEGER NOT NULL DEFAULT (unixepoch())")
+                    try addColumnUnlocked(table: "domain_actions", column: "created_at", definition: "INTEGER NOT NULL DEFAULT (unixepoch())")
                 }
                 if try !columnExists(table: "domain_actions", column: "updated_at") {
-                    try executeRaw("ALTER TABLE domain_actions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (unixepoch())")
+                    try addColumnUnlocked(table: "domain_actions", column: "updated_at", definition: "INTEGER NOT NULL DEFAULT (unixepoch())")
                 }
                 if try !columnExists(table: "domain_actions", column: "secret_ref") {
                     try executeRaw("ALTER TABLE domain_actions ADD COLUMN secret_ref TEXT")
                 }
                 if try !columnExists(table: "reconcile_runs", column: "started_at") {
-                    try executeRaw("ALTER TABLE reconcile_runs ADD COLUMN started_at INTEGER NOT NULL DEFAULT (unixepoch())")
+                    try addColumnUnlocked(table: "reconcile_runs", column: "started_at", definition: "INTEGER NOT NULL DEFAULT (unixepoch())")
                 }
                 if try !columnExists(table: "reconcile_runs", column: "completed_at") {
                     try executeRaw("ALTER TABLE reconcile_runs ADD COLUMN completed_at INTEGER")
@@ -368,7 +368,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
                     ("conflicts", "resolution_intent", "TEXT"),
                     ("conflicts", "resolution_state", "TEXT"),
                 ] {
-                    if try !columnExists(table: table, column: column) { try executeRaw("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)") }
+                    if try !columnExists(table: table, column: column) { try addColumnUnlocked(table: table, column: column, definition: definition) }
                 }
                 if try scalar("SELECT singleton FROM sync_state WHERE singleton = 1") == nil {
                     try executeRaw("INSERT INTO sync_state (singleton, epoch, next_sequence, min_valid_sequence, domain_version_revision, reconcile_status, projection_schema_revision, last_applied_projection_schema_revision) VALUES (1, '\(UUID().uuidString)', 1, 0, 0, 'initializing', \(ProjectionSchema.currentRevision), 0)")
@@ -1495,6 +1495,22 @@ public final class SQLiteStateStore: @unchecked Sendable {
         let statement = try prepare(sql); defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         return columnString(statement, 0)
+    }
+
+    /// SQLite refuses `ALTER TABLE ... ADD COLUMN` with a non-constant default
+    /// such as `(unixepoch())` once the table holds a row, which would fence
+    /// the whole store (and every Domain action that opens it). Add such a
+    /// column with a constant default and backfill existing rows with the
+    /// migration time instead; new tables keep the expression default.
+    private func addColumnUnlocked(table: String, column: String, definition: String) throws {
+        let expressionDefault = "DEFAULT (unixepoch())"
+        guard definition.contains(expressionDefault) else {
+            try executeRaw("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
+            return
+        }
+        let constantDefinition = definition.replacingOccurrences(of: expressionDefault, with: "DEFAULT 0")
+        try executeRaw("ALTER TABLE \(table) ADD COLUMN \(column) \(constantDefinition)")
+        try executeRaw("UPDATE \(table) SET \(column) = unixepoch()")
     }
 
     private func columnExists(table: String, column: String) throws -> Bool {

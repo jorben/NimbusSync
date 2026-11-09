@@ -1196,6 +1196,43 @@ final class NimbusSyncTests: XCTestCase {
         }
     }
 
+    func testMigrationAddsTimestampColumnsToPopulatedLegacyTables() throws {
+        // SQLite rejects ADD COLUMN with an expression default such as
+        // (unixepoch()) once the table has rows; that used to fence the store
+        // and made the Domain impossible to open or remove.
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-legacy-timestamps-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try SQLiteStateStore(url: url)
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        let legacy = """
+        DROP TABLE system_set_state;
+        CREATE TABLE system_set_state (set_kind TEXT PRIMARY KEY, system_anchor BLOB, refresh_required INTEGER NOT NULL DEFAULT 0, refresh_cursor BLOB, last_completed_at INTEGER);
+        INSERT INTO system_set_state (set_kind, refresh_required) VALUES ('pending', 1);
+        DROP TABLE domain_actions;
+        CREATE TABLE domain_actions (action_id TEXT PRIMARY KEY, domain_id TEXT NOT NULL, kind TEXT NOT NULL, step TEXT NOT NULL, state TEXT NOT NULL, error TEXT);
+        INSERT INTO domain_actions (action_id, domain_id, kind, step, state) VALUES ('legacy-action', 'legacy-domain', 'provision', 'registered', 'completed');
+        """
+        XCTAssertEqual(sqlite3_exec(handle, legacy, nil, nil, nil), SQLITE_OK)
+        if let handle { sqlite3_close(handle) }
+
+        let migrated = try SQLiteStateStore(url: url)
+        XCTAssertEqual(try migrated.schemaFence().migrationState, "ready")
+        XCTAssertEqual(try migrated.pendingSetState().capped, false)
+        XCTAssertEqual(Set(try migrated.schemaManifest().columns["system_set_state"] ?? []), Set(["set_kind", "system_anchor", "refresh_required", "refresh_cursor", "current_generation", "active_generation", "active_owner", "active_started_at", "scan_state", "maximum_size_reached", "domain_version", "last_completed_at", "updated_at"]))
+
+        var readHandle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &readHandle, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { if let readHandle { sqlite3_close(readHandle) } }
+        for query in ["SELECT updated_at FROM system_set_state WHERE set_kind = 'pending'", "SELECT created_at FROM domain_actions WHERE action_id = 'legacy-action'"] {
+            var statement: OpaquePointer?
+            XCTAssertEqual(sqlite3_prepare_v2(readHandle, query, -1, &statement, nil), SQLITE_OK)
+            XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+            XCTAssertGreaterThan(sqlite3_column_int64(statement, 0), 0)
+            sqlite3_finalize(statement)
+        }
+    }
+
     func testV6ShapeMigrationKeepsItemColumnTypes() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-v6-shape-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: url) }
