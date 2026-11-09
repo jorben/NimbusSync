@@ -94,7 +94,8 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         try ensureLease(operation)
         // The item identifier comes from the system template, so a stored remote ID means an
         // earlier attempt for this template reached the server and its outcome was lost.
-        let hasPriorRemoteEvidence = !((try store.item(identifier: template.itemIdentifier))?.remoteID ?? "").isEmpty
+        let priorRemoteID = (try store.item(identifier: template.itemIdentifier))?.remoteID.flatMap { $0.isEmpty ? nil : $0 }
+        let hasPriorRemoteEvidence = priorRemoteID != nil
         if hasPriorRemoteEvidence && (template.kind == .folder || contents == nil) {
             do {
                 // `refreshItem` reads the stored remote ID, so it must run before `insertItem`.
@@ -111,7 +112,10 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
                 throw error
             }
         }
-        try store.insertItem(template)
+        // The placeholder keeps the prior remote ID so a later replay still sees the evidence.
+        var placeholder = template
+        if let priorRemoteID { placeholder.remoteID = priorRemoteID }
+        try store.insertItem(placeholder)
         try store.setPending(template.itemIdentifier, templateIdentifier: template.itemIdentifier)
         let task = try store.createTransferTask(operationID: operationID, itemIdentifier: template.itemIdentifier, direction: "upload", totalBytes: sourceFingerprint?.size)
         do {

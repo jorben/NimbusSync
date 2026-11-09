@@ -92,6 +92,28 @@ final class CreateReplayTests: XCTestCase {
         XCTAssertEqual(backend.createCalls, 2)
     }
 
+    func testRepeatedUnknownOutcomeFolderCreateReplayNameCollisionKeepsRemoteEvidence() async throws {
+        let (store, template, backend) = try await makeLostFolderCreate(name: "Twice")
+        var elsewhere = try XCTUnwrap(backend.firstCreated)
+        elsewhere.name = "Twice elsewhere"
+        backend.setRefreshResult(elsewhere)
+        backend.setCreateFailure(CoreFailure(code: .nameCollision, retryable: false, userActionRequired: true))
+        let coordinator = AsyncFileProviderMutationCoordinator(store: store, backend: backend)
+
+        for replay in 1...2 {
+            do {
+                _ = try await coordinator.create(template: template, contents: nil, fields: [], options: [], context: context(template.itemIdentifier))
+                XCTFail("replay \(replay) must not succeed")
+            } catch let failure as CoreFailure {
+                XCTAssertEqual(failure.code, .unknownOutcome, "replay \(replay) must not report a filename collision")
+            }
+            XCTAssertEqual(try store.latestOperation(itemIdentifier: template.itemIdentifier)?.operation.state, "unknown_outcome")
+            XCTAssertEqual(try store.item(identifier: template.itemIdentifier)?.remoteID, "remote-folder", "replay \(replay) must keep the earlier remote ID")
+        }
+        XCTAssertEqual(backend.createCalls, 3, "each replay's create attempt was rejected; none succeeded")
+        XCTAssertNotEqual(try store.latestOperation(itemIdentifier: template.itemIdentifier)?.operation.state, "committed")
+    }
+
     func testMayAlreadyExistCreateNameCollisionIsUnknownOutcome() async throws {
         let (store, template) = try makeFolderFixture(name: "Maybe")
         let backend = ScriptedCreateBackend()
