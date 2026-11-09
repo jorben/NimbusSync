@@ -114,7 +114,7 @@
 		A71000000000000000000007 = {isa = XCBuildConfiguration; baseConfigurationReference = A20000000000000000000010; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = ai.tiy.nimbussync.tests; PRODUCT_NAME = NimbusSyncTests; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NimbusSync.app/Contents/MacOS/NimbusSync"; }; name = Debug; };
 		A71000000000000000000008 = {isa = XCBuildConfiguration; baseConfigurationReference = A20000000000000000000011; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = ai.tiy.nimbussync.tests; PRODUCT_NAME = NimbusSyncTests; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NimbusSync.app/Contents/MacOS/NimbusSync"; }; name = Release; };
 		A7100000000000000000000B = {isa = XCBuildConfiguration; buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 6.0; }; name = Debug; };
-		A7100000000000000000000C = {isa = XCBuildConfiguration; buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 6.0; }; name = Release; };
+		A7100000000000000000000C = {isa = XCBuildConfiguration; buildSettings = { ENABLE_HARDENED_RUNTIME = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 6.0; }; name = Release; };
 		A7100000000000000000000D = {isa = XCBuildConfiguration; buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 6.0; }; name = Debug; };
 		A7100000000000000000000E = {isa = XCBuildConfiguration; buildSettings = { MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 6.0; }; name = Release; };
 /* End XCBuildConfiguration section */

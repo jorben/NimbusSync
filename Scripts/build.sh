@@ -43,8 +43,9 @@ scan_forbidden() {
 }
 
 secret_scan() {
+    # File names only: a matching line would copy the credential into the build log.
     scan_forbidden 'secret scan found a credential-like value' \
-        -n \
+        --files-with-matches \
         --hidden \
         --glob '!Artifacts/**' \
         --glob '!.git/**' \
@@ -68,10 +69,21 @@ release_scan() {
 artifact_scan() {
     [ -d "$ROOT/Artifacts" ] || return 0
     scan_forbidden 'artifact scan found credential-like output' \
-        -n \
+        --files-with-matches \
         --hidden \
         '(access_token|refresh_token|callback_secret|upload_urls|signed_url|signedUrl|Authorization)' \
         "$ROOT/Artifacts"
+}
+
+# Notarization rejects a Release bundle without the hardened runtime. An unmatched
+# PlugIns glob stays literal, so codesign fails on it and the build stops.
+require_hardened_runtime() {
+    for bundle in "$1" "$1"/Contents/PlugIns/*.appex; do
+        if ! codesign -d --verbose=2 "$bundle" 2>&1 | grep -q 'flags=.*runtime'; then
+            printf '%s\n' "signed bundle lacks the hardened runtime: $(basename "$bundle")" >&2
+            exit 1
+        fi
+    done
 }
 
 external_evidence_scan() {
@@ -150,6 +162,9 @@ app="$BUILD_ROOT/derived/Build/Products/$CONFIGURATION/NimbusSync.app"
 
 if [ "$SIGNING_MODE" = signed ]; then
     codesign --verify --deep --strict --verbose=2 "$app"
+    if [ "$CONFIGURATION" = Release ]; then
+        require_hardened_runtime "$app"
+    fi
 fi
 
 # Keep the bundle name stable. Renaming a signed .app after codesign breaks the

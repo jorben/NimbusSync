@@ -23,16 +23,31 @@ command -v jq >/dev/null 2>&1 || {
     printf '%s\n' 'jq is required to validate external evidence' >&2
     exit 2
 }
+command -v rg >/dev/null 2>&1 || {
+    printf '%s\n' 'rg is required to validate external evidence' >&2
+    exit 2
+}
 
 # Reports may contain only redacted versions, booleans, timings, capability
 # states, and short evidence references. In particular, never check in a
 # bearer credential, signed URL, remote URI, local path, or response body.
-if rg -n -i \
+# Fail closed like scan_forbidden in Scripts/build.sh: rg exits 0 on a match,
+# 1 when clean, and >=2 when the scan itself failed.
+scan_status=0
+rg -q -i \
     '(authorization|bearer[[:space:]]+[A-Za-z0-9._~+/=-]{8,}|access[_-]?token|refresh[_-]?token|signed[_-]?url|callback[_-]?secret|upload[_-]?urls|cloudreve://|https?://|file://|/Users/|/private/|/tmp/|response[_-]?body|password)' \
-    "$REPORT" >/dev/null 2>&1; then
-    printf '%s\n' 'external evidence contains a credential, URL, path, or response-body-like value' >&2
-    exit 1
-fi
+    "$REPORT" >/dev/null 2>&1 || scan_status=$?
+case "$scan_status" in
+    0)
+        printf '%s\n' 'external evidence contains a credential, URL, path, or response-body-like value' >&2
+        exit 1
+        ;;
+    1) ;;
+    *)
+        printf '%s\n' "evidence scan could not complete (rg exit $scan_status)" >&2
+        exit 2
+        ;;
+esac
 
 required_gates='[
   "stable_entity_identity",
