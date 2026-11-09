@@ -682,7 +682,7 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
             let batch = try store.enumerateChanges(domainIdentifier: domainIdentifier, scope: parentIdentifier, from: anchor, limit: max(1, min(suggestedBatchSize > 0 ? suggestedBatchSize : 200, 4_000)))
             var updates: [NSFileProviderItem] = []
             var deletes: [NSFileProviderItemIdentifier] = []
-            for change in orderedJournalChanges(batch.changes) {
+            for change in orderedJournalChanges(collapsedJournalChanges(batch.changes)) {
                 let kind = change.kind.lowercased()
                 let leavesDirectory = containerKind != .workingSet && change.oldParentIdentifier == parentIdentifier && change.newParentIdentifier != parentIdentifier
                 let leavesWorkingSet: Bool
@@ -724,7 +724,33 @@ open class NimbusSyncFileProviderEnumerator: NSObject, NSFileProviderEnumerator,
     }
 }
 
-private func orderedJournalChanges(_ changes: [JournalChange]) -> [JournalChange] {
+/// One batch can hold several commits for the same item; the system must only see its final
+/// state. Keeps one change per item: the latest change's kind, payload and new parent, with the
+/// old parent of the item's earliest change in the batch (first old parent, final new parent).
+/// Items keep the order of their first appearance.
+func collapsedJournalChanges(_ changes: [JournalChange]) -> [JournalChange] {
+    var earliest: [String: JournalChange] = [:]
+    var latest: [String: JournalChange] = [:]
+    var order: [String] = []
+    for change in changes {
+        let identifier = change.itemIdentifier
+        if let first = earliest[identifier] {
+            if change.sequence < first.sequence { earliest[identifier] = change }
+        } else {
+            earliest[identifier] = change
+            order.append(identifier)
+        }
+        if let last = latest[identifier], last.sequence > change.sequence { continue }
+        latest[identifier] = change
+    }
+    return order.compactMap { identifier in
+        guard let first = earliest[identifier], let last = latest[identifier] else { return nil }
+        guard first.sequence != last.sequence else { return last }
+        return JournalChange(sequence: last.sequence, epoch: last.epoch, itemIdentifier: identifier, oldParentIdentifier: first.oldParentIdentifier, newParentIdentifier: last.newParentIdentifier, kind: last.kind, version: last.version, origin: last.origin, providerVisible: last.providerVisible, itemPayload: last.itemPayload, itemVersion: last.itemVersion)
+    }
+}
+
+func orderedJournalChanges(_ changes: [JournalChange]) -> [JournalChange] {
     changes.enumerated().sorted { left, right in
         let leftChange = left.element
         let rightChange = right.element
@@ -985,6 +1011,10 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                     // Finder asked for the same file twice at once. The download already running
                     // owns the item's state and its own task; this attempt leaves no trace.
                     if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
+                } else if (error as? CoreFailure)?.code == .cancelled || error is CancellationError {
+                    // The user (or the system) cancelled the download; nothing failed.
+                    try? store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .none)
+                    if let transferTask { try? store?.deleteTransferTask(taskID: transferTask.taskID) }
                 } else if (error as? CoreFailure)?.isRemoteIdentityChanged == true {
                     // The backend deleted the stale item; tell the system so it leaves Finder.
                     // Nothing is left to retry, so nothing is listed as an issue either.
@@ -1014,7 +1044,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         progress.cancellationHandler = { [weak self] in
             taskBox.cancel()
             token.cancel()
-            try? self?.store?.requestCancel(itemIdentifier: templateIdentifier)
+            try? self?.store?.requestCancel(itemIdentifier: CloudreveIdentifier.item(forTemplate: templateIdentifier))
             completion.call(nil, fields, false, FileProviderErrorMapper.map(CoreFailure(code: .cancelled, retryable: false)))
         }
         let model: RemoteItem

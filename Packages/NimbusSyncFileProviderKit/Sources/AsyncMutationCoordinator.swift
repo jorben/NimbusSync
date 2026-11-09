@@ -76,6 +76,12 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         // create that already committed must not be repeated.
         try store.supersedeStaleOperations(itemIdentifier: template.itemIdentifier, exceptReplayKey: replayKey)
         if let existing = try store.latestOperation(itemIdentifier: template.itemIdentifier), existing.operation.replayKey != replayKey, existing.operation.state != "cancelled" {
+            // The system replays a create whose completion never arrived with other options
+            // (`mayAlreadyExist`) or fields; the same template and source already committed.
+            if Self.isCommittedCreate(existing, templateIdentifier: template.itemIdentifier, sourceKey: sourceKey),
+               let result = try committedResult(existing) {
+                return result
+            }
             throw operationMismatchFailure(existing.operation.state, stage: "create_source_replay_mismatch")
         }
         let operationID = stableOperationID(replayKey)
@@ -356,6 +362,17 @@ public final class AsyncFileProviderMutationCoordinator: @unchecked Sendable {
         try store.reopenOperation(replayKey: replayKey)
         guard let operation = try store.operation(replayKey: replayKey) else { throw CoreFailure(code: .database, retryable: false) }
         return operation
+    }
+
+    /// Matches a committed create replay key `create|<template>|<fields>|<options><sourceKey>` for
+    /// the same template and source, whatever fields and options the earlier attempt carried.
+    static func isCommittedCreate(_ operation: StoredOperation, templateIdentifier: String, sourceKey: String) -> Bool {
+        guard operation.operation.state == "committed", operation.operation.kind == "create" else { return false }
+        let key = operation.operation.replayKey
+        let prefix = "create|\(templateIdentifier)|"
+        guard key.hasPrefix(prefix), key.hasSuffix(sourceKey), key.count >= prefix.count + sourceKey.count else { return false }
+        let middle = key.dropFirst(prefix.count).dropLast(sourceKey.count).split(separator: "|", omittingEmptySubsequences: false)
+        return middle.count == 2 && middle.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
     }
 
     private func committedResult(_ operation: StoredOperation) throws -> RemoteItem? {

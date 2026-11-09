@@ -317,6 +317,13 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         var knownRemoteIDs = Set<String>()
         try store.updateSyncState(reconcileStatus: "scanning_normal")
         do {
+            // Live events keep changing items while folders are listed. Any non-reconciliation
+            // journal change after this position is newer than the listing that missed or
+            // trashed the item, so trash and deletion leave such an item alone.
+            let scanStartSequence = try store.syncState().currentSequence
+            func changedAfterScanStart(_ itemIdentifier: String) throws -> Bool? {
+                try store.hasJournalChange(itemIdentifier: itemIdentifier, after: scanStartSequence, excludingOrigin: "reconciliation")
+            }
             let root = try await fetchFile(id: descriptor.rootRemoteID)
         guard root.id == descriptor.rootRemoteID, root.type == 1 else { throw CoreFailure(code: .rootUnavailable, retryable: false, userActionRequired: true) }
         let rootPath = try CloudreveRemoteURI.canonical(root.path, accountID: descriptor.accountID)
@@ -478,6 +485,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 try? self.store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scannedBeforeTrash + listed, expected: expectedItems)
             }
             var unrepresentableTrash = 0
+            var trashChangedDuringScan = 0
             for file in trashFiles {
                 guard file.id != descriptor.rootRemoteID else { continue }
                 // The trash listing is account-wide. Its original location decides whether an
@@ -498,7 +506,16 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     unrepresentableTrash += 1
                     continue
                 }
-                let itemIdentifier = try store.itemIdentifier(forRemoteID: file.id) ?? CloudreveIdentifier.item()
+                let knownIdentifier = try store.itemIdentifier(forRemoteID: file.id)
+                // A live change (for example a restore) after the scan started is newer than this
+                // listing. When compaction removed the rows that would prove otherwise (nil), the
+                // known item is left as it is too: skipping a trash write is always safe.
+                if let knownIdentifier, try changedAfterScanStart(knownIdentifier) != false {
+                    seen.insert(file.id)
+                    trashChangedDuringScan += 1
+                    continue
+                }
+                let itemIdentifier = knownIdentifier ?? CloudreveIdentifier.item()
                 var item = try makeItem(file, parentIdentifier: NSFileProviderItemIdentifier.trashContainer.rawValue, itemIdentifier: itemIdentifier, accountID: descriptor.accountID, capabilities: descriptor.capabilitySnapshot)
                 let previous = try store.item(identifier: itemIdentifier)
                 item.trashed = true
@@ -516,9 +533,19 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 logger.info("reconcile.trash.skipped id=\(correlationID, privacy: .public) count=\(unrepresentableTrash, privacy: .public)")
                 ActivityLog.shared.info("sync", "Skipped \(unrepresentableTrash) trash entries this client cannot address")
             }
+            if trashChangedDuringScan > 0 {
+                logger.info("reconcile.trash.newer id=\(correlationID, privacy: .public) count=\(trashChangedDuringScan, privacy: .public)")
+            }
             try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.applyingDeletions.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
+            // Absence from the listing is only proof of deletion while the journal still holds
+            // every change since the scan started; otherwise deletion waits for the next check.
+            let deletionProofCompacted = try store.syncState().minSequence > scanStartSequence
+            if deletionProofCompacted {
+                logger.info("reconcile.deletions.skipped id=\(correlationID, privacy: .public) reason=journal_compacted")
+                ActivityLog.shared.info("sync", "Full check skipped deletion detection · reason=journal_compacted")
+            }
             var identitiesChecked = 0
-            for identity in try store.remoteIdentities() {
+            for identity in try (deletionProofCompacted ? [] : store.remoteIdentities()) {
                 identitiesChecked += 1
                 if identitiesChecked % 2_000 == 0 {
                     try? store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.applyingDeletions.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
@@ -530,6 +557,12 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                       let item = try store.item(identifier: identity.itemIdentifier),
                       item.remoteID == identity.remoteID,
                       !item.tombstone else { continue }
+                guard let changed = try changedAfterScanStart(identity.itemIdentifier) else {
+                    logger.info("reconcile.deletions.stopped id=\(correlationID, privacy: .public) reason=journal_compacted")
+                    ActivityLog.shared.info("sync", "Full check stopped deletion detection · reason=journal_compacted")
+                    break
+                }
+                if changed { continue }
                 var tombstone = item
                 tombstone.tombstone = true
                 _ = try store.commitProviderChange(item: tombstone, oldParentIdentifier: item.parentIdentifier, newParentIdentifier: nil, kind: "deleted", origin: "reconciliation")
@@ -1098,19 +1131,26 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         }
         if hasCompletedFullCheck() {
             let next: DomainStatus = (try? store.hasDirtyWork()) == true ? .syncing : .healthy
-            try? store.setDomainStatus(identifier: domainIdentifier, status: next)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: next)
+            writeDomainStatus(next)
         } else {
             // Without one finished check there is nothing current to show; report the gap
             // honestly until the first check succeeds.
-            try? store.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
+            writeDomainStatus(.eventDegraded)
         }
         return true
     }
 
     private func hasCompletedFullCheck() -> Bool {
         ((try? store.syncState())?.lastReconcileAt) != nil
+    }
+
+    /// The single path for runtime status writes. A removal or repair hold belongs to the
+    /// removal flow; a check or subscription that outlives `removeDomain` must not replace it.
+    private func writeDomainStatus(_ status: DomainStatus) {
+        if let current = try? store.domain(identifier: domainIdentifier)?.status, current.isLifecycleHold { return }
+        if let current = try? registry?.domain(identifier: domainIdentifier)?.status, current.isLifecycleHold { return }
+        try? store.setDomainStatus(identifier: domainIdentifier, status: status)
+        try? registry?.setDomainStatus(identifier: domainIdentifier, status: status)
     }
 
     /// Statuses a resumed subscription may replace; problems that need the user stay visible.
@@ -1121,20 +1161,17 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
               let current = try? store.domain(identifier: domainIdentifier)?.status,
               Self.statusesResumeMayReplace.contains(current) else { return }
         let next: DomainStatus = (try? store.hasDirtyWork()) == true ? .syncing : .healthy
-        try? store.setDomainStatus(identifier: domainIdentifier, status: next)
-        try? registry?.setDomainStatus(identifier: domainIdentifier, status: next)
+        writeDomainStatus(next)
     }
 
     public func markEventDegraded() async {
-        try? store.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
-        try? registry?.setDomainStatus(identifier: domainIdentifier, status: .eventDegraded)
+        writeDomainStatus(.eventDegraded)
         try? store.updateSyncState(reconcileStatus: "event_degraded")
     }
 
     public func markAuthenticationExpired() async {
         await publishConnectionState(.authExpired)
-        try? store.setDomainStatus(identifier: domainIdentifier, status: .authExpired)
-        try? registry?.setDomainStatus(identifier: domainIdentifier, status: .authExpired)
+        writeDomainStatus(.authExpired)
         try? store.updateSyncState(reconcileStatus: "auth_expired")
     }
 
@@ -1147,8 +1184,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     }
 
     private func performFullCheck(reason: String) async {
-        try? store.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
-        try? registry?.setDomainStatus(identifier: domainIdentifier, status: .reconciling)
+        writeDomainStatus(.reconciling)
         try? store.updateSyncState(reconcileStatus: "requested:\(reason)")
         do {
             guard let descriptor = try store.domain(identifier: domainIdentifier), let scope = try? RemoteScope(origin: descriptor.origin, accountID: descriptor.accountID, rootURI: descriptor.rootURI) else { throw CoreFailure(code: .unknownOutcome, retryable: true) }
@@ -1192,12 +1228,10 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
             } else {
                 nextStatus = .eventDegraded
             }
-            try? store.setDomainStatus(identifier: domainIdentifier, status: nextStatus)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: nextStatus)
+            writeDomainStatus(nextStatus)
         } catch let failure as CoreFailure {
             if failure.code == .scopeConflict {
-                try? store.setDomainStatus(identifier: domainIdentifier, status: .scopeConflict)
-                try? registry?.setDomainStatus(identifier: domainIdentifier, status: .scopeConflict)
+                writeDomainStatus(.scopeConflict)
                 return
             }
             if failure.code == .authentication {
@@ -1217,11 +1251,9 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         switch state {
         case .degraded: await markEventDegraded()
         case .offline:
-            try? store.setDomainStatus(identifier: domainIdentifier, status: .offline)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .offline)
+            writeDomainStatus(.offline)
         case .stopped:
-            try? store.setDomainStatus(identifier: domainIdentifier, status: .appNotRunning)
-            try? registry?.setDomainStatus(identifier: domainIdentifier, status: .appNotRunning)
+            writeDomainStatus(.appNotRunning)
         case .connecting:
             // The status waits for the server's reply: `resumed` keeps the Domain current,
             // `subscribed` starts a check.

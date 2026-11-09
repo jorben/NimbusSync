@@ -763,7 +763,7 @@ private final class NimbusSyncAppState: ObservableObject {
             if let supervisor = detachEventSupervisor(identifier) { Task { await supervisor.stop() } }
         }
         for descriptor in domains {
-            if descriptor.status == .removalPreflight || descriptor.status == .repairRequired || descriptor.status == .preservedRemoval {
+            if descriptor.status.isLifecycleHold {
                 if let supervisor = detachEventSupervisor(descriptor.identifier) { Task { await supervisor.stop() } }
                 continue
             }
@@ -1543,7 +1543,7 @@ private final class NimbusSyncAppState: ObservableObject {
     private func markApplicationNotRunning() async {
         await heartbeat.markQuit()
         for domain in snapshot.domains {
-            guard domain.status != .removalPreflight else { continue }
+            guard !domain.status.isLifecycleHold else { continue }
             try? registry?.setDomainStatus(identifier: domain.identifier, status: .appNotRunning)
             if let store = try? factory.domainStore(identifier: domain.identifier) {
                 try? store.setDomainStatus(identifier: domain.identifier, status: .appNotRunning)

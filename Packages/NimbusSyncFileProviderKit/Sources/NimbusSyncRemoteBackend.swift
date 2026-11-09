@@ -840,7 +840,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
                 return UploadPartCheckpoint(index: descriptor.index, offset: Int64(descriptor.offset), length: Int64(descriptor.length), sourceHash: sourceHash)
             }
             let checkpointChunkSize = provider == "upyun" ? max(1, Int64(content.count)) : Int64(chunkSize)
-            session = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: secretReference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts)
+            session = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: secretReference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts, itemIdentifier: itemIdentifier)
             cache = newCache
             try store.saveUploadSession(session!)
         }
@@ -1397,6 +1397,12 @@ private func mapAPIError(_ code: Int, message: String? = nil) -> CoreFailure {
         return CoreFailure(code: .permissionDenied, retryable: false)
     case 40009, 40010:
         return CoreFailure(code: .notFound, retryable: false)
+    case 40004:
+        // Object Already Exists: create, rename, move, or a new-file upload session hit a taken name.
+        return CoreFailure(code: .nameCollision, retryable: false, userActionRequired: true)
+    case 40076:
+        // Current Version is Stale: the server rejected the `previous` version this write was based on.
+        return CoreFailure(code: .versionConflict, retryable: false, userActionRequired: true)
     case 40081:
         return CoreFailure(code: .unknownOutcome, retryable: true)
     default:
@@ -1847,7 +1853,13 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             guard let previous = stored.remoteVersion, !previous.isEmpty else {
                 throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true, redactedContext: ["stage": "missing_previous_version"])
             }
-            result = try await uploadFileAsync(uri: stored.uri, source: source, previous: previous, itemIdentifier: stored.itemIdentifier, parentIdentifier: stored.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, context: context)
+            do {
+                result = try await uploadFileAsync(uri: stored.uri, source: source, previous: previous, itemIdentifier: stored.itemIdentifier, parentIdentifier: stored.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, context: context)
+            } catch let failure as CoreFailure where failure.code == .nameCollision {
+                // A version upload keeps the item's name; reporting a filename collision here
+                // would make the system rename the user's file.
+                throw CoreFailure(code: .unknownOutcome, retryable: false)
+            }
         }
         if request.changedFields.contains(.filename) {
             try validateName(request.item.name)
@@ -2175,6 +2187,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             }
 
             if cache == nil {
+                await supersedeEarlierUploadSessionsAsync(itemIdentifier: itemIdentifier, currentOperationID: operationID, uri: uri, context: context)
                 let reference = "transfer-\(operationID.uuidString)"
                 // An earlier attempt may have created a server session (and its placeholder
                 // file) and given up before recording it. Cloudreve then refuses a new session
@@ -2216,7 +2229,7 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
                         UploadPartCheckpoint(index: descriptor.index, offset: Int64(descriptor.offset), length: Int64(descriptor.length), sourceHash: provider == "upyun" ? sourceFingerprint.hash : Data())
                     }
                     let checkpointChunkSize = provider == "upyun" ? max(1, sourceFingerprint.size) : Int64(chunkSize)
-                    activeSession = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: reference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts)
+                    activeSession = UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: credential.sessionID, secretReference: reference, fingerprint: fingerprint, provider: provider, chunkSize: checkpointChunkSize, expiresAt: expiresAt, state: "active", parts: parts, itemIdentifier: itemIdentifier)
                     cache = newCache
                     try store.saveUploadSession(activeSession!)
                 } catch {
@@ -2380,6 +2393,37 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         if error is URLError { return true }
         guard let failure = error as? CoreFailure else { return false }
         return failure.retryable || failure.code == .network
+    }
+
+    /// A session kept for resuming an earlier upload of this item (interrupted or failed
+    /// transiently) belongs to other content once the item changed, so it can never be resumed.
+    /// Cloudreve still holds its placeholder and refuses a new session for the same path with
+    /// 40004 until it expires, so it is abandoned locally first (its parts must never mix with
+    /// the new content) and then cancelled on the server. Best effort: a failed cancel does not
+    /// fail the new upload.
+    private func supersedeEarlierUploadSessionsAsync(itemIdentifier: String, currentOperationID: UUID, uri: String, context: FileProviderOperationContext) async {
+        let superseded: [UploadSessionCheckpoint]
+        do {
+            superseded = try store.supersededUploadSessions(itemIdentifier: itemIdentifier, currentOperationID: currentOperationID)
+        } catch {
+            logger.error("upload.session.supersede_lookup_failed")
+            return
+        }
+        guard !superseded.isEmpty else { return }
+        logger.info("upload.session.superseded count=\(superseded.count, privacy: .public)")
+        ActivityLog.shared.info("upload", "Superseding earlier upload sessions for changed content · count=\(superseded.count)")
+        for session in superseded {
+            var abandoned = session
+            abandoned.state = "abandoned"
+            do {
+                try store.saveUploadSession(abandoned)
+            } catch {
+                logger.error("upload.session.supersede_save_failed")
+                continue
+            }
+            await cancelRemoteUploadSessionAsync(sessionID: session.remoteSessionReference, uri: uri, context: context)
+            if let reference = session.secretReference { discardTransferSecret(operationID: session.operationID, reference: reference) }
+        }
     }
 
     /// `DELETE file/upload {id, uri}` — what Cloudreve's own uploader sends for any session it

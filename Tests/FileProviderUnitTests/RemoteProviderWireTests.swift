@@ -361,6 +361,220 @@ final class RemoteProviderWireTests: XCTestCase {
         let cancel = try XCTUnwrap(sessionCalls[1].body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
         XCTAssertEqual(cancel["id"] as? String, "session-remote-1")
     }
+
+    /// A session kept for resuming an interrupted upload belongs to the old content. When the
+    /// user saves again, the new upload must abandon it and cancel it on the server before
+    /// asking for a new session, or Cloudreve refuses the new one with 40004 for about a day.
+    func testChangedContentSupersedesSessionKeptForEarlierContent() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let firstSource = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.storageStatus = 500
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: fixture.template, contents: firstSource, replayKey: "wire-supersede-a"),
+                context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+            )
+            XCTFail("the storage endpoint is failing")
+        } catch {}
+        backend = nil
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let kept = try XCTUnwrap(store.supersededUploadSessions(itemIdentifier: fixture.template.itemIdentifier, currentOperationID: UUID()).first)
+        XCTAssertEqual(kept.state, "active")
+        XCTAssertEqual(kept.remoteSessionReference, "session-remote-1")
+        let keptSecret = try XCTUnwrap(kept.secretReference)
+        XCTAssertNotNil(try fixture.secretVault.readSecret(reference: keptSecret))
+
+        protocolState.storageStatus = 200
+        let secondSource = try fixture.makeSource(Data("abcdefghij".utf8))
+        backend = fixture.makeBackend(protocolState: protocolState)
+        let result = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: secondSource, replayKey: "wire-supersede-b"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertEqual(result.remoteID, "remote-wire-remote")
+        let sessionCalls = protocolState.requests.filter { $0.url.path == "/api/v4/file/upload" }
+        XCTAssertEqual(sessionCalls.map(\.method), ["PUT", "DELETE", "PUT"])
+        let cancel = try XCTUnwrap(sessionCalls[1].body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(cancel["id"] as? String, "session-remote-1")
+        XCTAssertEqual(try store.uploadSession(operationID: kept.operationID)?.state, "abandoned")
+        XCTAssertNil(try store.uploadSession(operationID: kept.operationID)?.secretReference)
+        XCTAssertNil(try fixture.secretVault.readSecret(reference: keptSecret))
+        XCTAssertEqual(protocolState.requests.filter { $0.url.path == "/remote/upload" }.suffix(3).map(\.body), [Data("abcd".utf8), Data("efgh".utf8), Data("ij".utf8)])
+    }
+
+    func testChangedContentDoesNotCancelSessionKeptForAnotherItem() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let other = try fixture.makeTemplate(name: "other.bin")
+        let otherSource = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.storageStatus = 500
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: other, contents: otherSource, replayKey: "wire-other-item"),
+                context: fixture.makeContext(itemIdentifier: other.itemIdentifier)
+            )
+            XCTFail("the storage endpoint is failing")
+        } catch {}
+        backend = nil
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let kept = try XCTUnwrap(store.supersededUploadSessions(itemIdentifier: other.itemIdentifier, currentOperationID: UUID()).first)
+
+        protocolState.storageStatus = 200
+        let source = try fixture.makeSource(Data("abcdefghij".utf8))
+        backend = fixture.makeBackend(protocolState: protocolState)
+        _ = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: source, replayKey: "wire-this-item"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.method == "DELETE" })
+        let stillKept = try XCTUnwrap(store.uploadSession(operationID: kept.operationID))
+        XCTAssertEqual(stillKept.state, "active")
+        XCTAssertNotNil(try fixture.secretVault.readSecret(reference: try XCTUnwrap(stillKept.secretReference)))
+    }
+
+    /// Bytes of a verifying or completed session already landed; cancelling it could remove the
+    /// real file, so a new upload of the same item leaves it alone.
+    func testChangedContentDoesNotCancelVerifyingOrCompletedSessionOfSameItem() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        var seeded: [UploadSessionCheckpoint] = []
+        for state in ["verifying", "completed"] {
+            let reference = "transfer-seeded-\(state)"
+            try fixture.secretVault.writeSecret("opaque", reference: reference)
+            let session = UploadSessionCheckpoint(operationID: UUID(), remoteSessionReference: "session-seeded-\(state)", secretReference: reference, fingerprint: Data(state.utf8), provider: "remote", chunkSize: 4, expiresAt: Date().addingTimeInterval(3_600), state: state, itemIdentifier: fixture.template.itemIdentifier)
+            try store.saveUploadSession(session)
+            seeded.append(session)
+        }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        _ = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: source, replayKey: "wire-landed"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.method == "DELETE" })
+        for session in seeded {
+            XCTAssertEqual(try store.uploadSession(operationID: session.operationID)?.state, session.state)
+            XCTAssertNotNil(try fixture.secretVault.readSecret(reference: try XCTUnwrap(session.secretReference)))
+        }
+    }
+
+    /// A retry with the same content resumes its own session; nothing is cancelled.
+    func testSameContentRetryResumesItsOwnSessionWithoutCancelling() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.storageStatus = 500
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: fixture.template, contents: source, replayKey: "wire-same-content"),
+                context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+            )
+            XCTFail("the storage endpoint is failing")
+        } catch {}
+        backend = nil
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let kept = try XCTUnwrap(store.supersededUploadSessions(itemIdentifier: fixture.template.itemIdentifier, currentOperationID: UUID()).first)
+
+        protocolState.storageStatus = 200
+        backend = fixture.makeBackend(protocolState: protocolState)
+        let result = try await backend!.create(
+            CreateRequest(template: fixture.template, contents: source, replayKey: "wire-same-content"),
+            context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+        )
+        backend = nil
+
+        XCTAssertEqual(result.remoteID, "remote-wire-remote")
+        XCTAssertEqual(protocolState.requests.filter { $0.url.path == "/api/v4/file/upload" }.map(\.method), ["PUT"])
+        XCTAssertFalse(protocolState.requests.contains { $0.method == "DELETE" })
+        XCTAssertEqual(try store.uploadSession(operationID: kept.operationID)?.state, "completed")
+    }
+
+    /// Cloudreve answers 40004 (Object Already Exists) when a new file's name is taken; the
+    /// system must see a filename collision, not a sync failure.
+    func testUploadSessionObjectExistsOnCreateIsNameCollision() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.uploadSessionAPICode = 40004
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.create(
+                CreateRequest(template: fixture.template, contents: source, replayKey: "wire-exists"),
+                context: fixture.makeContext(itemIdentifier: fixture.template.itemIdentifier)
+            )
+            XCTFail("a taken name must be refused")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.code, .nameCollision)
+            XCTAssertFalse(failure.retryable)
+            XCTAssertEqual(FileProviderErrorMapper.map(failure).code, NSFileProviderError.filenameCollision.rawValue)
+        }
+        backend = nil
+    }
+
+    /// Cloudreve answers 40076 (Current Version is Stale) when `previous` is no longer current;
+    /// that is a version conflict so the conflict-copy recovery can run.
+    func testContentModifyStaleVersionIsVersionConflict() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let existing = try fixture.storeExistingFile()
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.uploadSessionAPICode = 40076
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.modify(
+                ModifyRequest(item: existing, expectedVersion: existing.version.content, changedFields: [.contents], contents: source, options: [], replayKey: "wire-stale"),
+                context: fixture.makeContext(itemIdentifier: existing.itemIdentifier)
+            )
+            XCTFail("a stale previous version must be refused")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.code, .versionConflict)
+            XCTAssertFalse(failure.retryable)
+        }
+        backend = nil
+        let body = try XCTUnwrap(protocolState.requests.first { $0.url.path == "/api/v4/file/upload" && $0.method == "PUT" }?.body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(body["previous"] as? String, existing.remoteVersion)
+    }
+
+    /// An in-place version upload keeps the item's name, so 40004 there must not surface as a
+    /// filename collision (the system would rename the user's file).
+    func testContentModifyObjectExistsIsNotNameCollision() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let existing = try fixture.storeExistingFile()
+        let source = try fixture.makeSource(Data("0123456789".utf8))
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        protocolState.uploadSessionAPICode = 40004
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        do {
+            _ = try await backend!.modify(
+                ModifyRequest(item: existing, expectedVersion: existing.version.content, changedFields: [.contents], contents: source, options: [], replayKey: "wire-modify-exists"),
+                context: fixture.makeContext(itemIdentifier: existing.itemIdentifier)
+            )
+            XCTFail("the upload session was refused")
+        } catch let failure as CoreFailure {
+            XCTAssertNotEqual(failure.code, .nameCollision)
+            XCTAssertEqual(failure.code, .unknownOutcome)
+            XCTAssertFalse(failure.retryable)
+        }
+        backend = nil
+    }
 }
 
 private final class DirectoryPageWireURLProtocol: URLProtocol {
@@ -516,6 +730,32 @@ private final class UploadWireFixture {
         try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: Self.capabilities(provider: provider)))
     }
 
+    /// Another new file in the root, so tests can tell sessions of different items apart.
+    func makeTemplate(name: String) throws -> RemoteItem {
+        RemoteItem(
+            itemIdentifier: CloudreveIdentifier.item(),
+            remoteID: nil,
+            parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue,
+            name: name,
+            uri: try CloudreveRemoteURI.append(rootURI, name: name),
+            kind: .file,
+            contentType: "public.data",
+            size: 0,
+            version: ItemVersion(content: Data("template".utf8), metadata: Data("template".utf8)),
+            canRead: true,
+            canWrite: true
+        )
+    }
+
+    /// Records the template as an existing remote file so a content modify has a `previous` version.
+    func storeExistingFile() throws -> RemoteItem {
+        var existing = template
+        existing.remoteID = "remote-wire-\(provider)"
+        existing.remoteVersion = "entity-\(provider)"
+        try SQLiteStateStore(url: storeURL).insertItem(existing)
+        return existing
+    }
+
     func makeSource(_ data: Data) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-wire-source-\(UUID().uuidString).bin")
         guard FileManager.default.createFile(atPath: url.path, contents: data) else { throw WireTestError.cannotCreateSource }
@@ -608,6 +848,7 @@ private final class UploadWireURLProtocol: URLProtocol {
         private var recordedRequests: [Request] = []
         private var sessionsCreated = 0
         private var storageStatusValue = 200
+        private var uploadSessionAPICodeValue: Int?
 
         init(provider: String, sourceSize: Int, mimeType: String = "text/plain", chunkSize: Int64 = 4) {
             self.provider = provider
@@ -620,6 +861,12 @@ private final class UploadWireURLProtocol: URLProtocol {
         var storageStatus: Int {
             get { lock.lock(); defer { lock.unlock() }; return storageStatusValue }
             set { lock.lock(); storageStatusValue = newValue; lock.unlock() }
+        }
+
+        /// Cloudreve envelope code `PUT file/upload` answers with instead of a session; nil serves a session.
+        var uploadSessionAPICode: Int? {
+            get { lock.lock(); defer { lock.unlock() }; return uploadSessionAPICodeValue }
+            set { lock.lock(); uploadSessionAPICodeValue = newValue; lock.unlock() }
         }
 
         /// Each `PUT file/upload` gets its own session ID so tests can tell which one was cancelled.
@@ -716,6 +963,9 @@ private final class UploadWireURLProtocol: URLProtocol {
         let path = request.url?.path ?? ""
         if path == "/api/v4/file/upload", request.httpMethod == "DELETE" {
             return (200, Data(#"{"code":0}"#.utf8))
+        }
+        if path == "/api/v4/file/upload", let code = state.uploadSessionAPICode {
+            return (200, Data("{\"code\":\(code),\"msg\":\"rejected\"}".utf8))
         }
         if path == "/api/v4/file/upload" {
             let uploadURL: String

@@ -59,7 +59,7 @@
     "system_set_state": ["set_kind", "system_anchor", "refresh_required", "refresh_cursor", "current_generation", "active_generation", "active_owner", "active_started_at", "scan_state", "maximum_size_reached", "domain_version", "last_completed_at", "updated_at"],
     "tasks": ["task_id", "operation_id", "item_identifier", "direction", "state", "bytes", "total_bytes", "error_code", "created_at", "updated_at"],
     "upload_parts": ["operation_id", "part_index", "offset", "length", "source_hash", "etag", "state", "attempt"],
-    "upload_sessions": ["operation_id", "remote_session_ref", "secret_ref", "fingerprint", "provider", "chunk_size", "expires_at", "state", "updated_at"],
+    "upload_sessions": ["operation_id", "remote_session_ref", "secret_ref", "fingerprint", "provider", "chunk_size", "expires_at", "state", "updated_at", "item_uuid"],
     "visited_containers": ["item_uuid", "last_seen_generation", "system_visible", "updated_at"]
   },
   "critical_columns": {

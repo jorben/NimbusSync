@@ -856,6 +856,11 @@ public struct SyncAnchor: Codable, Equatable, Sendable {
 
 public enum DomainStatus: String, Codable, Sendable {
     case initializing, healthy, syncing, reconciling, offline, eventDegraded = "event_degraded", appNotRunning = "app_not_running", authExpired = "auth_expired", rootUnavailable = "root_unavailable", scopeConflict = "scope_conflict", conflict, permanentError = "permanent_error", removalPreflight = "removal_preflight", repairRequired = "repair_required", preservedRemoval = "preserved_removal"
+
+    /// Removal/repair lifecycle states that only the removal flow may replace; runtime status writers must leave them intact.
+    public static let lifecycleHold: Set<DomainStatus> = [.removalPreflight, .repairRequired, .preservedRemoval]
+
+    public var isLifecycleHold: Bool { Self.lifecycleHold.contains(self) }
 }
 
 public struct HealthInputs: Equatable, Sendable {

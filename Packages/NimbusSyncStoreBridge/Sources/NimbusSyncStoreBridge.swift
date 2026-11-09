@@ -170,8 +170,10 @@ public struct UploadSessionCheckpoint: Codable, Equatable, Sendable {
     public let expiresAt: Date?
     public var state: String
     public var parts: [UploadPartCheckpoint]
-    public init(operationID: UUID, remoteSessionReference: String?, secretReference: String?, fingerprint: Data, provider: String, chunkSize: Int64, expiresAt: Date?, state: String = "active", parts: [UploadPartCheckpoint] = []) {
-        self.operationID = operationID; self.remoteSessionReference = remoteSessionReference; self.secretReference = secretReference; self.fingerprint = fingerprint; self.provider = provider; self.chunkSize = chunkSize; self.expiresAt = expiresAt; self.state = state; self.parts = parts
+    /// Item the session uploads for; nil for sessions recorded before it was tracked.
+    public let itemIdentifier: String?
+    public init(operationID: UUID, remoteSessionReference: String?, secretReference: String?, fingerprint: Data, provider: String, chunkSize: Int64, expiresAt: Date?, state: String = "active", parts: [UploadPartCheckpoint] = [], itemIdentifier: String? = nil) {
+        self.operationID = operationID; self.remoteSessionReference = remoteSessionReference; self.secretReference = secretReference; self.fingerprint = fingerprint; self.provider = provider; self.chunkSize = chunkSize; self.expiresAt = expiresAt; self.state = state; self.parts = parts; self.itemIdentifier = itemIdentifier
     }
     public func canResume(fingerprint: Data, now: Date = Date()) -> Bool { self.fingerprint == fingerprint && (expiresAt == nil || expiresAt! > now) && state != "abandoned" }
 }
@@ -301,6 +303,9 @@ public final class SQLiteStateStore: @unchecked Sendable {
                 }
                 if try !columnExists(table: "reconcile_runs", column: "completed_at") {
                     try executeRaw("ALTER TABLE reconcile_runs ADD COLUMN completed_at INTEGER")
+                }
+                if try !columnExists(table: "upload_sessions", column: "item_uuid") {
+                    try executeRaw("ALTER TABLE upload_sessions ADD COLUMN item_uuid TEXT")
                 }
                 for (column, definition) in [
                     ("trash_original_parent_uuid", "TEXT"),
@@ -992,6 +997,20 @@ public final class SQLiteStateStore: @unchecked Sendable {
         }
     }
 
+    /// Whether the journal holds a change to the item after `sequence` from an origin other than
+    /// `excludedOrigin`. Nil when compaction has removed rows after `sequence`, so a missing row
+    /// proves nothing. One statement reads both facts from the same snapshot.
+    public func hasJournalChange(itemIdentifier: String, after sequence: Int64, excludingOrigin excludedOrigin: String) throws -> Bool? {
+        try withLock {
+            let value = try scalar("SELECT CASE WHEN (SELECT min_valid_sequence FROM sync_state WHERE singleton = 1) > \(sequence) THEN -1 WHEN EXISTS (SELECT 1 FROM change_journal WHERE sequence > \(sequence) AND item_uuid = '\(sql(itemIdentifier))' AND origin <> '\(sql(excludedOrigin))') THEN 1 ELSE 0 END")
+            switch value {
+            case "1": return true
+            case "0": return false
+            default: return nil
+            }
+        }
+    }
+
     public func pendingOutboxCount() throws -> Int {
         try withLock { Int(try scalar("SELECT COUNT(*) FROM signal_outbox WHERE state = 'pending'") ?? "0") ?? 0 }
     }
@@ -1034,11 +1053,21 @@ public final class SQLiteStateStore: @unchecked Sendable {
             sqlite3_finalize(statement)
             guard let oldestKeptSequence else { return }
             let deletedThrough = max(0, oldestKeptSequence - 1)
-            let previousMinimum = Int64(try scalar("SELECT min_valid_sequence FROM sync_state WHERE singleton = 1") ?? "0") ?? 0
-            let effectiveMinimum = max(previousMinimum, deletedThrough)
-            try execute("DELETE FROM change_journal WHERE sequence <= \(effectiveMinimum)")
-            try execute("DELETE FROM signal_outbox WHERE state = 'acknowledged' AND working_set_revision <= \(effectiveMinimum)")
-            try execute("UPDATE sync_state SET min_valid_sequence = \(effectiveMinimum)")
+            // The app and the File Provider extension both compact; a reader in the other
+            // process must never see journal rows gone while `min_valid_sequence` is still old.
+            try ensureWritableUnlocked()
+            try executeRaw("BEGIN IMMEDIATE")
+            do {
+                let previousMinimum = Int64(try scalar("SELECT min_valid_sequence FROM sync_state WHERE singleton = 1") ?? "0") ?? 0
+                let effectiveMinimum = max(previousMinimum, deletedThrough)
+                try execute("DELETE FROM change_journal WHERE sequence <= \(effectiveMinimum)")
+                try execute("DELETE FROM signal_outbox WHERE state = 'acknowledged' AND working_set_revision <= \(effectiveMinimum)")
+                try execute("UPDATE sync_state SET min_valid_sequence = \(effectiveMinimum)")
+                try executeRaw("COMMIT")
+            } catch {
+                try? executeRaw("ROLLBACK")
+                throw error
+            }
         }
     }
 
@@ -1129,7 +1158,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
 
     public func saveUploadSession(_ session: UploadSessionCheckpoint) throws {
         try withLock {
-            try execute("INSERT OR REPLACE INTO upload_sessions (operation_id, remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state) VALUES ('\(session.operationID.uuidString)', \(nullable(session.remoteSessionReference)), \(nullable(session.secretReference)), X'\(session.fingerprint.hexString)', '\(sql(session.provider))', \(session.chunkSize), \(session.expiresAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "NULL"), '\(sql(session.state))')")
+            try execute("INSERT OR REPLACE INTO upload_sessions (operation_id, remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state, item_uuid) VALUES ('\(session.operationID.uuidString)', \(nullable(session.remoteSessionReference)), \(nullable(session.secretReference)), X'\(session.fingerprint.hexString)', '\(sql(session.provider))', \(session.chunkSize), \(session.expiresAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "NULL"), '\(sql(session.state))', \(nullable(session.itemIdentifier)))")
             try execute("DELETE FROM upload_parts WHERE operation_id = '\(session.operationID.uuidString)'")
             for part in session.parts {
                 try execute("INSERT INTO upload_parts (operation_id, part_index, offset, length, source_hash, etag, state, attempt) VALUES ('\(session.operationID.uuidString)', \(part.index), \(part.offset), \(part.length), X'\(part.sourceHash.hexString)', \(nullable(part.etag)), '\(sql(part.state))', \(part.attempt))")
@@ -1147,24 +1176,42 @@ public final class SQLiteStateStore: @unchecked Sendable {
 
     public func uploadSession(operationID: UUID) throws -> UploadSessionCheckpoint? {
         try withLock {
-            let statement = try prepare("SELECT remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state FROM upload_sessions WHERE operation_id = '\(operationID.uuidString)' LIMIT 1")
-            defer { sqlite3_finalize(statement) }
-            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-            let remoteReference = columnString(statement, 0)
-            let secretReference = columnString(statement, 1)
-            let fingerprint = columnBlob(statement, 2)
-            let provider = columnString(statement, 3) ?? "unknown"
-            let chunkSize = sqlite3_column_int64(statement, 4)
-            let expiresAt = sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 5)))
-            let state = columnString(statement, 6) ?? "active"
+            try uploadSessionsUnlocked(where: "operation_id = '\(operationID.uuidString)'").first
+        }
+    }
+
+    /// Sessions an earlier upload of the item left open on the server (kept for a resume that
+    /// can no longer happen once the content changed). `verifying` and `completed` sessions are
+    /// excluded: their bytes already landed, and cancelling them could remove the real file.
+    public func supersededUploadSessions(itemIdentifier: String, currentOperationID: UUID) throws -> [UploadSessionCheckpoint] {
+        try withLock {
+            try uploadSessionsUnlocked(where: "item_uuid = '\(sql(itemIdentifier))' AND state IN ('active', 'awaiting_source_replay') AND operation_id <> '\(currentOperationID.uuidString)'")
+        }
+    }
+
+    private func uploadSessionsUnlocked(where predicate: String) throws -> [UploadSessionCheckpoint] {
+        let statement = try prepare("SELECT operation_id, remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state, item_uuid FROM upload_sessions WHERE \(predicate) ORDER BY operation_id")
+        defer { sqlite3_finalize(statement) }
+        var sessions: [UploadSessionCheckpoint] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let operationID = columnString(statement, 0).flatMap(UUID.init(uuidString:)) else { continue }
+            let remoteReference = columnString(statement, 1)
+            let secretReference = columnString(statement, 2)
+            let fingerprint = columnBlob(statement, 3)
+            let provider = columnString(statement, 4) ?? "unknown"
+            let chunkSize = sqlite3_column_int64(statement, 5)
+            let expiresAt = sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 6)))
+            let state = columnString(statement, 7) ?? "active"
+            let itemIdentifier = columnString(statement, 8)
             let partsStatement = try prepare("SELECT part_index, offset, length, source_hash, etag, state, attempt FROM upload_parts WHERE operation_id = '\(operationID.uuidString)' ORDER BY part_index")
             defer { sqlite3_finalize(partsStatement) }
             var parts: [UploadPartCheckpoint] = []
             while sqlite3_step(partsStatement) == SQLITE_ROW {
                 parts.append(UploadPartCheckpoint(index: Int(sqlite3_column_int(partsStatement, 0)), offset: sqlite3_column_int64(partsStatement, 1), length: sqlite3_column_int64(partsStatement, 2), sourceHash: columnBlob(partsStatement, 3), etag: columnString(partsStatement, 4), state: columnString(partsStatement, 5) ?? "pending", attempt: Int(sqlite3_column_int(partsStatement, 6))))
             }
-            return UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: remoteReference, secretReference: secretReference, fingerprint: fingerprint, provider: provider, chunkSize: chunkSize, expiresAt: expiresAt, state: state, parts: parts)
+            sessions.append(UploadSessionCheckpoint(operationID: operationID, remoteSessionReference: remoteReference, secretReference: secretReference, fingerprint: fingerprint, provider: provider, chunkSize: chunkSize, expiresAt: expiresAt, state: state, parts: parts, itemIdentifier: itemIdentifier))
         }
+        return sessions
     }
 
     public func saveConflict(_ conflict: ConflictProjection) throws {
@@ -1594,7 +1641,7 @@ private enum Schema {
     CREATE TABLE IF NOT EXISTS pending_creations (system_template_id TEXT PRIMARY KEY, item_uuid TEXT NOT NULL, operation_id TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()));
     CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, replay_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, item_uuid TEXT, expected_version BLOB, changed_fields TEXT, source_generation INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, step TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_expires_at INTEGER, attempt INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER, outcome TEXT, error_code TEXT, history_hidden INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
     CREATE TABLE IF NOT EXISTS exclusion_intents (intent_id TEXT PRIMARY KEY, item_uuid TEXT, system_item_identifier TEXT, rule_revision INTEGER NOT NULL, kind TEXT NOT NULL, source_generation INTEGER NOT NULL, expected_version BLOB, path_hash BLOB, expires_at INTEGER, state TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), consumed_at INTEGER);
-    CREATE TABLE IF NOT EXISTS upload_sessions (operation_id TEXT PRIMARY KEY, remote_session_ref TEXT, secret_ref TEXT, fingerprint BLOB NOT NULL, provider TEXT NOT NULL, chunk_size INTEGER NOT NULL, expires_at INTEGER, state TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+    CREATE TABLE IF NOT EXISTS upload_sessions (operation_id TEXT PRIMARY KEY, remote_session_ref TEXT, secret_ref TEXT, fingerprint BLOB NOT NULL, provider TEXT NOT NULL, chunk_size INTEGER NOT NULL, expires_at INTEGER, state TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()), item_uuid TEXT);
     CREATE TABLE IF NOT EXISTS upload_parts (operation_id TEXT NOT NULL, part_index INTEGER NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, source_hash BLOB, etag TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(operation_id, part_index));
     CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, operation_id TEXT, item_identifier TEXT, direction TEXT NOT NULL, state TEXT NOT NULL, bytes INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER, error_code TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
     CREATE TABLE IF NOT EXISTS conflicts (conflict_id TEXT PRIMARY KEY, item_uuid TEXT, kind TEXT NOT NULL, base_metadata TEXT NOT NULL, remote_metadata TEXT NOT NULL, local_metadata TEXT NOT NULL, pending_item_id TEXT, source_generation INTEGER NOT NULL, state TEXT NOT NULL, resolution TEXT, remote_version BLOB, local_source_kind TEXT, expected_base_version BLOB, expected_source_hash BLOB, expected_source_size INTEGER, resolution_intent TEXT, resolution_state TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()));

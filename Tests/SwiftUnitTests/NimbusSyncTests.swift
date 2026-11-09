@@ -1233,6 +1233,37 @@ final class NimbusSyncTests: XCTestCase {
         }
     }
 
+    func testMigrationAddsUploadSessionItemColumnToPopulatedLegacyTable() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-legacy-upload-sessions-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try SQLiteStateStore(url: url)
+        let legacyOperationID = UUID()
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        let legacy = """
+        DROP TABLE upload_sessions;
+        CREATE TABLE upload_sessions (operation_id TEXT PRIMARY KEY, remote_session_ref TEXT, secret_ref TEXT, fingerprint BLOB NOT NULL, provider TEXT NOT NULL, chunk_size INTEGER NOT NULL, expires_at INTEGER, state TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+        INSERT INTO upload_sessions (operation_id, remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state) VALUES ('\(legacyOperationID.uuidString)', 'legacy-session', 'legacy-ref', X'01', 'remote', 4, NULL, 'active');
+        """
+        XCTAssertEqual(sqlite3_exec(handle, legacy, nil, nil, nil), SQLITE_OK)
+        if let handle { sqlite3_close(handle) }
+
+        let migrated = try SQLiteStateStore(url: url)
+        XCTAssertEqual(try migrated.schemaFence().migrationState, "ready")
+        XCTAssertEqual(try migrated.schemaManifest().columns["upload_sessions"], ["operation_id", "remote_session_ref", "secret_ref", "fingerprint", "provider", "chunk_size", "expires_at", "state", "updated_at", "item_uuid"])
+        let legacySession = try XCTUnwrap(migrated.uploadSession(operationID: legacyOperationID))
+        XCTAssertNil(legacySession.itemIdentifier)
+        XCTAssertEqual(legacySession.remoteSessionReference, "legacy-session")
+        XCTAssertEqual(legacySession.state, "active")
+
+        let itemIdentifier = CloudreveIdentifier.item()
+        let tracked = UploadSessionCheckpoint(operationID: UUID(), remoteSessionReference: "tracked-session", secretReference: nil, fingerprint: Data([2]), provider: "remote", chunkSize: 4, expiresAt: nil, state: "awaiting_source_replay", itemIdentifier: itemIdentifier)
+        try migrated.saveUploadSession(tracked)
+        XCTAssertEqual(try migrated.uploadSession(operationID: tracked.operationID)?.itemIdentifier, itemIdentifier)
+        XCTAssertEqual(try migrated.supersededUploadSessions(itemIdentifier: itemIdentifier, currentOperationID: UUID()).map(\.operationID), [tracked.operationID])
+        XCTAssertTrue(try migrated.supersededUploadSessions(itemIdentifier: itemIdentifier, currentOperationID: tracked.operationID).isEmpty)
+    }
+
     func testV6ShapeMigrationKeepsItemColumnTypes() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-v6-shape-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: url) }
