@@ -13,6 +13,8 @@ public struct MenuBarPopoverView: View {
     public let onOpenDomain: (DomainDescriptor) -> Void
     public let onCancelTask: (UUID) -> Void
     public let onRetryTask: (UUID) -> Void
+    /// Takes an issue off the list.
+    public let onClearTask: (UUID) -> Void
     /// Server connection per Domain identifier; a Domain without an entry shows no indicator.
     public let connections: [String: ServerConnectionDisplay]
     /// Running full checks per Domain identifier.
@@ -29,6 +31,9 @@ public struct MenuBarPopoverView: View {
     /// nil follows the content: Issues while there are any, All otherwise.
     @State private var activityFilter: ActivityFilter?
     @State private var showsAllActivity = false
+    /// Issues cleared here, hidden at once rather than after the store catches up. An ID leaves
+    /// once the tasks passed in no longer carry it, so a task that comes back is shown again.
+    @State private var clearedTaskIDs: Set<UUID> = []
     static let maximumContentHeight: CGFloat = 500
     /// Activity rows shown before "Show N more".
     static let activityRowLimit = 5
@@ -48,6 +53,7 @@ public struct MenuBarPopoverView: View {
         onOpenDomain: @escaping (DomainDescriptor) -> Void = { _ in },
         onCancelTask: @escaping (UUID) -> Void = { _ in },
         onRetryTask: @escaping (UUID) -> Void = { _ in },
+        onClearTask: @escaping (UUID) -> Void = { _ in },
         connections: [String: ServerConnectionDisplay] = [:],
         checkProgress: [String: DomainCheckProgress] = [:],
         checkableDomainIdentifiers: Set<String> = [],
@@ -64,6 +70,7 @@ public struct MenuBarPopoverView: View {
         self.onOpenDomain = onOpenDomain
         self.onCancelTask = onCancelTask
         self.onRetryTask = onRetryTask
+        self.onClearTask = onClearTask
         self.connections = connections
         self.checkProgress = checkProgress
         self.checkableDomainIdentifiers = checkableDomainIdentifiers
@@ -111,6 +118,9 @@ public struct MenuBarPopoverView: View {
         }
         .frame(minWidth: 380, idealWidth: NimbusSyncDesignTokens.popoverWidth, maxWidth: 420)
         .tint(NimbusSyncDesignTokens.brandColor)
+        .onChange(of: Set((tasks + recentTasks).map(\.id))) { ids in
+            clearedTaskIDs.formIntersection(ids)
+        }
     }
 
     // MARK: Header
@@ -297,7 +307,8 @@ public struct MenuBarPopoverView: View {
 
     /// Active tasks first, then the rest, newest first.
     private var allActivity: [TaskDisplay] {
-        tasks + recentTasks.filter { recent in !tasks.contains { $0.id == recent.id } }
+        (tasks + recentTasks.filter { recent in !tasks.contains { $0.id == recent.id } })
+            .filter { !clearedTaskIDs.contains($0.id) }
     }
 
     private var issues: [TaskDisplay] {
@@ -306,6 +317,18 @@ public struct MenuBarPopoverView: View {
 
     private var effectiveFilter: ActivityFilter {
         activityFilter ?? (issues.isEmpty ? .all : .issues)
+    }
+
+    /// Clears the given issues; once none are left the list moves to All rather than sitting on
+    /// an empty Issues tab.
+    private func clearIssues(_ ids: [UUID]) {
+        let remaining = issues.filter { !ids.contains($0.id) }
+        clearedTaskIDs.formUnion(ids)
+        ids.forEach(onClearTask)
+        if remaining.isEmpty {
+            activityFilter = .all
+            showsAllActivity = false
+        }
     }
 
     private var activitySection: some View {
@@ -355,9 +378,40 @@ public struct MenuBarPopoverView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, NimbusSyncDesignTokens.spacing8)
                     }
+                    if effectiveFilter == .issues {
+                        Divider()
+                        issueActions
+                    }
                 }
             }
         }
+    }
+
+    /// Retry All and Clear All under the Issues list; they act on every issue, not only the
+    /// rows shown.
+    private var issueActions: some View {
+        let retryable = issues.filter(\.canRetry)
+        return HStack(spacing: 0) {
+            if !retryable.isEmpty {
+                Button(action: { retryable.forEach { onRetryTask($0.id) } }) {
+                    Label("Retry All", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .help("Retry every issue that can be retried")
+                Divider().frame(height: 14)
+            }
+            Button(action: { clearIssues(issues.map(\.id)) }) {
+                Label("Clear All", systemImage: "xmark.circle")
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .help("Remove every issue from this list")
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
+        .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+        .padding(.vertical, NimbusSyncDesignTokens.spacing8)
     }
 
     private func dayHeader(_ title: String) -> some View {
@@ -396,13 +450,25 @@ public struct MenuBarPopoverView: View {
 
             Spacer(minLength: NimbusSyncDesignTokens.spacing4)
 
-            if task.canRetry {
-                Button(action: { onRetryTask(task.id) }) {
-                    Image(systemName: "arrow.clockwise")
+            if task.canRetry || task.canClear {
+                HStack(spacing: 6) {
+                    if task.canRetry {
+                        Button(action: { onRetryTask(task.id) }) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(PopoverIconButtonStyle())
+                        .help("Retry")
+                        .accessibilityLabel(Text("Retry \(task.title)"))
+                    }
+                    if task.canClear {
+                        Button(action: { clearIssues([task.id]) }) {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(PopoverIconButtonStyle())
+                        .help("Clear")
+                        .accessibilityLabel(Text("Clear \(task.title)"))
+                    }
                 }
-                .buttonStyle(PopoverIconButtonStyle())
-                .help("Retry")
-                .accessibilityLabel(Text("Retry \(task.title)"))
             } else if task.canCancel {
                 Button(action: { onCancelTask(task.id) }) {
                     Image(systemName: "xmark")

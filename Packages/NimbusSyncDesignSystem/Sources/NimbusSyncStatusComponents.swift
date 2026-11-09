@@ -12,7 +12,8 @@ public struct TaskDisplay: Identifiable, Sendable {
     public let date: Date?
     /// The Domain the task belongs to, shown before the reason in the popover.
     public let domainName: String?
-    /// False for work the app cannot start again itself, such as a download Finder asked for.
+    /// False for work the app cannot start again itself, such as a download on a system that
+    /// cannot be asked to download an item again.
     public let retryable: Bool
 
     public init(id: UUID, title: String, progress: Double?, detail: String, state: String, date: Date? = nil, domainName: String? = nil, retryable: Bool = true) {
@@ -29,7 +30,11 @@ public struct TaskDisplay: Identifiable, Sendable {
     /// A failed task, or one that needs the user before it can continue.
     public var isIssue: Bool { ["failed", "action_required"].contains(state.lowercased()) }
     /// A retry button that did nothing would be worse than none.
-    public var canRetry: Bool { retryable && state.canRetry }
+    /// Not offered for an item the server no longer has: that answer does not change on asking again.
+    public var canRetry: Bool { retryable && state.canRetry && !Self.permanentReasons.contains(detail.lowercased()) }
+    static let permanentReasons: Set<String> = ["not_found"]
+    /// Any issue can be taken off the list, whether or not it can be retried.
+    public var canClear: Bool { isIssue }
     public var canCancel: Bool { state.canCancel }
 
     /// Why the task stopped, or what it is doing, in words: "Network error", "Permission denied".

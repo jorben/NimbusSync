@@ -963,6 +963,8 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 try store?.assertProcessUsable()
                 try store?.setTransferState(identifier: itemIdentifier.rawValue, direction: "download", state: .running)
                 if let store {
+                    // This attempt answers for the item now; earlier failures are no longer news.
+                    try? store.deleteFailedTransferTasks(itemIdentifier: itemIdentifier.rawValue, direction: "download")
                     transferTask = try? store.createTransferTask(operationID: nil, itemIdentifier: itemIdentifier.rawValue, direction: "download", totalBytes: nil)
                 } else {
                     transferTask = nil

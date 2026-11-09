@@ -444,6 +444,7 @@ private struct StatusPopoverContent: View {
                 onOpenDomain: runtime.openFinder,
                 onCancelTask: runtime.cancelTask,
                 onRetryTask: runtime.retryTask,
+                onClearTask: runtime.clearTask,
                 connections: runtime.connectionDisplays,
                 checkProgress: runtime.snapshot.checkProgress,
                 checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
@@ -1487,16 +1488,50 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     func retryTask(_ taskID: UUID) {
+        let task = snapshot.tasks.first { $0.id == taskID }
         Task {
-            try? await productStore.retryTask(taskID)
+            if let task, task.isSystemDownload {
+                await requestDownloadAgain(task)
+            } else {
+                try? await productStore.retryTask(taskID)
+            }
             reload()
+        }
+    }
+
+    func clearTask(_ taskID: UUID) {
+        Task {
+            try? await productStore.clearTask(taskID)
+            reload()
+        }
+    }
+
+    /// Asks the system to download the item again, which runs the extension's fetch as if Finder
+    /// had opened it. The failed record goes once the request is accepted: the new attempt keeps
+    /// its own record, so a second failure is not listed twice.
+    private func requestDownloadAgain(_ task: ProductTask) async {
+        guard #available(macOS 14.0, *), let itemIdentifier = task.itemIdentifier,
+              let domain = snapshot.domains.first(where: { $0.identifier == task.domainIdentifier }),
+              let manager = NSFileProviderManager(for: configuredSystemDomain(for: domain)) else { return }
+        do {
+            try await manager.requestDownloadForItem(withIdentifier: NSFileProviderItemIdentifier(itemIdentifier))
+            ActivityLog.shared.info("sync", "Download retry requested by the user")
+            try? await productStore.clearTask(task.id)
+        } catch {
+            let code = (error as NSError).code
+            ActivityLog.shared.warning("sync", "Download retry could not start · code=\(code)")
         }
     }
 
     func taskDisplay(_ task: ProductTask) -> TaskDisplay {
         let state = task.errorCode == nil ? task.state.rawValue : (task.errorCode == "unknown_outcome" || task.errorCode == "version_conflict" || task.errorCode == "authentication_required" ? "action_required" : task.state.rawValue)
         let domainName = snapshot.domains.first { $0.identifier == task.domainIdentifier }?.displayName
-        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt, domainName: domainName, retryable: task.retryable)
+        return TaskDisplay(id: task.id, title: task.title, progress: task.progress, detail: task.errorCode ?? task.state.rawValue, state: state, date: task.updatedAt, domainName: domainName, retryable: task.retryable || canRequestDownload(task))
+    }
+
+    private func canRequestDownload(_ task: ProductTask) -> Bool {
+        guard #available(macOS 14.0, *) else { return false }
+        return task.isSystemDownload
     }
 
     private func resetEventSupervisor(domainIdentifier: String) async {

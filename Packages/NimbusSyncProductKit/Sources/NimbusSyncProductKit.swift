@@ -23,10 +23,14 @@ public struct ProductTask: Identifiable, Codable, Equatable, Sendable {
     public var errorCode: String?
     public var updatedAt: Date
     /// Whether `ProductStore.retryTask` can run it again. Only queued operations can; a download
-    /// is started by Finder, so a failed one is retried by opening the file again.
+    /// is started by the system, so a failed one is retried by asking the system to download the
+    /// item again (see `isSystemDownload`).
     public let retryable: Bool
     public init(id: UUID = UUID(), domainIdentifier: String, itemIdentifier: String? = nil, title: String, direction: ProductTaskDirection, state: ProductTaskState, processedBytes: Int64 = 0, totalBytes: Int64? = nil, speedBytesPerSecond: Int64? = nil, errorCode: String? = nil, updatedAt: Date = Date(), retryable: Bool = false) { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.title = title; self.direction = direction; self.state = state; self.processedBytes = processedBytes; self.totalBytes = totalBytes; self.speedBytesPerSecond = speedBytesPerSecond; self.errorCode = errorCode; self.updatedAt = updatedAt; self.retryable = retryable }
     public var progress: Double? { guard let totalBytes, totalBytes > 0 else { return nil }; return min(1, max(0, Double(processedBytes) / Double(totalBytes))) }
+    /// A download the system started for one item, outside the operation queue. The app retries
+    /// it through the File Provider manager rather than `ProductStore.retryTask`.
+    public var isSystemDownload: Bool { !retryable && direction == .download && itemIdentifier != nil }
 
     /// Drops failures nobody can retry once the same item later went through in the same
     /// direction: a download that failed and then succeeded is one success, not an issue.
@@ -263,6 +267,22 @@ public actor ProductStore {
                 try store.retryOperation(operationID: taskID)
                 return
             }
+        }
+    }
+
+    /// Takes one task off the activity list. An operation is only hidden, so its state and any
+    /// later retry are unaffected; a download record, which nothing else reads, is forgotten.
+    public func clearTask(_ taskID: UUID) throws {
+        guard let registry, let storeFactory else { return }
+        let stores = try registry.allDomains().compactMap { try? storeFactory.domainStore(identifier: $0.identifier) }
+        for store in stores {
+            if try store.operation(operationID: taskID) != nil {
+                try store.hideOperationFromHistory(operationID: taskID)
+                return
+            }
+        }
+        for store in stores {
+            try store.deleteTransferTask(taskID: taskID)
         }
     }
 

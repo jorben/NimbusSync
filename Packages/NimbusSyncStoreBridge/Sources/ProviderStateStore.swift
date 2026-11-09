@@ -460,6 +460,13 @@ public extension SQLiteStateStore {
         }
     }
 
+    /// Forgets an item's failed transfers in one direction, when a new attempt takes their place.
+    func deleteFailedTransferTasks(itemIdentifier: String, direction: String) throws {
+        try withLock {
+            try execute("DELETE FROM tasks WHERE operation_id IS NULL AND item_identifier = '\(sql(itemIdentifier))' AND direction = '\(sql(direction))' AND state = 'failed'")
+        }
+    }
+
     func latestTransferTask(operationID: UUID) throws -> TransferTaskSnapshot? {
         try withLock {
             let statement = try prepare("SELECT task_id, operation_id, item_identifier, direction, state, bytes, total_bytes, error_code, updated_at FROM tasks WHERE operation_id = '\(operationID.uuidString)' ORDER BY updated_at DESC, rowid DESC LIMIT 1")

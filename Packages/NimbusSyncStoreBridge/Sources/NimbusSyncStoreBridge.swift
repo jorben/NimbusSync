@@ -1346,7 +1346,7 @@ public final class SQLiteStateStore: @unchecked Sendable {
     /// Re-arms an operation when the system replays the identical callback.
     public func reopenOperation(replayKey: String) throws {
         try withLock {
-            try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, outcome = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch() WHERE replay_key = '\(sql(replayKey))' AND state IN (\(Self.reopenableOperationStates))")
+            try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, outcome = NULL, lease_owner = NULL, lease_expires_at = NULL, history_hidden = 0, updated_at = unixepoch() WHERE replay_key = '\(sql(replayKey))' AND state IN (\(Self.reopenableOperationStates))")
         }
     }
 
@@ -1362,7 +1362,15 @@ public final class SQLiteStateStore: @unchecked Sendable {
 
     public func retryOperation(operationID: UUID) throws {
         try withLock {
-            try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL, outcome = NULL, updated_at = unixepoch() WHERE operation_id = '\(operationID.uuidString)' AND state IN ('retry_wait', 'cancelled', 'permanently_failed')")
+            try execute("UPDATE operations SET state = 'queued', cancel_requested = 0, lease_owner = NULL, lease_expires_at = NULL, next_retry_at = NULL, outcome = NULL, history_hidden = 0, updated_at = unixepoch() WHERE operation_id = '\(operationID.uuidString)' AND state IN ('retry_wait', 'cancelled', 'permanently_failed')")
+        }
+    }
+
+    /// Takes one operation off the activity list without touching its state. Running it again,
+    /// by retry or by the system replaying the callback, puts it back.
+    public func hideOperationFromHistory(operationID: UUID) throws {
+        try withLock {
+            try execute("UPDATE operations SET history_hidden = 1 WHERE operation_id = '\(operationID.uuidString)'")
         }
     }
 
