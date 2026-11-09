@@ -1617,7 +1617,7 @@ public enum FileProviderErrorMapper {
         if let storeError = error as? StoreBridgeError {
             switch storeError {
             case .openFailed: return "store:open_failed"
-            case .sql: return "store:sql"
+            case .sql: return "store:sql:\(storeError.sqlCategory ?? "other")"
             case .schemaFenced: return "store:schema_fenced"
             case .anchorExpired: return "store:anchor_expired"
             case .pageTokenInvalid: return "store:page_token_invalid"

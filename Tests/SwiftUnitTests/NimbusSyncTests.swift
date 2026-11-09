@@ -846,6 +846,33 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertNil(try store.currentCompleteDirectorySnapshot(domainIdentifier: domainID, parentIdentifier: parent))
     }
 
+    /// A Finder enumeration resolves a page's identities before its network round trip; when the
+    /// app's full check records the same remote entity meanwhile, the page adopts that identity
+    /// instead of failing on the one-live-row-per-remote-entity index.
+    func testDirectorySnapshotAdoptsIdentityRecordedMeanwhile() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-snapshot-race-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = try SQLiteStateStore(url: url)
+        let domainID = CloudreveIdentifier.domain()
+        let scope = try RemoteScope(origin: "https://example.com", accountID: "account", rootURI: "/")
+        try store.registerDomain(DomainDescriptor(identifier: domainID, displayName: "Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential"))
+        let parent = NSFileProviderItemIdentifier.rootContainer.rawValue
+        let listed = RemoteItem(remoteID: "remote-race", parentIdentifier: parent, name: "race.txt", uri: "/race.txt", kind: .file, contentType: "public.data", version: ItemVersion(content: Data("v".utf8), metadata: Data("m".utf8)), canRead: true)
+        let snapshot = try store.beginDirectorySnapshot(domainIdentifier: domainID, parentIdentifier: parent, ttl: 600)
+
+        // The full check records the entity under its own identifier first.
+        let recorded = listed.reidentified(as: CloudreveIdentifier.item())
+        _ = try store.commitProviderChange(item: recorded, oldParentIdentifier: nil, newParentIdentifier: parent, kind: "reconciled", origin: "reconciliation")
+        XCTAssertNotEqual(recorded.itemIdentifier, listed.itemIdentifier)
+
+        try store.appendDirectorySnapshotItems(snapshotID: snapshot.snapshotID, items: [listed])
+        try store.publishDirectorySnapshot(snapshotID: snapshot.snapshotID)
+        let page = try store.directorySnapshotPage(domainIdentifier: domainID, parentIdentifier: parent, generation: snapshot.generation, snapshotID: snapshot.snapshotID, offset: 0, limit: 10)
+        XCTAssertEqual(page.items.map(\.itemIdentifier), [recorded.itemIdentifier])
+        XCTAssertEqual(try store.itemIdentifier(forRemoteID: "remote-race"), recorded.itemIdentifier)
+        XCTAssertNil(try store.item(identifier: listed.itemIdentifier), "no second row for the same remote entity")
+    }
+
     func testMaterializedPartialGenerationDoesNotClearPreviousFact() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-system-set-\(UUID().uuidString).sqlite3")
         let lockURL = FileManager.default.temporaryDirectory.appendingPathComponent("cloudreve-system-lock-\(UUID().uuidString)", isDirectory: true)

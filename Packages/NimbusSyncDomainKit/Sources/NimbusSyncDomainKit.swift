@@ -508,6 +508,12 @@ public struct RemoteItem: Codable, Equatable, Sendable {
     public func withIdentity(_ identifier: String, parentIdentifier: String? = nil) -> RemoteItem {
         RemoteItem(itemIdentifier: identifier, remoteID: remoteID, parentIdentifier: parentIdentifier ?? self.parentIdentifier, name: name, uri: uri, kind: kind, contentType: contentType, size: size, remoteVersion: remoteVersion, version: version, creationDate: creationDate, contentModificationDate: contentModificationDate, trashOriginalParentIdentifier: trashOriginalParentIdentifier, canRead: canRead, canWrite: canWrite, canAddChildren: canAddChildren, canTrash: canTrash, canDelete: canDelete, trashed: trashed, tombstone: tombstone)
     }
+
+    /// The same remote entity under another provider identity, for when the store already knows it
+    /// by a different identifier than the one a caller allocated.
+    public func reidentified(as identifier: String) -> RemoteItem {
+        RemoteItem(itemIdentifier: identifier, remoteID: remoteID, parentIdentifier: parentIdentifier, name: name, uri: uri, kind: kind, contentType: contentType, size: size, remoteVersion: remoteVersion, version: version, creationDate: creationDate, contentModificationDate: contentModificationDate, trashOriginalParentIdentifier: trashOriginalParentIdentifier, canRead: canRead, canWrite: canWrite, canAddChildren: canAddChildren, canTrash: canTrash, canDelete: canDelete, trashed: trashed, tombstone: tombstone)
+    }
 }
 
 public enum VersionHasher {

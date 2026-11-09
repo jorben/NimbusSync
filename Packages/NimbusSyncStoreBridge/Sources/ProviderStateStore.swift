@@ -957,7 +957,7 @@ public extension SQLiteStateStore {
                 var addedCount: Int64 = 0
                 var addedBytes: Int64 = 0
                 for item in items {
-                    let stagedItem = item
+                    let stagedItem = try canonicalIdentityUnlocked(item)
                     if try isExcludedByCurrentRulesUnlocked(item: stagedItem, domainIdentifier: descriptor.domainIdentifier) {
                         var state = try localStateUnlocked(identifier: stagedItem.itemIdentifier)
                         state.viewExcluded = true
@@ -982,6 +982,18 @@ public extension SQLiteStateStore {
                 throw error
             }
         }
+    }
+
+    /// Identities for a listed page are resolved before its network round trip, outside this
+    /// transaction. Meanwhile the app's full check may record the same remote entity under an
+    /// identifier of its own; inserting the page's would then break the one-live-row-per-remote-
+    /// entity index and fail the whole enumeration (File Provider error -2005). The identity
+    /// already stored wins, exactly as if it had been there when the page was resolved.
+    private func canonicalIdentityUnlocked(_ item: RemoteItem) throws -> RemoteItem {
+        guard let remoteID = item.remoteID,
+              let stored = try scalar("SELECT item_uuid FROM items WHERE remote_entity_id = '\(sql(remoteID))' ORDER BY tombstone ASC, rowid DESC LIMIT 1"),
+              stored != item.itemIdentifier else { return item }
+        return item.reidentified(as: stored)
     }
 
     func publishDirectorySnapshot(snapshotID: String) throws {

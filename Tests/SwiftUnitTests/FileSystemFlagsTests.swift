@@ -65,8 +65,14 @@ final class FileSystemFlagsTests: XCTestCase {
 
         let sql = StoreBridgeError.sql("INSERT INTO items VALUES ('secret-name.txt')")
         let summary = FileProviderErrorMapper.diagnosticSummary(sql)
-        XCTAssertEqual(summary, "store:sql")
+        XCTAssertEqual(summary, "store:sql:other")
         XCTAssertFalse(summary.contains("secret-name"))
+
+        // Known SQLite failures keep only a fixed category word, never the message's names.
+        let unique = StoreBridgeError.sql("UNIQUE constraint failed: items.remote_entity_id")
+        XCTAssertEqual(FileProviderErrorMapper.diagnosticSummary(unique), "store:sql:unique")
+        XCTAssertEqual(StoreBridgeError.sql("database is locked").sqlCategory, "busy")
+        XCTAssertNil(StoreBridgeError.anchorExpired.sqlCategory)
 
         struct Probe: Decodable { let files: [String] }
         do {

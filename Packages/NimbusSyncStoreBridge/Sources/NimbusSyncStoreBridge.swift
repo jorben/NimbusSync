@@ -15,6 +15,33 @@ public enum StoreBridgeError: Error, Equatable {
     case unknownDomain
 }
 
+public extension StoreBridgeError {
+    /// A fixed word for what kind of SQL failure this is, safe to log: SQLite's message is matched
+    /// against known shapes and never passed through, so no names, paths or values can leak.
+    var sqlCategory: String? {
+        guard case .sql(let detail) = self else { return nil }
+        let known: [(prefix: String, category: String)] = [
+            ("UNIQUE constraint failed", "unique"),
+            ("FOREIGN KEY constraint failed", "foreign_key"),
+            ("NOT NULL constraint failed", "constraint"),
+            ("CHECK constraint failed", "constraint"),
+            ("database is locked", "busy"),
+            ("database table is locked", "locked"),
+            ("disk I/O error", "io"),
+            ("database or disk is full", "full"),
+            ("database disk image is malformed", "corrupt"),
+            ("no such table", "schema"),
+            ("no such column", "schema"),
+            ("journal payload exceeds", "payload_limit"),
+            ("snapshot payload exceeds", "payload_limit"),
+            ("system pending observation exceeds", "payload_limit"),
+            ("directory snapshot capacity exceeded", "capacity"),
+            ("operation missing during atomic commit", "atomic_commit"),
+        ]
+        return known.first { detail.hasPrefix($0.prefix) }?.category ?? "other"
+    }
+}
+
 public struct SchemaFence: Equatable, Sendable {
     public let version: Int
     public let generation: Int
