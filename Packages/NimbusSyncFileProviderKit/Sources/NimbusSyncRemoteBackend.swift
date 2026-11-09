@@ -1796,16 +1796,15 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
             // Left in place, the stale item keeps its place in Finder and the system keeps asking
             // for it, failing the same way each time. Delete it here, as a full check would; the
             // object now at its path arrives with live updates or the next check.
-            try? tombstoneStaleItem(identifier: identifier)
+            // The system asked for the item, so it holds it: the deletion is journaled for the
+            // working set, and again on every attempt in case an earlier one went unheard.
+            do {
+                try store.deleteSystemHeldItem(identifier: identifier, origin: "fetch_contents")
+            } catch {
+                logger.error("download.stale_item.delete_failed")
+            }
             throw failure
         }
-    }
-
-    private func tombstoneStaleItem(identifier: String) throws {
-        guard var item = try store.item(identifier: identifier), !item.tombstone else { return }
-        let parent = item.parentIdentifier
-        item.tombstone = true
-        _ = try store.commitProviderChange(item: item, oldParentIdentifier: parent, newParentIdentifier: nil, kind: "deleted", origin: "fetch_contents")
     }
 
     public func create(_ request: CreateRequest, context: FileProviderOperationContext) async throws -> RemoteItem {

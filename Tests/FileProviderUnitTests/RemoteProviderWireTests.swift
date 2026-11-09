@@ -175,6 +175,41 @@ final class RemoteProviderWireTests: XCTestCase {
         XCTAssertEqual(FileProviderErrorMapper.map(CoreFailure(code: .notFound, retryable: false)).code, NSFileProviderError.noSuchItem.rawValue)
     }
 
+    /// The system only downloads an item it holds, so the deletion of a stale one must reach the
+    /// working set even when nothing else marked the item or its folder as visible (a folder made
+    /// in Finder is never listed by the system). It must also reach it when an earlier attempt had
+    /// already deleted the item without the system hearing of it.
+    func testStaleDownloadDeletionReachesTheWorkingSet() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let folder = RemoteItem(itemIdentifier: CloudreveIdentifier.item(), remoteID: "remote-folder", parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: "made-in-finder", uri: try CloudreveRemoteURI.append(fixture.rootURI, name: "made-in-finder"), kind: .folder, contentType: "public.folder", size: 0, version: ItemVersion(content: Data("folder".utf8), metadata: Data("folder".utf8)), canRead: true, canWrite: true)
+        try store.insertItem(folder)
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        stale.parentIdentifier = folder.itemIdentifier
+        stale.uri = try CloudreveRemoteURI.append(folder.uri, name: "payload.bin")
+        try store.insertItem(stale)
+        let workingSet = NSFileProviderItemIdentifier.workingSet.rawValue
+
+        for attempt in 1...2 {
+            let before = try store.currentAnchor(domainIdentifier: fixture.domainIdentifier, scope: workingSet)
+            var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: UploadWireURLProtocol.State(provider: "remote", sourceSize: 10))
+            let destination = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-stale-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: destination) }
+            do {
+                _ = try await backend!.fetchContent(identifier: stale.itemIdentifier, expectedVersion: nil, destination: destination, context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+                XCTFail("the path now belongs to another object")
+            } catch let failure as CoreFailure {
+                XCTAssertTrue(failure.isRemoteIdentityChanged)
+            }
+            backend = nil
+
+            let changes = try store.enumerateChanges(domainIdentifier: fixture.domainIdentifier, scope: workingSet, from: before).changes
+            XCTAssertTrue(changes.contains { $0.itemIdentifier == stale.itemIdentifier && $0.kind == "deleted" }, "attempt \(attempt): the system must hear the item is gone")
+        }
+    }
+
     func testQiniuAsyncUploadUsesOneBasedPartsAndUpTokenOnStorageOnly() async throws {
         let fixture = try UploadWireFixture(provider: "qiniu", chunkSize: 4)
         defer { fixture.cleanup() }

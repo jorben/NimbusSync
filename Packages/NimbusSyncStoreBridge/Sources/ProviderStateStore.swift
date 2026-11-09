@@ -503,6 +503,45 @@ public extension SQLiteStateStore {
         }
     }
 
+    /// Deletes an item the system is known to hold (it just asked for the item's contents) and
+    /// journals the deletion for the working set. Nothing else may have marked the item or its
+    /// folder as visible (a folder made in Finder is never listed by the system), and without
+    /// that the deletion is journaled for nobody: the system keeps the item and keeps asking.
+    /// An item already deleted is announced again, since an earlier deletion may have gone
+    /// unheard. Returns nil when the store has no such item.
+    @discardableResult
+    func deleteSystemHeldItem(identifier: String, origin: String) throws -> JournalChange? {
+        try withLock {
+            try execute("BEGIN IMMEDIATE")
+            do {
+                guard var item = try itemUnlockedForProjection(identifier: identifier) else {
+                    try execute("COMMIT")
+                    return nil
+                }
+                var local = try localStateUnlocked(identifier: identifier)
+                local.systemVisible = true
+                try upsertLocalStateUnlocked(identifier: identifier, state: local)
+                let parent = item.parentIdentifier
+                if !item.tombstone {
+                    if item.kind == .folder {
+                        let refreshed = try tombstoneDescendantsUnlocked(rootIdentifier: item.itemIdentifier, oldURI: item.uri)
+                        if refreshed >= DomainScale.maximumItems {
+                            try execute("UPDATE sync_state SET reconcile_status = 'required:recursive_delete' WHERE singleton = 1")
+                        }
+                    }
+                    item.tombstone = true
+                    try insertItemUnlocked(item)
+                }
+                let change = try appendProviderChangeUnlocked(itemIdentifier: item.itemIdentifier, oldParentIdentifier: parent, newParentIdentifier: nil, kind: "deleted", version: item.version.content, origin: origin, itemPayload: try encodeJournalPayload(item), itemVersion: item.version)
+                try execute("COMMIT")
+                return change
+            } catch {
+                try? execute("ROLLBACK")
+                throw error
+            }
+        }
+    }
+
     func commitOperationWithItemAndChange(operationID: UUID, state: String, item: RemoteItem, oldParentIdentifier: String?, newParentIdentifier: String?, kind: String, origin: String, outcome: String? = nil, recursive: Bool = false) throws {
         try withLock {
             let encodedOutcome = outcome.map { Data($0.utf8).base64EncodedString() }
