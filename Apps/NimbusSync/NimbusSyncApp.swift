@@ -683,7 +683,9 @@ private final class NimbusSyncAppState: ObservableObject {
         }
         let report = await service.removeOrphanedSystemDomains()
         let summary = report.summary
-        if report.failed.isEmpty && report.outcome == .checked {
+        // An empty registry with no system Domains is a fresh install with nothing to manage.
+        let freshInstall = report.outcome == .registryEmpty && report.systemIdentifiers?.isEmpty == true
+        if report.failed.isEmpty && (report.outcome == .checked || freshInstall) {
             lifecycleLogger.info("domain.inventory \(summary, privacy: .public)")
             ActivityLog.shared.info("lifecycle", "Domain inventory · \(summary)")
         } else {
@@ -813,6 +815,7 @@ private final class NimbusSyncAppState: ObservableObject {
         for identifier in Array(eventSupervisors.keys) where !desired.contains(identifier) {
             if let supervisor = detachEventSupervisor(identifier) { Task { await supervisor.stop() } }
         }
+        liveUpdateSkipReasons = liveUpdateSkipReasons.filter { desired.contains($0.key) }
         for descriptor in domains {
             if descriptor.status.isLifecycleHold {
                 if let supervisor = detachEventSupervisor(descriptor.identifier) { Task { await supervisor.stop() } }

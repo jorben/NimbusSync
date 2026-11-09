@@ -253,14 +253,17 @@ public actor DomainRegistryService {
         let storedDomains: [StoredDomain]
         do { storedDomains = try store.allDomains() } catch { return OrphanedDomainCleanupReport(outcome: .registryUnreadable) }
         let registryIdentifiers = storedDomains.map(\.identifier)
+        let systemDomains: [RegisteredDomainSnapshot]
+        do { systemDomains = try await lifecycle.registeredDomains() } catch {
+            return OrphanedDomainCleanupReport(outcome: .systemListingFailed, registryIdentifiers: registryIdentifiers, error: Self.errorCode(error))
+        }
         // An empty registry next to registered system domains is far more
         // likely a recreated/reset App Group database than a user who removed
         // every location; removing them all would make every sync location
         // disappear from Finder. Only prune when the registry has content.
-        guard !storedDomains.isEmpty else { return OrphanedDomainCleanupReport(outcome: .registryEmpty) }
-        let systemDomains: [RegisteredDomainSnapshot]
-        do { systemDomains = try await lifecycle.registeredDomains() } catch {
-            return OrphanedDomainCleanupReport(outcome: .systemListingFailed, registryIdentifiers: registryIdentifiers, error: Self.errorCode(error))
+        // The system list above is read only so the report can show them.
+        guard !storedDomains.isEmpty else {
+            return OrphanedDomainCleanupReport(outcome: .registryEmpty, registryIdentifiers: registryIdentifiers, systemIdentifiers: systemDomains.map(\.identifier))
         }
         let orphanedIdentifiers = OrphanedDomainCleanupReducer.orphanedIdentifiers(systemDomains: systemDomains, registryIdentifiers: Set(registryIdentifiers))
         var report = OrphanedDomainCleanupReport(outcome: .checked, registryIdentifiers: registryIdentifiers, systemIdentifiers: systemDomains.map(\.identifier))
@@ -520,25 +523,38 @@ public struct OrphanedDomainCleanupReport: Sendable {
     }
 
     public var outcome: Outcome
-    public var registryIdentifiers: [String]
-    public var systemIdentifiers: [String]
+    /// nil when the list was never collected, so it is not mistaken for an empty one.
+    public var registryIdentifiers: [String]?
+    public var systemIdentifiers: [String]?
     public var removed: [(identifier: String, preservedLocation: URL?)] = []
     public var failed: [(identifier: String, error: String)] = []
     public var error: String?
 
-    public init(outcome: Outcome, registryIdentifiers: [String] = [], systemIdentifiers: [String] = [], error: String? = nil) {
+    public init(outcome: Outcome, registryIdentifiers: [String]? = nil, systemIdentifiers: [String]? = nil, error: String? = nil) {
         self.outcome = outcome
         self.registryIdentifiers = registryIdentifiers
         self.systemIdentifiers = systemIdentifiers
         self.error = error
     }
 
-    /// One redacted line: identifiers and counts only.
+    /// One redacted line: identifiers and error codes only. The decisive parts come first because
+    /// the activity log keeps only the head of a long message; the full lists come last, and a
+    /// list that was never collected prints as `?`.
     public var summary: String {
-        var parts = ["outcome=\(outcome.rawValue)", "registry=\(registryIdentifiers.sorted().joined(separator: ","))", "system=\(systemIdentifiers.sorted().joined(separator: ","))"]
+        var parts = ["outcome=\(outcome.rawValue)"]
         if !removed.isEmpty { parts.append("removed=\(removed.map(\.identifier).sorted().joined(separator: ","))") }
         if !failed.isEmpty { parts.append("failed=\(failed.map { "\($0.identifier):\($0.error)" }.sorted().joined(separator: ","))") }
         if let error { parts.append("error=\(error)") }
+        if let registryIdentifiers, let systemIdentifiers {
+            let systemOnly = Set(systemIdentifiers).subtracting(registryIdentifiers)
+            if !systemOnly.isEmpty { parts.append("system_only=\(systemOnly.sorted().joined(separator: ","))") }
+        }
+        parts.append("registry=\(Self.listSummary(registryIdentifiers))")
+        parts.append("system=\(Self.listSummary(systemIdentifiers))")
         return parts.joined(separator: " ")
+    }
+
+    private static func listSummary(_ identifiers: [String]?) -> String {
+        identifiers.map { $0.sorted().joined(separator: ",") } ?? "?"
     }
 }
