@@ -1633,6 +1633,8 @@ private struct SettingsView: View {
     @State private var notificationPreferences: NotificationPreferences
     @State private var pendingRemoval: DomainDescriptor?
     @State private var editingExclusionsDomainIdentifier: String?
+    @State private var copiedLogs = false
+    @Environment(\.openURL) private var openURL
     @AppStorage(FullCheckInterval.preferenceKey) private var fullCheckIntervalDays = FullCheckInterval.defaultValue.rawValue
     @AppStorage(AppAppearance.preferenceKey) private var appearance = AppAppearance.system.rawValue
 
@@ -1760,8 +1762,22 @@ private struct SettingsView: View {
         case .domains:
             domainsPage
         case .general:
-            SettingsPage(section: .general) {
-                Section("Appearance") {
+            generalPage
+                .onAppear { onNotificationsChanged(notificationPreferences) }
+        case .diagnostics:
+            diagnosticsPage
+                .onAppear(perform: onRefresh)
+        case .about:
+            aboutPage
+        }
+    }
+
+    // MARK: General page
+
+    private var generalPage: some View {
+        SettingsPage(section: .general) {
+            SettingsGroup("Appearance") {
+                SettingsRow(symbol: "circle.lefthalf.filled", tint: .indigo, title: "Theme", subtitle: "Applies to Settings and the menu bar window.") {
                     Picker("Theme", selection: Binding(
                         get: { AppAppearance(rawValue: appearance) ?? .system },
                         set: { choice in
@@ -1774,17 +1790,23 @@ private struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                 }
-                Section("Startup") {
-                    Toggle("Launch NimbusSync at login", isOn: Binding(get: { launchAtLogin }, set: { enabled in
+            }
+
+            SettingsGroup("Startup") {
+                SettingsRow(symbol: "power", tint: .green, title: "Launch at login", subtitle: "NimbusSync stays in the menu bar so Finder integration is ready when you need it.") {
+                    SettingsSwitch("Launch NimbusSync at login", isOn: Binding(get: { launchAtLogin }, set: { enabled in
                         launchAtLogin = enabled
                         try? (enabled ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister())
+                        launchAtLogin = SMAppService.mainApp.status == .enabled
                     }))
-                    Text("NimbusSync stays in the menu bar so Finder integration is ready when you need it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-                Section {
+            }
+
+            SettingsGroup("Full check") {
+                SettingsRow(symbol: "arrow.triangle.2.circlepath", title: "Background full check", subtitle: "How often every file is compared with the server.") {
                     Picker("Background full check", selection: Binding(
                         get: { FullCheckInterval(rawValue: fullCheckIntervalDays) ?? FullCheckInterval.defaultValue },
                         set: { fullCheckIntervalDays = $0.rawValue }
@@ -1793,73 +1815,166 @@ private struct SettingsView: View {
                             Text(interval.title).tag(interval)
                         }
                     }
-                } header: {
-                    Text("Full check")
-                } footer: {
-                    Text("Live updates keep your domains current. A full check compares every file with the server to catch anything live updates missed, and uses more network and battery. It runs at most this often while connected, counted from the last check whether or not it succeeded. To check a domain right away, choose Check Now from its More menu on the Domains page.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
                 }
-                Section {
-                    Toggle("Allow notifications", isOn: notificationBinding(\.enabled))
-                    Group {
-                        Toggle("Authorization required", isOn: notificationBinding(\.authExpired))
-                        Toggle("Conflicts", isOn: notificationBinding(\.conflicts))
-                        Toggle("Permanent failures", isOn: notificationBinding(\.permanentFailures))
-                    }
-                    .padding(.leading, NimbusSyncDesignTokens.spacing16)
-                    .disabled(!notificationPreferences.enabled)
-                } header: {
-                    Text("Notifications")
-                } footer: {
-                    Text("Notifications are delivered by macOS and can be adjusted in System Settings.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            } footer: {
+                Text("Live updates keep your domains current. A full check catches anything they missed but uses more network and battery, so it runs at most this often while connected, counted from the last check. To check a domain right away, choose Check Now from its More menu on the Domains page.")
             }
-            .onAppear { onNotificationsChanged(notificationPreferences) }
-        case .diagnostics:
-            SettingsPage(section: .diagnostics) {
-                Section {
-                    LogTextView(lines: recentLogLines, height: 400)
-                    logLocationRow
-                } header: {
-                    HStack {
-                        Text("Logs")
-                        Spacer()
-                        Text(recentLogLines.isEmpty ? "" : "Latest \(recentLogLines.count) lines")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+
+            SettingsGroup("Notifications") {
+                SettingsRow(symbol: "bell.badge", tint: .red, title: "Allow notifications", subtitle: "Tell me when a domain needs my attention.") {
+                    SettingsSwitch("Allow notifications", isOn: notificationBinding(\.enabled))
+                }
+                SettingsRowDivider()
+                Group {
+                    SettingsRow(title: "Authorization required", isNested: true) {
+                        SettingsSwitch("Authorization required", isOn: notificationBinding(\.authExpired))
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(title: "Conflicts", isNested: true) {
+                        SettingsSwitch("Conflicts", isOn: notificationBinding(\.conflicts))
+                    }
+                    SettingsRowDivider()
+                    SettingsRow(title: "Permanent failures", isNested: true) {
+                        SettingsSwitch("Permanent failures", isOn: notificationBinding(\.permanentFailures))
                     }
                 }
+                .disabled(!notificationPreferences.enabled)
+            } footer: {
+                HStack(alignment: .firstTextBaseline, spacing: NimbusSyncDesignTokens.spacing8) {
+                    Text("Notifications are delivered by macOS.")
+                    Button("Notification Settings…", action: openNotificationSettings)
+                        .buttonStyle(.link)
+                }
             }
-            .onAppear(perform: onRefresh)
-        case .about:
-            SettingsPage(section: .about) {
-                Section {
-                    HStack(spacing: 12) {
-                        AppIconView(size: 48)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("NimbusSync").font(.headline)
-                            Text("Cloudreve for macOS").foregroundStyle(.secondary)
+        }
+    }
+
+    private func openNotificationSettings() {
+        var components = URLComponents(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!
+        if let identifier = Bundle.main.bundleIdentifier {
+            components.queryItems = [URLQueryItem(name: "id", value: identifier)]
+        }
+        if let url = components.url { NSWorkspace.shared.open(url) }
+    }
+
+    // MARK: Diagnostics page
+
+    private var diagnosticsPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsPageHeader(section: .diagnostics)
+
+            SettingsCard {
+                logCardHeader
+                Divider()
+                LogTextView(lines: recentLogLines, height: nil, framed: false)
+            }
+            .frame(maxWidth: SettingsLayout.maxContentWidth, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, SettingsLayout.pageInset)
+            .padding(.top, 4)
+            .padding(.bottom, SettingsLayout.pageInset)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The log card's top: what is shown and where it lives, with Copy and Show in Finder on the
+    /// right — the Domains card's header and actions at log size.
+    private var logCardHeader: some View {
+        HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing12) {
+            SettingsIconTile(symbol: "doc.text", size: 36)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                    Text("Logs")
+                        .font(.system(size: 15, weight: .semibold))
+                    if !recentLogLines.isEmpty {
+                        SettingsTagBadge("Latest \(recentLogLines.count) lines")
+                    }
+                }
+                Text(logsDirectoryPath.map { SettingsDomainText.displayPath($0, home: NSHomeDirectory()) } ?? "Log folder unavailable")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help(logsDirectoryPath ?? "")
+                    .accessibilityLabel(Text("Log folder \(logsDirectoryPath ?? "unavailable")"))
+            }
+
+            Spacer(minLength: NimbusSyncDesignTokens.spacing12)
+
+            HStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                Button(action: copyLogs) {
+                    Image(systemName: copiedLogs ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(SettingsIconButtonStyle())
+                .help(copiedLogs ? "Copied" : "Copy these lines")
+                .accessibilityLabel(Text(copiedLogs ? "Log lines copied" : "Copy log lines"))
+                .disabled(recentLogLines.isEmpty)
+
+                Button(action: onOpenLogs) {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(SettingsIconButtonStyle())
+                .help("Show in Finder")
+                .accessibilityLabel(Text("Show log files in Finder"))
+                .disabled(logsDirectoryPath == nil)
+            }
+        }
+        .padding(NimbusSyncDesignTokens.spacing16)
+    }
+
+    private func copyLogs() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(recentLogLines.joined(separator: "\n"), forType: .string)
+        copiedLogs = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copiedLogs = false }
+    }
+
+    // MARK: About page
+
+    private var aboutPage: some View {
+        SettingsPage(section: .about) {
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .center, spacing: 14) {
+                        AppIconView(size: 64)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 10) {
+                                Text("NimbusSync")
+                                    .font(.system(size: 20, weight: .semibold))
+                                    .accessibilityAddTraits(.isHeader)
+                                SettingsTagBadge(SettingsAboutText.version(
+                                    short: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+                                    build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+                                ), tint: NimbusSyncDesignTokens.brandTextColor)
+                            }
+                            Text("Cloudreve for macOS")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    Text("A native File Provider client for self-hosted Cloudreve instances.")
-                        .font(.caption)
+                    Divider()
+                    Text("A native File Provider client for self-hosted Cloudreve instances. Your domains appear in the Finder sidebar, and files download only when you open them.")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Section {
-                    LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown")
-                    LabeledContent("License") {
-                        Link("Apache License 2.0", destination: SettingsLinks.license)
-                            .help(SettingsLinks.license.absoluteString)
-                    }
-                    LabeledContent("GitHub") {
-                        Link("tiylabs/nimbussync", destination: SettingsLinks.repository)
-                            .help(SettingsLinks.repository.absoluteString)
-                    }
+                .padding(NimbusSyncDesignTokens.spacing16)
+            }
+
+            SettingsGroup("Resources") {
+                SettingsRow(symbol: "checkmark.seal", tint: .green, title: "License") {
+                    SettingsLinkButton(title: "Apache License 2.0") { openURL(SettingsLinks.license) }
+                        .help(SettingsLinks.license.absoluteString)
+                }
+                SettingsRowDivider()
+                SettingsRow(symbol: "chevron.left.forwardslash.chevron.right", tint: .gray, title: "Source code") {
+                    SettingsLinkButton(title: "github.com/tiylabs/nimbussync") { openURL(SettingsLinks.repository) }
+                        .help(SettingsLinks.repository.absoluteString)
                 }
             }
         }
@@ -1941,33 +2056,6 @@ private struct SettingsView: View {
 
     private func connection(for domain: DomainDescriptor) -> ServerConnectionDisplay {
         connections[domain.identifier] ?? .notConnected
-    }
-
-    private var logLocationRow: some View {
-        HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing8) {
-            Image(systemName: "doc.text")
-                .foregroundStyle(NimbusSyncDesignTokens.brandColor)
-                .frame(width: 20)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Log files")
-                Text(logsDirectoryPath ?? "Unavailable")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .help(logsDirectoryPath ?? "")
-            }
-            Spacer(minLength: NimbusSyncDesignTokens.spacing8)
-            Button(action: onOpenLogs) {
-                Image(systemName: "folder")
-            }
-            .buttonStyle(SettingsIconButtonStyle(size: 30))
-            .help("Show in Finder")
-            .accessibilityLabel(Text("Show log files in Finder"))
-            .disabled(logsDirectoryPath == nil)
-        }
     }
 
     private func notificationBinding(_ keyPath: WritableKeyPath<NotificationPreferences, Bool>) -> Binding<Bool> {
@@ -2165,13 +2253,7 @@ private struct SettingsPage<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             SettingsPageHeader(section: section)
 
-            // The grouped form insets its sections by about 20 pt; this brings them in line with
-            // the header's 28 pt.
-            Form(content: content)
-                .formStyle(.grouped)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, SettingsLayout.pageInset - 20)
-                .frame(maxWidth: SettingsLayout.maxContentWidth + 2 * (SettingsLayout.pageInset - 20), minHeight: 160, alignment: .topLeading)
+            SettingsPageBody(maxContentWidth: SettingsLayout.maxContentWidth, horizontalInset: SettingsLayout.pageInset, content: content)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }

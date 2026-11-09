@@ -392,7 +392,7 @@ public struct SettingsLinkButton: View {
                     .accessibilityHidden(true)
             }
             .font(.callout)
-            .foregroundStyle(NimbusSyncDesignTokens.brandColor)
+            .foregroundStyle(NimbusSyncDesignTokens.brandTextColor)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

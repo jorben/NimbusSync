@@ -150,11 +150,15 @@ public struct ServerConnectionRow: View {
 /// the newest line and follows new lines as they arrive.
 public struct LogTextView: View {
     public let lines: [String]
-    public let height: CGFloat
+    /// A fixed height, or nil to fill the space it is given.
+    public let height: CGFloat?
+    /// Draws its own soft well; off when a card around it already supplies the surface.
+    public let framed: Bool
 
-    public init(lines: [String], height: CGFloat = 260) {
+    public init(lines: [String], height: CGFloat? = 260, framed: Bool = true) {
         self.lines = lines
         self.height = height
+        self.framed = framed
     }
 
     /// Tabs separate the fields on disk; a pair of spaces keeps columns readable without wide gaps.
@@ -166,10 +170,16 @@ public struct LogTextView: View {
 
     public var body: some View {
         if lines.isEmpty {
-            Text("No log entries yet.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 60)
+            VStack(spacing: NimbusSyncDesignTokens.spacing8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 26, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+                Text("No log entries yet.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 120, maxHeight: height == nil ? .infinity : 120)
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -182,10 +192,11 @@ public struct LogTextView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Color.clear.frame(height: 1).id(Self.bottomID)
                     }
-                    .padding(NimbusSyncDesignTokens.spacing8)
+                    .padding(framed ? NimbusSyncDesignTokens.spacing8 : NimbusSyncDesignTokens.spacing16)
                 }
+                .frame(minHeight: height == nil ? 160 : nil, maxHeight: height == nil ? .infinity : nil)
                 .frame(height: height)
-                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
+                .background(Color.secondary.opacity(framed ? 0.06 : 0), in: RoundedRectangle(cornerRadius: NimbusSyncDesignTokens.cornerRadius))
                 .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
                 .onChange(of: lines) { _ in proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             }

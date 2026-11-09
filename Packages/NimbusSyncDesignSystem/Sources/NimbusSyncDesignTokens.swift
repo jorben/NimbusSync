@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 public enum NimbusSyncDesignTokens {
     public static let spacing4: CGFloat = 4
@@ -15,6 +16,13 @@ public enum NimbusSyncDesignTokens {
     public static let popoverWidth: CGFloat = 400
     // Cloudreve's core logo blue (#056FEE).
     public static let brandColor = Color(red: 5 / 255, green: 111 / 255, blue: 238 / 255)
+    /// The brand blue for text and small glyphs: the logo blue in light mode, lifted to #4C9DFF in
+    /// dark mode, where the logo blue falls short of 4.5:1 against the card.
+    public static let brandTextColor = Color(nsColor: NSColor(name: "NimbusSyncBrandText") { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 76 / 255, green: 157 / 255, blue: 1, alpha: 1)
+            : NSColor(srgbRed: 5 / 255, green: 111 / 255, blue: 238 / 255, alpha: 1)
+    })
     /// Laid at 90% over the sidebar material, this lands on the design's light periwinkle
     /// (#E1E8F8) whatever the wallpaper behind the window.
     public static let settingsSidebarTint = Color(red: 224 / 255, green: 232 / 255, blue: 251 / 255)

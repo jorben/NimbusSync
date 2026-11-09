@@ -74,6 +74,14 @@ final class SettingsDomainsPageTests: XCTestCase {
         XCTAssertEqual(ServerConnectionDot.helpText(.notConnected), "Not connected")
     }
 
+    func testAboutVersionAddsADistinctBuildNumber() {
+        XCTAssertEqual(SettingsAboutText.version(short: "0.1.0", build: "1"), "Version 0.1.0 (1)")
+        XCTAssertEqual(SettingsAboutText.version(short: "0.1.0", build: "0.1.0"), "Version 0.1.0", "a build equal to the version is not repeated")
+        XCTAssertEqual(SettingsAboutText.version(short: "0.1.0", build: nil), "Version 0.1.0")
+        XCTAssertEqual(SettingsAboutText.version(short: " ", build: "7"), "Build 7")
+        XCTAssertEqual(SettingsAboutText.version(short: nil, build: nil), "Version unknown")
+    }
+
     func testAppearanceFallsBackToSystem() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "SettingsDomainsPageTests.appearance"))
         defaults.removePersistentDomain(forName: "SettingsDomainsPageTests.appearance")
