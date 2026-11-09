@@ -1013,6 +1013,9 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
     private var initialCheckAttempted = false
     /// Events received since `resumed`, until the first keep-alive ends the replay.
     private var replay: (count: Int, itemCount: Int)?
+    /// Replaced by a newer runtime for the same Domain (for example after the server folder was
+    /// renamed or moved). The newer runtime owns the connection and its status from then on.
+    private var retired = false
 
     public init?(descriptor: DomainDescriptor, store: SQLiteStateStore, registry: SQLiteStateStore? = nil, vault: CredentialVault, onRootChanged: (@Sendable (String) async -> Void)? = nil, onConnectionStateChanged: (@Sendable (ConnectionState) async -> Void)? = nil) {
         guard let origin = URL(string: descriptor.scope.origin) else { return nil }
@@ -1164,10 +1167,27 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
         writeDomainStatus(next)
     }
 
+    /// Hands the Domain over to a newer runtime. A full check already running still finishes and
+    /// keeps its data, but this runtime's connection no longer speaks for the Domain: its stop
+    /// and stream errors must not mark the Domain "not running" or "live updates unavailable"
+    /// over the newer runtime's live connection.
+    public func retire() {
+        retired = true
+    }
+
     public func markEventDegraded() async {
+        guard !retired else { return }
+        markCheckFailed()
+    }
+
+    private func markCheckFailed() {
         writeDomainStatus(.eventDegraded)
         try? store.updateSyncState(reconcileStatus: "event_degraded")
     }
+
+    /// What a check that finished on a retired runtime may replace: the newer runtime's own
+    /// connection problems (offline, live updates unavailable) and anything needing the user stay.
+    public static let statusesRetiredCheckMayReplace: Set<DomainStatus> = [.initializing, .reconciling, .appNotRunning, .healthy, .syncing]
 
     public func markAuthenticationExpired() async {
         await publishConnectionState(.authExpired)
@@ -1192,16 +1212,16 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
             model.status = .reconciling
             try await reconciler.reconcile(descriptor: model, reason: reason)
             guard await outboxDrainer.drain() else {
-                await markEventDegraded()
+                markCheckFailed()
                 return
             }
             let updated: StoredDomain?
             do { updated = try store.domain(identifier: domainIdentifier) } catch {
-                await markEventDegraded()
+                markCheckFailed()
                 return
             }
             guard let updated else {
-                await markEventDegraded()
+                markCheckFailed()
                 return
             }
             if updated.rootURI != currentRootURI {
@@ -1209,7 +1229,7 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
                 let updatedScope = try? RemoteScope(origin: updated.origin, accountID: updated.accountID, rootURI: updated.rootURI)
                 if let updatedScope {
                     guard let updatedOrigin = URL(string: updated.origin) else {
-                        await markEventDegraded()
+                        markCheckFailed()
                         return
                     }
                     let enricher = CloudreveEventEnricher(origin: updatedOrigin, rootURI: updatedScope.rootURI, rootRemoteID: updated.rootRemoteID, store: store, vault: vault, credentialReference: updated.secretReference, capabilitySnapshot: updated.capabilitySnapshot)
@@ -1219,12 +1239,20 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
                 }
             }
             guard let hasDirtyWork = try? store.hasDirtyWork() else {
-                await markEventDegraded()
+                markCheckFailed()
                 return
             }
+            let checkedStatus: DomainStatus = hasDirtyWork ? .syncing : .healthy
             let nextStatus: DomainStatus
             if connectionState == .subscribed {
-                nextStatus = hasDirtyWork ? .syncing : .healthy
+                nextStatus = checkedStatus
+            } else if retired {
+                // This runtime's connection was stopped on purpose; whether live updates work
+                // is the newer runtime's to say. Only settle a status that is still waiting
+                // on this check.
+                guard let current = try? store.domain(identifier: domainIdentifier)?.status,
+                      Self.statusesRetiredCheckMayReplace.contains(current) else { return }
+                nextStatus = checkedStatus
             } else {
                 nextStatus = .eventDegraded
             }
@@ -1239,15 +1267,17 @@ public actor DomainEventRuntime: EventSupervisorDelegate {
                 return
             }
             try? store.updateSyncState(reconcileStatus: "error:\(failure.code.rawValue)")
-            await markEventDegraded()
+            markCheckFailed()
         } catch {
             try? store.updateSyncState(reconcileStatus: "error")
-            await markEventDegraded()
+            markCheckFailed()
         }
     }
 
     public func setConnectionState(_ state: ConnectionState) async {
         await publishConnectionState(state)
+        // An expired sign-in is the account's, not the connection's, so it still counts.
+        if retired && state != .authExpired { return }
         switch state {
         case .degraded: await markEventDegraded()
         case .offline:

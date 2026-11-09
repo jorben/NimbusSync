@@ -129,6 +129,38 @@ final class FullCheckTriggerTests: XCTestCase {
         XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .rootUnavailable)
     }
 
+    /// A renamed or moved server folder replaces the Domain's runtime. The old one's stop and
+    /// stream errors used to land after the new connection was live, leaving the Domain on
+    /// "Live updates unavailable" although live updates worked.
+    func testRetiredRuntimeDoesNotOverwriteTheReplacementsStatus() async throws {
+        let (store, descriptor) = try makeDomain()
+        try store.updateSyncState(reconcileAt: Date(), reconcileStatus: "completed")
+        try store.setDomainStatus(identifier: descriptor.identifier, status: .healthy)
+        let runtime = try XCTUnwrap(DomainEventRuntime(descriptor: descriptor, store: store, vault: MemoryCredentialVault()))
+        await runtime.setConnectionState(.subscribed)
+
+        await runtime.retire()
+        await runtime.setConnectionState(.stopped)
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .healthy, "a retired runtime's stop is not the app quitting")
+        await runtime.setConnectionState(.degraded)
+        await runtime.markEventDegraded()
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .healthy, "the replacement owns the connection status")
+        let state = await runtime.currentConnectionState()
+        XCTAssertEqual(state, .degraded, "the runtime still records its own connection")
+
+        await runtime.setConnectionState(.authExpired)
+        XCTAssertEqual(try store.domain(identifier: descriptor.identifier)?.status, .authExpired, "an expired sign-in still needs the user")
+    }
+
+    func testRetiredCheckMayOnlySettleAStatusWaitingOnIt() {
+        let replaceable = DomainEventRuntime.statusesRetiredCheckMayReplace
+        XCTAssertTrue(replaceable.contains(.reconciling))
+        for status: DomainStatus in [.offline, .eventDegraded, .authExpired, .rootUnavailable, .scopeConflict, .conflict, .permanentError] {
+            XCTAssertFalse(replaceable.contains(status), "\(status) belongs to the replacement runtime or the user")
+        }
+        XCTAssertTrue(replaceable.isDisjoint(with: DomainStatus.lifecycleHold))
+    }
+
     func testFallbackWaitsForTheConnectionAndTheInterval() async throws {
         let (store, descriptor) = try makeDomain()
         let runID = UUID()

@@ -527,6 +527,19 @@ private func onboardingErrorMessage(_ error: Error) -> String {
     return userFacingError(error)
 }
 
+/// A Domain's event supervisor taken out of service, with the runtime it drove.
+private struct DetachedEventSupervisor: Sendable {
+    let supervisor: EventSupervisor
+    let runtime: DomainEventRuntime?
+
+    /// Retires the runtime first, so a full check it is still running cannot report this
+    /// stopped connection as the Domain's status once a replacement is live.
+    func stop() async {
+        await runtime?.retire()
+        await supervisor.stop()
+    }
+}
+
 private final class FinderSystemDomainBox: @unchecked Sendable {
     let domain: NSFileProviderDomain
 
@@ -692,13 +705,13 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     /// Forgets a Domain's event supervisor and its connection state; the caller stops it.
-    private func detachEventSupervisor(_ identifier: String) -> EventSupervisor? {
+    private func detachEventSupervisor(_ identifier: String) -> DetachedEventSupervisor? {
         eventTasks.removeValue(forKey: identifier)?.cancel()
         eventRootURIs.removeValue(forKey: identifier)
         eventSupervisorTokens.removeValue(forKey: identifier)
-        eventRuntimes.removeValue(forKey: identifier)
+        let runtime = eventRuntimes.removeValue(forKey: identifier)
         connectionStatuses.removeValue(forKey: identifier)
-        return eventSupervisors.removeValue(forKey: identifier)
+        return eventSupervisors.removeValue(forKey: identifier).map { DetachedEventSupervisor(supervisor: $0, runtime: runtime) }
     }
 
     private func recordConnectionState(_ state: ConnectionState, domainIdentifier: String, token: UUID) {
