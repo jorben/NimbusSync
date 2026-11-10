@@ -1173,13 +1173,13 @@ public final class SQLiteStateStore: @unchecked Sendable {
     }
 
     public func saveUploadSession(_ session: UploadSessionCheckpoint) throws {
-        try withLock {
+        try withLock { try immediateTransactionUnlocked {
             try execute("INSERT OR REPLACE INTO upload_sessions (operation_id, remote_session_ref, secret_ref, fingerprint, provider, chunk_size, expires_at, state, item_uuid) VALUES ('\(session.operationID.uuidString)', \(nullable(session.remoteSessionReference)), \(nullable(session.secretReference)), X'\(session.fingerprint.hexString)', '\(sql(session.provider))', \(session.chunkSize), \(session.expiresAt.map { String(Int64($0.timeIntervalSince1970)) } ?? "NULL"), '\(sql(session.state))', \(nullable(session.itemIdentifier)))")
             try execute("DELETE FROM upload_parts WHERE operation_id = '\(session.operationID.uuidString)'")
             for part in session.parts {
                 try execute("INSERT INTO upload_parts (operation_id, part_index, offset, length, source_hash, etag, state, attempt) VALUES ('\(session.operationID.uuidString)', \(part.index), \(part.offset), \(part.length), X'\(part.sourceHash.hexString)', \(nullable(part.etag)), '\(sql(part.state))', \(part.attempt))")
             }
-        }
+        } }
     }
 
     /// Removes only the database reference after the caller has successfully
@@ -1237,18 +1237,18 @@ public final class SQLiteStateStore: @unchecked Sendable {
     }
 
     public func resolveConflict(conflictID: UUID, resolution: String) throws {
-        try withLock {
+        try withLock { try immediateTransactionUnlocked {
             try execute("UPDATE conflicts SET state = 'resolved', resolution = '\(sql(resolution))' WHERE conflict_id = '\(conflictID.uuidString)'")
             try execute("UPDATE operations SET state = 'resolved', error_code = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch() WHERE item_uuid = (SELECT item_uuid FROM conflicts WHERE conflict_id = '\(conflictID.uuidString)' LIMIT 1) AND state = 'conflict'")
             try execute("UPDATE item_local_state SET upload_state = 'none', download_state = 'none', upload_error = NULL, download_error = NULL, updated_at = unixepoch() WHERE item_uuid = (SELECT item_uuid FROM conflicts WHERE conflict_id = '\(conflictID.uuidString)' LIMIT 1) AND NOT EXISTS (SELECT 1 FROM pending_items WHERE pending_items.item_uuid = item_local_state.item_uuid)")
-        }
+        } }
     }
 
     public func markConflictResolutionPending(conflictID: UUID, itemIdentifier: String, resolution: String) throws {
-        try withLock {
+        try withLock { try immediateTransactionUnlocked {
             try execute("UPDATE conflicts SET resolution = '\(sql(resolution))', resolution_intent = '\(sql(resolution))', resolution_state = 'requested', state = 'pending', updated_at = unixepoch() WHERE conflict_id = '\(conflictID.uuidString)' AND item_uuid = '\(sql(itemIdentifier))' AND state = 'pending'")
             try execute("INSERT OR REPLACE INTO pending_items (item_uuid, template_id, upload_error, download_error) VALUES ('\(sql(itemIdentifier))', 'conflict-\(sql(resolution))', NULL, 'resolution_required')")
-        }
+        } }
     }
 
     public func pendingConflictResolution(itemIdentifier: String) throws -> (conflictID: UUID, resolution: String, remoteVersion: Data?)? {
@@ -1264,13 +1264,13 @@ public final class SQLiteStateStore: @unchecked Sendable {
     }
 
     public func completeConflictResolution(itemIdentifier: String, conflictID: UUID, resolution: String) throws {
-        try withLock {
+        try withLock { try immediateTransactionUnlocked {
             let pendingResolution = resolution.hasSuffix("_pending") ? resolution : "\(resolution)_pending"
             try execute("UPDATE conflicts SET state = 'resolved', resolution = '\(sql(resolution))', updated_at = unixepoch() WHERE conflict_id = '\(conflictID.uuidString)' AND item_uuid = '\(sql(itemIdentifier))' AND state = 'pending'")
             try execute("DELETE FROM pending_items WHERE item_uuid = '\(sql(itemIdentifier))' AND template_id = 'conflict-\(sql(pendingResolution))'")
             try execute("UPDATE operations SET state = 'resolved', error_code = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch() WHERE item_uuid = '\(sql(itemIdentifier))' AND state = 'conflict'")
             try execute("UPDATE item_local_state SET upload_state = 'none', download_state = 'none', upload_error = NULL, download_error = NULL, updated_at = unixepoch() WHERE item_uuid = '\(sql(itemIdentifier))' AND NOT EXISTS (SELECT 1 FROM pending_items WHERE pending_items.item_uuid = item_local_state.item_uuid) AND NOT EXISTS (SELECT 1 FROM operations WHERE operations.item_uuid = item_local_state.item_uuid AND operations.state NOT IN ('committed', 'cancelled', 'permanently_failed', 'resolved'))")
-        }
+        } }
     }
 
     public func pendingConflictCount() throws -> Int { try withLock { Int(try scalar("SELECT COUNT(*) FROM conflicts WHERE state = 'pending'") ?? "0") ?? 0 } }
@@ -1524,6 +1524,19 @@ public final class SQLiteStateStore: @unchecked Sendable {
     func execute(_ sql: String) throws {
         try ensureWritableUnlocked()
         try executeRaw(sql)
+    }
+
+    /// Runs `body` as one `BEGIN IMMEDIATE … COMMIT`, rolling back on any error, so a crash or a
+    /// failed statement never leaves a multi-statement write half applied. The caller holds the lock.
+    func immediateTransactionUnlocked(_ body: () throws -> Void) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            try body()
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     private func executeRaw(_ sql: String) throws {

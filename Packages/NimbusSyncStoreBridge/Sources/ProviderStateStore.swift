@@ -261,11 +261,13 @@ public struct StoredRemoteIdentity: Sendable, Equatable {
 
 public extension SQLiteStateStore {
     func applyExclusionRules(_ snapshot: ExclusionRuleSnapshot, domainIdentifier: String, rootURI: String) throws -> [JournalChange] {
-        let items = try allItems()
         let encodedRules = String(data: try JSONEncoder().encode(snapshot), encoding: .utf8) ?? ""
         return try withLock {
             try execute("BEGIN IMMEDIATE")
             do {
+                // Read inside the transaction: items read before the lock could be journaled with
+                // data a concurrent write had already replaced.
+                let items = try allItemsUnlocked()
                 try execute("INSERT OR REPLACE INTO preferences (key, value, updated_at) VALUES ('exclusion.rules.\(sql(domainIdentifier))', '\(sql(encodedRules))', unixepoch())")
                 // Snapshot membership was materialized under the previous
                 // view rule. Invalidate only item-page cache so an old page
@@ -906,7 +908,11 @@ public extension SQLiteStateStore {
     }
 
     func allItems(limit: Int = DomainScale.maximumItems, includeTombstones: Bool = false) throws -> [RemoteItem] {
-        try withLock {
+        try withLock { try allItemsUnlocked(limit: limit, includeTombstones: includeTombstones) }
+    }
+
+    private func allItemsUnlocked(limit: Int = DomainScale.maximumItems, includeTombstones: Bool = false) throws -> [RemoteItem] {
+        do {
             let tombstoneClause = includeTombstones ? "" : "WHERE tombstone = 0"
             let statement = try prepare("""
             SELECT item_uuid, remote_entity_id, parent_uuid, trash_original_parent_uuid, remote_name, kind, current_remote_uri, size, remote_version, content_version, metadata_version, trashed, tombstone, created_at, modified_at, can_read, can_write, can_add_children, can_trash, can_delete, content_type
