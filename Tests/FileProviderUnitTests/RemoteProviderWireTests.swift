@@ -351,6 +351,132 @@ final class RemoteProviderWireTests: XCTestCase {
         XCTAssertTrue(protocolState.requests.isEmpty, "nothing is sent for a rename or move already done")
     }
 
+    /// Emptying the Trash used to purge by the item's original path, which a trashed item keeps:
+    /// a new file created at that path was permanently deleted, and an empty path was taken for a
+    /// successful purge. A trashed item is now deleted locally only and stays in the server trash.
+    func testPurgingATrashedItemNeverDeletesByItsOriginalPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4, allowsPurge: true)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        var item = fixture.template
+        item.remoteID = "remote-trashed-original"
+        item.canTrash = true
+        item.canDelete = true
+        try store.insertItem(item)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        var trashed = item
+        trashed.trashed = true
+        trashed.trashOriginalParentIdentifier = item.parentIdentifier
+        trashed.parentIdentifier = NSFileProviderItemIdentifier.trashContainer.rawValue
+        try store.insertItem(trashed)
+
+        // `file/info` at the original path now answers with another object (remote-wire-remote).
+        try await backend!.delete(DeleteRequest(itemIdentifier: trashed.itemIdentifier, expectedVersion: trashed.version.content, recursive: false, replayKey: "purge-trashed"), context: fixture.makeContext(itemIdentifier: trashed.itemIdentifier))
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file" && $0.method == "DELETE" }, "the file now at the original path is never purged")
+        XCTAssertTrue(protocolState.requests.isEmpty, "nothing is sent for a trashed item")
+    }
+
+    /// Rename names its target by path like delete and trash: a stale item must not rename the
+    /// other file at its path. It is deleted instead and the system hears about it.
+    func testRenamingAStaleItemDeletesItInsteadOfRenamingTheFileAtItsPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        try store.insertItem(stale)
+        let workingSet = NSFileProviderItemIdentifier.workingSet.rawValue
+        let before = try store.currentAnchor(domainIdentifier: fixture.domainIdentifier, scope: workingSet)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        var renamed = stale
+        renamed.name = "renamed.bin"
+
+        do {
+            _ = try await backend!.modify(ModifyRequest(item: renamed, expectedVersion: stale.version.content, changedFields: [.filename], contents: nil, options: [], replayKey: "rename-stale"), context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+            XCTFail("the path now belongs to another object")
+        } catch let failure as CoreFailure {
+            XCTAssertTrue(failure.isRemoteIdentityChanged)
+        }
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file/rename" }, "the file now at the path is not renamed")
+        XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.tombstone, true)
+        let changes = try store.enumerateChanges(domainIdentifier: fixture.domainIdentifier, scope: workingSet, from: before).changes
+        XCTAssertTrue(changes.contains { $0.itemIdentifier == stale.itemIdentifier && $0.kind == "deleted" })
+    }
+
+    func testMovingAStaleItemDeletesItInsteadOfMovingTheFileAtItsPath() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let folder = try makeWireFolder(name: "Destination", fixture: fixture, store: store)
+        var stale = fixture.template
+        stale.remoteID = "remote-deleted-placeholder"
+        try store.insertItem(stale)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        var backend: NimbusSyncRemoteBackend? = fixture.makeBackend(protocolState: protocolState)
+        var moved = stale
+        moved.parentIdentifier = folder.itemIdentifier
+
+        do {
+            _ = try await backend!.modify(ModifyRequest(item: moved, expectedVersion: stale.version.content, changedFields: [.parentItemIdentifier], contents: nil, options: [], replayKey: "move-stale"), context: fixture.makeContext(itemIdentifier: stale.itemIdentifier))
+            XCTFail("the path now belongs to another object")
+        } catch let failure as CoreFailure {
+            XCTAssertTrue(failure.isRemoteIdentityChanged)
+        }
+        backend = nil
+
+        XCTAssertFalse(protocolState.requests.contains { $0.url.path == "/api/v4/file/move" }, "the file now at the path is not moved")
+        XCTAssertEqual(try store.item(identifier: stale.itemIdentifier)?.tombstone, true)
+    }
+
+    /// A move leaves the content version alone and `file/move` returns no item. When the metadata
+    /// version did not change either, the system sent the same base for A→B, B→A and A→B, and the
+    /// third move was answered with the first one's stored result without reaching the server.
+    /// Each step's base here is what the system really holds: the projected metadata version.
+    func testMovingBackAndForthReachesTheServerEveryTime() async throws {
+        let fixture = try UploadWireFixture(provider: "remote", chunkSize: 4)
+        defer { fixture.cleanup() }
+        let store = try SQLiteStateStore(url: fixture.storeURL)
+        let folderA = try makeWireFolder(name: "A", fixture: fixture, store: store)
+        let folderB = try makeWireFolder(name: "B", fixture: fixture, store: store)
+        var item = fixture.template
+        item.remoteID = "remote-wire-remote"
+        item.parentIdentifier = folderA.itemIdentifier
+        item.uri = try CloudreveRemoteURI.append(folderA.uri, name: item.name)
+        try store.insertItem(item)
+        let protocolState = UploadWireURLProtocol.State(provider: "remote", sourceSize: 10)
+        let backend = fixture.makeBackend(protocolState: protocolState)
+        let coordinator = AsyncFileProviderMutationCoordinator(store: store, backend: backend)
+        var seenBases: Set<Data> = []
+
+        for (step, destination) in [folderB, folderA, folderB].enumerated() {
+            let current = try XCTUnwrap(try store.item(identifier: item.itemIdentifier))
+            let baseMetadataVersion = NimbusSyncFileProviderItem(model: current).itemVersion.metadataVersion
+            XCTAssertTrue(seenBases.insert(baseMetadataVersion).inserted, "step \(step) has its own base metadata version")
+            var moved = current
+            moved.parentIdentifier = destination.itemIdentifier
+            let result = try await coordinator.modify(item: moved, baseVersion: current.version.content, baseMetadataVersion: baseMetadataVersion, fields: [.parentItemIdentifier], contents: nil, options: [], context: fixture.makeContext(itemIdentifier: item.itemIdentifier))
+            XCTAssertEqual(result.parentIdentifier, destination.itemIdentifier, "step \(step)")
+        }
+
+        let moves = protocolState.requests.filter { $0.url.path == "/api/v4/file/move" }
+        XCTAssertEqual(moves.count, 3, "every move reached the server")
+        let lastBody = try XCTUnwrap(moves.last?.body.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(lastBody["dst"] as? String, folderB.uri)
+        XCTAssertEqual(try store.item(identifier: item.itemIdentifier)?.parentIdentifier, folderB.itemIdentifier)
+    }
+
+    private func makeWireFolder(name: String, fixture: UploadWireFixture, store: SQLiteStateStore) throws -> RemoteItem {
+        let folder = RemoteItem(itemIdentifier: CloudreveIdentifier.item(), remoteID: "remote-folder-\(name)", parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue, name: name, uri: try CloudreveRemoteURI.append(fixture.rootURI, name: name), kind: .folder, contentType: "public.folder", size: 0, version: ItemVersion(content: Data(name.utf8), metadata: Data(name.utf8)), canRead: true, canWrite: true, canAddChildren: true)
+        try store.insertItem(folder)
+        return folder
+    }
+
     func testQiniuAsyncUploadUsesOneBasedPartsAndUpTokenOnStorageOnly() async throws {
         let fixture = try UploadWireFixture(provider: "qiniu", chunkSize: 4)
         defer { fixture.cleanup() }
@@ -859,6 +985,7 @@ private final class DirectoryPageWireURLProtocol: URLProtocol {
 private final class UploadWireFixture {
     let provider: String
     let chunkSize: Int64
+    let allowsPurge: Bool
     let storeURL: URL
     let rootURI: String
     let domainIdentifier: String
@@ -867,9 +994,10 @@ private final class UploadWireFixture {
     let secretVault: MemoryOpaqueSecretVault
     private var sourceURLs: [URL] = []
 
-    init(provider: String, chunkSize: Int64) throws {
+    init(provider: String, chunkSize: Int64, allowsPurge: Bool = false) throws {
         self.provider = provider
         self.chunkSize = chunkSize
+        self.allowsPurge = allowsPurge
         self.storeURL = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-wire-\(provider)-\(UUID().uuidString).sqlite3")
         self.rootURI = try CloudreveRemoteURI.canonical("/", accountID: "account")
         self.domainIdentifier = CloudreveIdentifier.domain()
@@ -889,7 +1017,7 @@ private final class UploadWireFixture {
         self.credentialVault = MemoryCredentialVault()
         self.secretVault = MemoryOpaqueSecretVault()
         let store = try SQLiteStateStore(url: storeURL)
-        let capabilities = Self.capabilities(provider: provider)
+        let capabilities = Self.capabilities(provider: provider, allowsPurge: allowsPurge)
         let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
         try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: capabilities))
         try credentialVault.write(Credential(accessToken: "unit-token", refreshToken: "refresh-token", accessExpiry: Date().addingTimeInterval(3_600)), reference: "credential")
@@ -903,7 +1031,7 @@ private final class UploadWireFixture {
         }
         let store = try SQLiteStateStore(url: storeURL)
         let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: rootURI)
-        try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: Self.capabilities(provider: provider)))
+        try store.registerDomain(DomainDescriptor(identifier: domainIdentifier, displayName: "Wire Test", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "credential", capabilitySnapshot: Self.capabilities(provider: provider, allowsPurge: allowsPurge)))
     }
 
     /// Another new file in the root, so tests can tell sessions of different items apart.
@@ -950,7 +1078,7 @@ private final class UploadWireFixture {
             store: store,
             vault: credentialVault,
             credentialReference: "credential",
-            capabilitySnapshot: Self.capabilities(provider: provider),
+            capabilitySnapshot: Self.capabilities(provider: provider, allowsPurge: allowsPurge),
             providerName: provider,
             secretVault: secretVault,
             requestTimeout: 10,
@@ -980,9 +1108,9 @@ private final class UploadWireFixture {
         sourceURLs.removeAll()
     }
 
-    private static func capabilities(provider: String) -> CapabilitySnapshot {
+    private static func capabilities(provider: String, allowsPurge: Bool) -> CapabilitySnapshot {
         let providerCapability = CapabilitySnapshot.Provider(name: provider, read: .verified, write: .verified, resumable: .verified, zeroByte: .verified, crypto: .verified)
-        let operations = CapabilitySnapshot.OperationCapabilities(collisionSafeCreate: .verified, conditionalModify: .verified, metadataMove: .verified, trash: .verified, zeroByte: .verified, resumable: .verified)
+        let operations = CapabilitySnapshot.OperationCapabilities(collisionSafeCreate: .verified, conditionalModify: .verified, metadataMove: .verified, trash: .verified, purge: allowsPurge ? .verified : .unsupported, zeroByte: .verified, resumable: .verified)
         return CapabilitySnapshot(
             revision: 1,
             stableItemIdentity: .verified,
@@ -995,6 +1123,7 @@ private final class UploadWireFixture {
             uploadCompletionQueryableProviders: [provider],
             zeroByteWriteProviders: [provider],
             resolvedUploadPolicyKinds: [provider],
+            deleteSemantics: allowsPurge ? .verified : .unsupported,
             trashRestore: .verified,
             providers: [providerCapability],
             operations: operations
@@ -1150,6 +1279,9 @@ private final class UploadWireURLProtocol: URLProtocol {
             return (200, Data(#"{"code":0}"#.utf8))
         }
         if path == "/api/v4/file", request.httpMethod == "DELETE" {
+            return (200, Data(#"{"code":0}"#.utf8))
+        }
+        if path == "/api/v4/file/move" {
             return (200, Data(#"{"code":0}"#.utf8))
         }
         if path == "/api/v4/file/upload", let code = state.uploadSessionAPICode {

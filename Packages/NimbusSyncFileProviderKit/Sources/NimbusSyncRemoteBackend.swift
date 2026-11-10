@@ -511,6 +511,11 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
     public func delete(identifier: String, expectedVersion: Data?, recursive: Bool) throws {
         guard let current = try store.item(identifier: identifier) else { return }
         let skipSoftDelete = try deletionMode(for: current, expectedVersion: expectedVersion, recursive: recursive)
+        if current.trashed {
+            // Never purge by the original path (see the async `delete`).
+            ActivityLog.shared.warning("file-provider", "Deleted a trashed item locally only; it stays in the server trash · item=\(current.itemIdentifier)")
+            return
+        }
         do {
             let _: EmptyResponse = try request(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": skipSoftDelete], authenticated: true)
         } catch let failure as CoreFailure where failure.code == .notFound {
@@ -1866,19 +1871,49 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         // A rename or move the item already has is not sent again. The system may re-issue a
         // committed request on a newer base (the reply was lost and the item changed since);
         // renaming to the current name or moving into the current folder must not fail it.
-        if request.changedFields.contains(.filename), request.item.name != result.name {
+        let renames = request.changedFields.contains(.filename) && request.item.name != result.name
+        let moves = request.changedFields.contains(.parentItemIdentifier) && request.item.parentIdentifier != result.parentIdentifier
+        if renames || moves {
+            // Rename and move name their target by path, like delete and trash: a stale item can
+            // share its path with another object, which must never be renamed or moved instead.
+            try await requireSameRemoteObjectBeforeMetadataChange(result, context: context)
+        }
+        if renames {
             try validateName(request.item.name)
             let dto: RemoteFileDTO = try await requestAsync(path: "file/rename", method: "POST", query: [], body: ["uri": result.uri, "new_name": request.item.name], authenticated: true, context: context)
             result = try makeItem(dto, parentIdentifier: result.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, itemIdentifier: result.itemIdentifier)
         }
-        if request.changedFields.contains(.parentItemIdentifier), request.item.parentIdentifier != result.parentIdentifier {
+        if moves {
             guard capabilitySnapshot.conditionalMetadataMutation == .verified, capabilitySnapshot.operations.metadataMove == .verified else { throw CoreFailure(code: .unsupportedServer, retryable: false, userActionRequired: true) }
             let destination = try await parentURIAsync(for: request.item.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue, context: context)
             let _: EmptyResponse = try await requestAsync(path: "file/move", method: "POST", query: [], body: ["uris": [result.uri], "dst": destination, "copy": false], authenticated: true, context: context)
             result.parentIdentifier = request.item.parentIdentifier
             result.uri = try CloudreveRemoteURI.append(destination, name: result.name)
+            // `file/move` returns no item, so the metadata version is advanced here. It is chained
+            // from the previous one: moving A→B, B→A, A→B must give each move its own base
+            // metadata version, or the third move is taken for a replay of the first.
+            result.version = ItemVersion(content: result.version.content, metadata: VersionHasher.metadata(parent: result.parentIdentifier, name: result.name, kind: result.kind, permissionBits: result.canRead ? 1 : 0, revision: result.version.metadata.base64EncodedString()))
         }
         return result
+    }
+
+    /// Confirms the path still holds the item's object before a rename or move. When it does not,
+    /// the item is deleted and the system hears about it, exactly as `trash` does, and the failure
+    /// is rethrown so the mutation coordinator clears the operation.
+    private func requireSameRemoteObjectBeforeMetadataChange(_ current: RemoteItem, context: FileProviderOperationContext) async throws {
+        do {
+            try await requireSameRemoteObjectAtPathAsync(current, context: context)
+        } catch let failure as CoreFailure where failure.isRemoteObjectGone {
+            do {
+                let change = try store.deleteSystemHeldItem(identifier: current.itemIdentifier, origin: "modify")
+                ActivityLog.shared.debug("file-provider", Self.staleDeletionSummary(identifier: current.itemIdentifier, alreadyDeleted: current.tombstone, change: change))
+            } catch {
+                ActivityLog.shared.error("file-provider", "Could not delete a stale item · item=\(current.itemIdentifier) \(FileProviderErrorMapper.diagnosticSummary(error))")
+            }
+            let reason = failure.isRemoteIdentityChanged ? "the server holds another file at its path" : "nothing is at its path on the server"
+            ActivityLog.shared.warning("file-provider", "Removed an item instead of renaming or moving it: \(reason) · item=\(current.itemIdentifier)")
+            throw failure
+        }
     }
 
     public func trash(_ request: TrashRequest, context: FileProviderOperationContext) async throws -> RemoteItem {
@@ -1932,19 +1967,25 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
     public func delete(_ request: DeleteRequest, context: FileProviderOperationContext) async throws {
         guard let current = try store.item(identifier: request.itemIdentifier) else { return }
         let skipSoftDelete = try deletionMode(for: current, expectedVersion: request.expectedVersion, recursive: request.recursive)
-        if !current.trashed {
-            do {
-                try await requireSameRemoteObjectAtPathAsync(current, context: context)
-            } catch let failure as CoreFailure where failure.isRemoteObjectGone {
-                // Nothing at the path, or another object there: what the item stood for is gone
-                // either way, and deleting by path must never touch the other object.
-                if failure.isRemoteIdentityChanged {
-                    ActivityLog.shared.warning("file-provider", "Deleted a stale item locally only: the server holds another file at its path · item=\(current.itemIdentifier)")
-                } else {
-                    ActivityLog.shared.debug("file-provider", "Deleted an item locally only: nothing is at its path on the server · item=\(current.itemIdentifier)")
-                }
-                return
+        if current.trashed {
+            // A trashed item keeps its original path, which this client cannot use to reach the
+            // object in the Cloudreve trash: a DELETE there would purge whatever now sits at that
+            // path, and an empty path answered not-found was taken for success. Nothing is sent;
+            // the item is deleted locally and the object stays recoverable in the server trash.
+            ActivityLog.shared.warning("file-provider", "Deleted a trashed item locally only; it stays in the server trash · item=\(current.itemIdentifier)")
+            return
+        }
+        do {
+            try await requireSameRemoteObjectAtPathAsync(current, context: context)
+        } catch let failure as CoreFailure where failure.isRemoteObjectGone {
+            // Nothing at the path, or another object there: what the item stood for is gone
+            // either way, and deleting by path must never touch the other object.
+            if failure.isRemoteIdentityChanged {
+                ActivityLog.shared.warning("file-provider", "Deleted a stale item locally only: the server holds another file at its path · item=\(current.itemIdentifier)")
+            } else {
+                ActivityLog.shared.debug("file-provider", "Deleted an item locally only: nothing is at its path on the server · item=\(current.itemIdentifier)")
             }
+            return
         }
         do {
             let _: EmptyResponse = try await requestAsync(path: "file", method: "DELETE", query: [], body: ["uris": [current.uri], "skip_soft_delete": skipSoftDelete], authenticated: true, context: context)
@@ -1953,7 +1994,8 @@ extension NimbusSyncRemoteBackend: CloudreveAsyncBackend {
         }
     }
 
-    /// Items already in the Cloudreve trash are purged. Anything else (`rm`,
+    /// Items already in the Cloudreve trash need the purge permission, but callers delete them
+    /// locally only (their original path cannot reach the trashed object). Anything else (`rm`,
     /// application temp-file cleanup, "Delete Immediately" outside the
     /// trash) is soft-deleted into the Cloudreve trash so it stays
     /// recoverable on the server. Returns the `skip_soft_delete` flag.
