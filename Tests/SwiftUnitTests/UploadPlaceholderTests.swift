@@ -191,6 +191,112 @@ final class UploadPlaceholderTests: XCTestCase {
 
         XCTAssertEqual(try store.item(identifier: gone.itemIdentifier)?.tombstone, true, "the run must reach deletion detection")
         XCTAssertEqual(try store.item(identifier: trashed.itemIdentifier)?.tombstone, false, "an item that is only in the trash is not a permanent deletion")
+        // Trashed on the server, the known item leaves its folder for the local trash, keeping its
+        // restore location as its path.
+        let mapped = try XCTUnwrap(store.item(identifier: trashed.itemIdentifier))
+        XCTAssertTrue(mapped.trashed)
+        XCTAssertEqual(mapped.parentIdentifier, NSFileProviderItemIdentifier.trashContainer.rawValue)
+        XCTAssertEqual(mapped.trashOriginalParentIdentifier, NSFileProviderItemIdentifier.rootContainer.rawValue)
+        XCTAssertEqual(mapped.uri, "\(rootURI)/trashed.txt")
+        XCTAssertFalse(try store.listChildren(parentIdentifier: NSFileProviderItemIdentifier.rootContainer.rawValue).contains { $0.itemIdentifier == trashed.itemIdentifier })
+    }
+
+    /// An item with queued local work is left where it is when the server trashed it, as deletion
+    /// detection does: moving it to the local trash would strand the upload in flight.
+    func testReconcileLeavesAServerTrashedItemWithPendingWorkInPlace() async throws {
+        let store = try makeStore()
+        let pending = item(remoteID: "r-pending", name: "pending.txt")
+        try store.insertItem(pending)
+        try store.setPending(pending.itemIdentifier, templateIdentifier: nil)
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            if uri == "cloudreve://trash" {
+                return Self.envelope([
+                    "files": [[
+                        "type": 0, "id": "r-pending", "name": "pending.txt", "path": "cloudreve://trash/pending.txt", "size": 3,
+                        "metadata": [CloudreveFileFields.restoreURIMetadataKey: "cloudreve://my/pending.txt"]
+                    ] as [String: Any]],
+                    "pagination": ["page": 1, "page_size": 500, "total_items": 1]
+                ])
+            }
+            return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+
+        let kept = try XCTUnwrap(store.item(identifier: pending.itemIdentifier))
+        XCTAssertFalse(kept.trashed, "queued local work keeps the item out of the local trash")
+        XCTAssertFalse(kept.tombstone, "a trashed entry still counts as seen")
+        XCTAssertEqual(kept.parentIdentifier, NSFileProviderItemIdentifier.rootContainer.rawValue)
+    }
+
+    /// A trash entry whose item is not known locally, or whose restore location is outside this
+    /// domain, is still only counted as seen: nothing is created for it.
+    func testReconcileDoesNotCreateItemsForUnknownTrashEntries() async throws {
+        let store = try makeStore()
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            if uri == "cloudreve://trash" {
+                return Self.envelope([
+                    "files": [[
+                        "type": 0, "id": "r-unknown", "name": "unknown.txt", "path": "cloudreve://trash/unknown.txt", "size": 3,
+                        "metadata": [CloudreveFileFields.restoreURIMetadataKey: "cloudreve://my/unknown.txt"]
+                    ] as [String: Any]],
+                    "pagination": ["page": 1, "page_size": 500, "total_items": 1]
+                ])
+            }
+            return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+
+        XCTAssertNil(try store.itemIdentifier(forRemoteID: "r-unknown"))
+    }
+
+    /// A live rename committed while a folder page is being listed is newer than that listing.
+    /// Applying the page used to write the old name back until the next full check.
+    func testReconcileKeepsALiveChangeCommittedWhileThePageWasListed() async throws {
+        let store = try makeStore()
+        let known = item(remoteID: "r-live", name: "before.txt")
+        try store.insertItem(known)
+        let renamedURI = "\(rootURI)/after.txt"
+        PlaceholderWireURLProtocol.responder = { request in
+            let components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)
+            let uri = components?.queryItems?.first { $0.name == "uri" }?.value
+            if components?.path == "/api/v4/file/info" {
+                return Self.envelope(["type": 1, "id": "root", "name": "", "path": "cloudreve://my"])
+            }
+            if uri == "cloudreve://trash" {
+                return Self.envelope(["files": [], "pagination": ["page": 1, "page_size": 500, "total_items": 0]])
+            }
+            // The live event lands after the listing was produced but before it is applied.
+            var renamed = known
+            renamed.name = "after.txt"
+            renamed.uri = renamedURI
+            renamed.version = ItemVersion(content: known.version.content, metadata: Data("after".utf8))
+            _ = try? store.commitProviderChange(item: renamed, oldParentIdentifier: known.parentIdentifier, newParentIdentifier: known.parentIdentifier, kind: "updated", origin: "remote_event")
+            return Self.envelope(["files": [Self.file(id: "r-live", name: "before.txt", uploading: false)], "pagination": ["page": 1, "page_size": 500, "total_items": 1]])
+        }
+        let vault = try vault()
+        let session = session()
+        let service = CloudreveReconciliationService(origin: origin, store: store, vault: vault, credentialReference: "credential", session: session, credentialRefresh: CredentialRefreshService(vault: vault, lockURL: nil, session: session))
+        try await service.reconcile(descriptor: descriptor, reason: "test")
+
+        let stored = try XCTUnwrap(store.item(identifier: known.itemIdentifier))
+        XCTAssertEqual(stored.name, "after.txt", "the older listing must not undo the live rename")
+        XCTAssertFalse(stored.tombstone, "an item skipped for being newer still counts as seen")
     }
 
     /// The full check records how far it has come so the app can draw an estimated progress bar.

@@ -355,6 +355,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
         var token = savedCursor?.token
         var usedTokens = Set(savedCursor?.usedTokens ?? [])
         var seen = Set<String>([descriptor.rootRemoteID])
+        var listingChangedDuringScan = 0
         // The previous check's item count is the estimate of how many this one will see.
         let expectedItems = knownRemoteIDs.count
         let resumedCount = savedCursor?.scanned ?? 0
@@ -388,6 +389,9 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     throw CoreFailure(code: .quotaExceeded, retryable: false, userActionRequired: true, redactedContext: ["stage": "normal_scan_bound"])
                 }
                 let requestUsedCursor = token != nil
+                // A live change committed after this point is newer than the page about to be
+                // listed; writing the listing back would undo it until the next full check.
+                let pageStartSequence = try store.syncState().currentSequence
                 let response = try await list(uri: current.uri, page: Int32(page), token: token)
                 logger.info("reconcile.page id=\(correlationID, privacy: .public) page=\(page, privacy: .public) token=\(token != nil, privacy: .public) items=\(response.files.count, privacy: .public)")
                 // Progress only: overwriting the cursor here with "page:N" lost the resumable
@@ -405,6 +409,19 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                     // An unfinished upload's placeholder is not a file yet; recording it put a
                     // second item under the uploader's name. Known items are left as they were.
                     if knownIdentifier == nil, file.fields.hasActiveUploadSession { continue }
+                    if let knownIdentifier, try store.hasJournalChange(itemIdentifier: knownIdentifier, after: pageStartSequence, excludingOrigin: "reconciliation") != false {
+                        // Changed by a live event while the page was listed (or compaction removed
+                        // the proof): the stored item is newer and is left as it is. It counts as
+                        // seen, and a folder is still scanned (at its newer path when that is in
+                        // scope) so its children are not taken for deletions.
+                        seen.insert(file.id)
+                        listingChangedDuringScan += 1
+                        if file.type == 1 {
+                            let storedURI = try store.item(identifier: knownIdentifier).flatMap { CloudreveRemoteURI.isWithin($0.uri, root: rootScope.rootURI) ? $0.uri : nil }
+                            queue.append(ReconcileWork(uri: storedURI ?? normalizedPath, parent: knownIdentifier))
+                        }
+                        continue
+                    }
                     let itemIdentifier = knownIdentifier ?? CloudreveIdentifier.item()
                     let item = try makeItem(file, parentIdentifier: current.parent, itemIdentifier: itemIdentifier, accountID: descriptor.accountID, capabilities: descriptor.capabilitySnapshot)
                     let visibility = try store.isExcludedByCurrentRules(item: item, domainIdentifier: descriptor.identifier)
@@ -479,6 +496,9 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             usedTokens.removeAll()
             try saveCursor(queue: queue, current: nil, page: page, token: nil, usedTokens: usedTokens)
         }
+        if listingChangedDuringScan > 0 {
+            logger.info("reconcile.listing.newer id=\(correlationID, privacy: .public) count=\(listingChangedDuringScan, privacy: .public)")
+        }
         if descriptor.capabilitySnapshot.canTrash && deletionSafe {
             try store.updateSyncState(reconcileStatus: "scanning_trash")
             try store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scanProgress().scanned, expected: expectedItems)
@@ -489,6 +509,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 try? self.store.updateReconcileProgress(runID: runID, phase: DomainCheckProgress.Phase.scanningTrash.rawValue, scanned: scannedBeforeTrash + listed, expected: expectedItems)
             }
             var unrepresentableTrash = 0
+            var trashMappedFromRestore = 0
             var trashChangedDuringScan = 0
             for file in trashFiles {
                 guard file.id != descriptor.rootRemoteID else { continue }
@@ -507,6 +528,31 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
                 guard let normalizedPath = canonicalURI(file.path, accountID: descriptor.accountID),
                       CloudreveRemoteURI.isWithin(normalizedPath, root: rootScope.rootURI) else {
                     seen.insert(file.id)
+                    // A known item trashed on the server still showed in its old folder: nothing
+                    // marked it trashed. When its restore location is in this domain and no live
+                    // change is newer than this listing, it is moved to the local trash and keeps
+                    // the restore location as its path. Unknown entries are only counted as seen,
+                    // and so is an item with queued local work, exactly as deletion detection does.
+                    if let restore = file.fields.metadata[CloudreveFileFields.restoreURIMetadataKey],
+                       let original = canonicalURI(restore, accountID: descriptor.accountID),
+                       CloudreveRemoteURI.isWithin(original, root: rootScope.rootURI),
+                       let knownIdentifier = try store.itemIdentifier(forRemoteID: file.id),
+                       try changedAfterScanStart(knownIdentifier) == false,
+                       !(try store.hasPendingWork(itemIdentifier: knownIdentifier)),
+                       let previous = try store.item(identifier: knownIdentifier),
+                       !previous.tombstone {
+                        var item = previous
+                        item.trashed = true
+                        item.trashOriginalParentIdentifier = previous.trashed ? previous.trashOriginalParentIdentifier : previous.parentIdentifier
+                        item.parentIdentifier = NSFileProviderItemIdentifier.trashContainer.rawValue
+                        item.uri = original
+                        item.canDelete = descriptor.capabilitySnapshot.canPurge && (file.capability?.contains("d") ?? false)
+                        if previous != item {
+                            _ = try store.commitProviderChange(item: item, oldParentIdentifier: previous.parentIdentifier, newParentIdentifier: item.parentIdentifier, kind: "trash_reconciled", origin: "reconciliation")
+                            trashMappedFromRestore += 1
+                        }
+                        continue
+                    }
                     unrepresentableTrash += 1
                     continue
                 }
@@ -536,6 +582,9 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
             if unrepresentableTrash > 0 {
                 logger.info("reconcile.trash.skipped id=\(correlationID, privacy: .public) count=\(unrepresentableTrash, privacy: .public)")
                 ActivityLog.shared.info("sync", "Skipped \(unrepresentableTrash) trash entries this client cannot address")
+            }
+            if trashMappedFromRestore > 0 {
+                logger.info("reconcile.trash.mapped id=\(correlationID, privacy: .public) count=\(trashMappedFromRestore, privacy: .public)")
             }
             if trashChangedDuringScan > 0 {
                 logger.info("reconcile.trash.newer id=\(correlationID, privacy: .public) count=\(trashChangedDuringScan, privacy: .public)")
