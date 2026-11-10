@@ -46,6 +46,7 @@ struct NimbusSyncApp: App {
             removingDomainIdentifier: runtime.removingDomainIdentifier,
             renamingDomainIdentifier: runtime.renamingDomainIdentifier,
             domainRenameError: Binding<String?>(get: { runtime.domainRenameError }, set: { runtime.domainRenameError = $0 }),
+            reauthorizationError: Binding<String?>(get: { runtime.reauthorizationError }, set: { runtime.reauthorizationError = $0 }),
             onRename: runtime.renameDomain,
             onOpenFinder: runtime.openFinder,
             onOpenFileProviderSettings: runtime.openFileProviderSettings,
@@ -390,6 +391,9 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
             openConflictsWindow()
             runtime.openConflict(itemIdentifier: itemIdentifier)
         case .reauthorize(let domainIdentifier):
+            // A reauthorize failure is shown by an alert in Settings; without the window it
+            // would stay invisible until Settings was opened later.
+            openSettingsWindow()
             runtime.openReauthorize(domainIdentifier)
         case .task, .settings:
             openSettingsWindow()
@@ -449,6 +453,11 @@ private struct ConflictWindowContent: View {
             onExportLocalCopy: runtime.exportConflictLocalCopy
         )
         .tint(NimbusSyncDesignTokens.brandColor)
+        .alert("Unable to resolve conflict", isPresented: Binding(get: { runtime.conflictActionError != nil }, set: { if !$0 { runtime.conflictActionError = nil } })) {
+            Button("OK", role: .cancel) { runtime.conflictActionError = nil }
+        } message: {
+            Text(runtime.conflictActionError ?? "The conflict could not be resolved.")
+        }
     }
 }
 
@@ -585,6 +594,15 @@ private func configuredSystemDomain(for descriptor: DomainDescriptor) -> NSFileP
     return domain
 }
 
+/// The user's real home folder; a sandboxed app's NSHomeDirectory() is its container, so paths
+/// under the user's home (Finder locations, the App Group log folder) would never be shortened.
+private enum UserHomeDirectory {
+    static let path: String = {
+        guard let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir else { return NSHomeDirectory() }
+        return String(cString: directory)
+    }()
+}
+
 @MainActor
 private final class NimbusSyncAppState: ObservableObject {
     @Published var snapshot = ProductSnapshot()
@@ -608,6 +626,11 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published private(set) var removingDomainIdentifier: String?
     @Published private(set) var renamingDomainIdentifier: String?
     @Published var domainRenameError: String?
+    /// Reauthorize runs from Settings or a `nimbussync://reauthorize` link; its failures are shown
+    /// in Settings, not in the Add Domain window.
+    @Published var reauthorizationError: String?
+    /// Failures of Conflict Center actions, shown in the conflict window.
+    @Published var conflictActionError: String?
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
@@ -1072,7 +1095,7 @@ private final class NimbusSyncAppState: ObservableObject {
                     try? await manager.reimportItems(below: NSFileProviderItemIdentifier(item.itemIdentifier))
                 }
                 reload()
-            } catch { onboardingError = userFacingError(error) }
+            } catch { conflictActionError = userFacingError(error) }
         }
     }
 
@@ -1109,7 +1132,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 _ = try await ConflictSourceExportCoordinator(store: domainStore).export(conflict: projection, manager: manager, destination: destination)
                 reload()
             } catch {
-                onboardingError = userFacingError(error)
+                conflictActionError = userFacingError(error)
             }
         }
     }
@@ -1148,7 +1171,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 try? await manager.reimportItems(below: NSFileProviderItemIdentifier(conflict.itemIdentifier))
                 reload()
             } catch {
-                onboardingError = userFacingError(error)
+                conflictActionError = userFacingError(error)
             }
         }
     }
@@ -1175,7 +1198,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 let systemDomain = configuredSystemDomain(for: domain)
                 if let manager = NSFileProviderManager(for: systemDomain) { try? await manager.signalEnumerator(for: .workingSet) }
                 reload()
-            } catch { onboardingError = userFacingError(error) }
+            } catch { conflictActionError = userFacingError(error) }
         }
     }
 
@@ -1261,17 +1284,11 @@ private final class NimbusSyncAppState: ObservableObject {
             for box in enabled {
                 guard let manager = NSFileProviderManager(for: box.domain),
                       let url = try? await self.userVisibleURLOnce(for: manager) else { continue }
-                paths[box.domain.identifier.rawValue] = SettingsDomainText.displayPath(url.path, home: Self.userHomeDirectory)
+                paths[box.domain.identifier.rawValue] = SettingsDomainText.displayPath(url.path, home: UserHomeDirectory.path)
             }
             if paths != self.domainFolderPaths { self.domainFolderPaths = paths }
         }
     }
-
-    /// The user's real home folder; a sandboxed app's NSHomeDirectory() is its container.
-    private static let userHomeDirectory: String = {
-        guard let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir else { return NSHomeDirectory() }
-        return String(cString: directory)
-    }()
 
     private func resolveSystemDomain(for descriptor: DomainDescriptor) async throws -> NSFileProviderDomain {
         let identifier = NSFileProviderDomainIdentifier(descriptor.identifier)
@@ -1544,7 +1561,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 await resetEventSupervisor(domainIdentifier: domain.identifier)
                 _ = site
                 reload()
-            } catch { onboardingError = userFacingError(error) }
+            } catch { reauthorizationError = userFacingError(error) }
         }
     }
 
@@ -1726,6 +1743,7 @@ private struct SettingsView: View {
     let removingDomainIdentifier: String?
     let renamingDomainIdentifier: String?
     @Binding var domainRenameError: String?
+    @Binding var reauthorizationError: String?
     let onRename: (DomainDescriptor, String) -> Void
     let onOpenFinder: (DomainDescriptor) -> Void
     let onOpenFileProviderSettings: () -> Void
@@ -1761,7 +1779,7 @@ private struct SettingsView: View {
     /// Shared with the Finder extension through the App Group's defaults.
     @AppStorage(ActivityLogLevelPreference.preferenceKey, store: ActivityLogLevelPreference.sharedDefaults()) private var logLevel = ActivityLogLevelPreference.defaultValue.rawValue
 
-    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, reauthorizationError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
         self.domains = domains
         self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
@@ -1772,6 +1790,7 @@ private struct SettingsView: View {
         self.removingDomainIdentifier = removingDomainIdentifier
         self.renamingDomainIdentifier = renamingDomainIdentifier
         _domainRenameError = domainRenameError
+        _reauthorizationError = reauthorizationError
         self.onRename = onRename
         self.onOpenFinder = onOpenFinder
         self.onOpenFileProviderSettings = onOpenFileProviderSettings
@@ -1852,6 +1871,11 @@ private struct SettingsView: View {
             Button("OK", role: .cancel) { domainRenameError = nil }
         } message: {
             Text(domainRenameError ?? "The domain could not be renamed.")
+        }
+        .alert("Unable to reauthorize", isPresented: Binding(get: { reauthorizationError != nil }, set: { if !$0 { reauthorizationError = nil } })) {
+            Button("OK", role: .cancel) { reauthorizationError = nil }
+        } message: {
+            Text(reauthorizationError ?? "The domain could not be reauthorized.")
         }
         .alert("Unable to update exclusions", isPresented: Binding(get: { exclusionError != nil }, set: { if !$0 { exclusionError = nil } })) {
             Button("OK", role: .cancel) { exclusionError = nil }
@@ -2031,7 +2055,7 @@ private struct SettingsView: View {
                         SettingsTagBadge("Latest \(recentLogLines.count) lines")
                     }
                 }
-                Text(logsDirectoryPath.map { SettingsDomainText.displayPath($0, home: NSHomeDirectory()) } ?? "Log folder unavailable")
+                Text(logsDirectoryPath.map { SettingsDomainText.displayPath($0, home: UserHomeDirectory.path) } ?? "Log folder unavailable")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
