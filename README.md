@@ -16,6 +16,8 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
+<img src="Design/Banner.png" alt="NimbusSync: your Cloudreve, native in Finder" width="100%">
+
 </div>
 
 NimbusSync connects a macOS menu-bar application and Replicated File Provider
