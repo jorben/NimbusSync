@@ -243,8 +243,8 @@ callbacks.
 ### Clone
 
 ```sh
-git clone git@github.com:tiylabs/nimbussync.git
-cd nimbussync
+git clone git@github.com:jorben/NimbusSync.git
+cd NimbusSync
 ```
 
 Use the repository's normal access method if the GitHub remote is private.

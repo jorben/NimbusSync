@@ -1711,8 +1711,8 @@ private enum SettingsLayout {
 
 /// Where the About page points: the project and the license it ships under (see LICENSE).
 private enum SettingsLinks {
-    static let repository = URL(string: "https://github.com/tiylabs/nimbussync")!
-    static let license = URL(string: "https://github.com/tiylabs/nimbussync/blob/master/LICENSE")!
+    static let repository = URL(string: "https://github.com/jorben/NimbusSync")!
+    static let license = URL(string: "https://github.com/jorben/NimbusSync/blob/master/LICENSE")!
 }
 
 private struct SettingsView: View {
@@ -2128,7 +2128,7 @@ private struct SettingsView: View {
                 }
                 SettingsRowDivider()
                 SettingsRow(symbol: "chevron.left.forwardslash.chevron.right", tint: .gray, title: "Source code") {
-                    SettingsLinkButton(title: "github.com/tiylabs/nimbussync") { openURL(SettingsLinks.repository) }
+                    SettingsLinkButton(title: "github.com/jorben/NimbusSync") { openURL(SettingsLinks.repository) }
                         .help(SettingsLinks.repository.absoluteString)
                 }
             }

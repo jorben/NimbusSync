@@ -206,8 +206,8 @@ File Provider。匹配的 SSE echo 只负责确认，不再次生成 provider-vi
 ### Clone
 
 ```sh
-git clone git@github.com:tiylabs/nimbussync.git
-cd nimbussync
+git clone git@github.com:jorben/NimbusSync.git
+cd NimbusSync
 ```
 
 如果 GitHub remote 需要权限，请使用仓库既有的认证方式。
