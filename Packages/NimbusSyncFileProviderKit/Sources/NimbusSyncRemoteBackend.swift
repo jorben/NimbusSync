@@ -1379,14 +1379,7 @@ private func mapHTTPStatus(_ status: Int) -> CoreFailure {
 }
 
 private func isAuthenticationAPIError(code: Int, message: String?) -> Bool {
-    switch code {
-    case 401, 40020, 40089:
-        return true
-    case 40081:
-        return message?.range(of: "login required", options: [.caseInsensitive, .diacriticInsensitive]) != nil
-    default:
-        return false
-    }
+    isCloudreveAuthenticationAPIError(code: code, message: message)
 }
 
 private func mapAPIError(_ code: Int, message: String? = nil) -> CoreFailure {

@@ -110,6 +110,9 @@ private actor SSEStreamState {
                     }
                     guard let http = response as? HTTPURLResponse else { throw CoreFailure(code: .network, retryable: true) }
                     logger.info("sse.connect.response endpoint=file/events status=\(http.statusCode, privacy: .public)")
+                    // Still rejected after a forced refresh: the sign-in itself is no longer accepted,
+                    // which the event coordinator reports as "authorization required".
+                    if http.statusCode == 401 { throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true) }
                     if http.statusCode == 200 { ActivityLog.shared.info("live-updates", "Live updates connected") }
                     guard http.statusCode == 200, http.value(forHTTPHeaderField: "Content-Type")?.contains("text/event-stream") == true else { throw CoreFailure(code: .network, retryable: true) }
                     // Raw bytes, not `bytes.lines`: that drops the empty lines that end each event.

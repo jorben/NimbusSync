@@ -292,6 +292,62 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(try vault.read(reference: "credential")?.accessToken, "new")
     }
 
+    /// A rejected or expired refresh token is a definite sign-in failure. It used to come out as
+    /// `unknownOutcome`, so no caller ever reached "authorization required".
+    func testRefreshAuthenticationFailureReachesTheCaller() async throws {
+        let vault = MemoryCredentialVault()
+        try vault.write(Credential(accessToken: "old", refreshToken: "refresh", accessExpiry: Date().addingTimeInterval(-60), generation: 1), reference: "credential")
+        let coordinator = TokenRefreshCoordinator(vault: vault, leaseDuration: 1)
+        do {
+            _ = try await coordinator.credential(reference: "credential") { _ in
+                throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true)
+            }
+            XCTFail("the refresh token was rejected")
+        } catch let failure as CoreFailure {
+            XCTAssertEqual(failure.code, .authentication)
+        }
+        do {
+            _ = try await coordinator.credential(reference: "credential") { _ in throw URLError(.timedOut) }
+            XCTFail("the refresh outcome is unknown")
+        } catch {
+            XCTAssertEqual(error as? RefreshCoordinatorError, .unknownOutcome, "unclear failures stay unknown outcomes")
+        }
+    }
+
+    /// Only a definite rejection of the refresh token is a sign-in failure. A 503 from a proxy or a
+    /// restarting server used to come out as `.authentication` too, leaving the domain at
+    /// "Authorization required" for good.
+    func testRefresherReportsOnlyRejectedTokensAsAuthenticationFailures() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RefreshStubURLProtocol.self]
+        let refresher = OAuthCredentialRefresher(session: URLSession(configuration: configuration))
+        let origin = URL(string: "https://refresh.example.com")!
+        let credential = Credential(accessToken: "old", refreshToken: "refresh", accessExpiry: Date().addingTimeInterval(-60), refreshExpiry: Date().addingTimeInterval(3600), generation: 1)
+
+        func outcome(status: Int, body: String) async -> Error? {
+            RefreshStubURLProtocol.set(status: status, body: Data(body.utf8))
+            do {
+                _ = try await refresher.refresh(origin: origin, credential: credential)
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        let rejected = await outcome(status: 401, body: "{}")
+        XCTAssertEqual((rejected as? CoreFailure)?.code, .authentication, "HTTP 401 rejects the token")
+        let forbidden = await outcome(status: 403, body: "{}")
+        XCTAssertEqual((forbidden as? CoreFailure)?.code, .authentication, "HTTP 403 rejects the token")
+        let unavailable = await outcome(status: 503, body: "Service Unavailable")
+        XCTAssertEqual(unavailable as? RefreshCoordinatorError, .unknownOutcome, "a 503 says nothing about the token")
+        let limited = await outcome(status: 429, body: "{}")
+        XCTAssertEqual(limited as? RefreshCoordinatorError, .unknownOutcome, "a rate limit says nothing about the token")
+        let bodyRejected = await outcome(status: 200, body: #"{"code":40020,"msg":"invalid refresh token","data":null}"#)
+        XCTAssertEqual((bodyRejected as? CoreFailure)?.code, .authentication, "Cloudreve rejects the token inside a 200 envelope")
+        let bodyUnclear = await outcome(status: 200, body: #"{"code":50001,"msg":"internal","data":null}"#)
+        XCTAssertEqual(bodyUnclear as? RefreshCoordinatorError, .unknownOutcome, "other API codes stay unknown outcomes")
+    }
+
     func testFileProviderBackendRejectsStaleContent() throws {
         let item = RemoteItem(name: "file.txt", uri: "/file.txt", kind: .file, contentType: "public.data", size: 3, version: ItemVersion(content: Data("v1".utf8), metadata: Data("m1".utf8)), canRead: true, canWrite: true)
         let backend = MemoryFileProviderBackend(items: [item], contents: [item.itemIdentifier: Data("one".utf8)])
@@ -1908,6 +1964,38 @@ private final class URLProtocolProbe: URLProtocol {
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/octet-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data("ok".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RefreshStubURLProtocol: URLProtocol {
+    private final class Reply: @unchecked Sendable {
+        let lock = NSLock()
+        var status = 200
+        var body = Data()
+    }
+    private static let reply = Reply()
+
+    static func set(status: Int, body: Data) {
+        reply.lock.lock()
+        reply.status = status
+        reply.body = body
+        reply.lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.reply.lock.lock()
+        let status = Self.reply.status
+        let body = Self.reply.body
+        Self.reply.lock.unlock()
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 

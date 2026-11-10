@@ -475,10 +475,20 @@ public final class OAuthCredentialRefresher: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["refresh_token": credential.refreshToken])
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true)
+        // Only a definite rejection of the refresh token is a sign-in failure. A proxy error, a
+        // rate limit or a restarting server (502/503/429…) says nothing about the token; reported
+        // as `.authentication` it left the domain at "Authorization required" for good.
+        guard let http = response as? HTTPURLResponse else { throw RefreshCoordinatorError.unknownOutcome }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true)
+            }
+            throw RefreshCoordinatorError.unknownOutcome
         }
         let envelope = try JSONDecoder().decode(RefreshEnvelope.self, from: data)
+        if envelope.code != 0, isCloudreveAuthenticationAPIError(code: envelope.code, message: envelope.msg) {
+            throw CoreFailure(code: .authentication, retryable: false, userActionRequired: true)
+        }
         guard envelope.code == 0, let token = envelope.data,
               !token.accessToken.isEmpty, !token.refreshToken.isEmpty,
               let accessExpiry = parseISO8601(token.accessExpiry),
@@ -514,7 +524,20 @@ public final class CredentialRefreshService: @unchecked Sendable {
 
 private struct RefreshEnvelope: Decodable {
     let code: Int
+    let msg: String?
     let data: RefreshedToken?
+}
+
+/// Cloudreve API codes (inside an HTTP 200 envelope) that mean the sign-in itself was rejected.
+public func isCloudreveAuthenticationAPIError(code: Int, message: String?) -> Bool {
+    switch code {
+    case 401, 40020, 40089:
+        return true
+    case 40081:
+        return message?.range(of: "login required", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    default:
+        return false
+    }
 }
 
 private struct RefreshedToken: Decodable {
@@ -585,6 +608,10 @@ public actor TokenRefreshCoordinator {
                 refreshed = try await refresh(current)
             } catch let error as RefreshCoordinatorError {
                 throw error
+            } catch let failure as CoreFailure where failure.code == .authentication {
+                // A rejected or expired refresh token is a definite answer, not an unknown
+                // outcome: callers switch to "authorization required" only on this code.
+                throw failure
             } catch {
                 throw RefreshCoordinatorError.unknownOutcome
             }
