@@ -133,8 +133,14 @@ final class ActivityLogTests: XCTestCase {
 
     func testSharedLogIsInertOutsideNimbusSyncProcesses() {
         XCTAssertNil(ActivityLog.defaultSource(bundleIdentifier: "com.apple.dt.xctest.tool"))
-        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "ai.tiy.nimbussync"), "app")
-        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "ai.tiy.nimbussync.fileprovider"), "fileprovider")
+        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "io.github.jorben.nimbussync"), "app")
+        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "io.github.jorben.nimbussync.fileprovider"), "fileprovider")
+        XCTAssertNil(ActivityLog.defaultSource(bundleIdentifier: "io.github.jorben.nimbussync.fileproviderui"))
+        XCTAssertNil(ActivityLog.defaultSource(bundleIdentifier: "io.github.jorben.nimbussync.dev"), "a Dev process must not be read as the Release app")
+        let dev = "io.github.jorben.nimbussync.dev"
+        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: dev, baseIdentifier: dev), "app")
+        XCTAssertEqual(ActivityLog.defaultSource(bundleIdentifier: "\(dev).fileprovider", baseIdentifier: dev), "fileprovider")
+        XCTAssertNil(ActivityLog.defaultSource(bundleIdentifier: "io.github.jorben.nimbussync", baseIdentifier: dev))
         XCTAssertNil(ActivityLog.shared.directory, "tests must never write into the App Group container")
     }
 }

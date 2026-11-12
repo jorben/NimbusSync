@@ -377,7 +377,7 @@ public actor NotificationCoordinator {
         guard !sent.contains(key) else { return }
         let content = UNMutableNotificationContent(); content.title = title; content.body = body; content.categoryIdentifier = kind; content.sound = .default
         let action = kind == "auth" ? "reauthorize" : (kind == "failure" ? "task" : kind)
-        content.userInfo = ["deepLink": "nimbussync://\(action)/\(opaqueID)"]
+        content.userInfo = ["deepLink": "\(AppIdentity.urlScheme)://\(action)/\(opaqueID)"]
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         try await center.add(request)
         sent.append(key); userDefaults.set(Array(sent.suffix(500)), forKey: dedupeKey)
@@ -387,8 +387,8 @@ public actor NotificationCoordinator {
 public enum DeepLinkDestination: Equatable, Sendable { case conflict(UUID), reauthorize(String), task(UUID), item(String), conflictItem(String), settings }
 
 public enum DeepLinkRouter {
-    public static func destination(url: URL) -> DeepLinkDestination? {
-        guard url.scheme == "nimbussync", url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+    public static func destination(url: URL, scheme: String = AppIdentity.urlScheme) -> DeepLinkDestination? {
+        guard url.scheme == scheme, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
         let pathComponents = url.pathComponents.filter { $0 != "/" }
         let action: String
         let identifiers: ArraySlice<String>

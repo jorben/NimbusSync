@@ -89,11 +89,11 @@ public final class ActivityLog: @unchecked Sendable {
     private let maximumBytes: Int
     /// Where the minimum level is read on every write. Nil keeps every level (tests, tools).
     private let levelDefaults: UserDefaults?
-    private let queue = DispatchQueue(label: "ai.tiy.nimbussync.activity-log", qos: .utility)
+    private let queue = DispatchQueue(label: "\(AppIdentity.baseIdentifier).activity-log", qos: .utility)
     static let maximumMessageLength = 600
     /// Debug lines are also sent to unified logging, where `log show` reads them without access to
     /// the App Group container. They carry the same redacted text as the file.
-    private static let debugMirror = Logger(subsystem: "ai.tiy.nimbussync", category: "activity-debug")
+    private static let debugMirror = Logger(subsystem: AppIdentity.baseIdentifier, category: "activity-debug")
 
     public init(directory: URL?, source: String, maximumBytes: Int = 1 << 20, levelDefaults: UserDefaults? = nil) {
         self.directory = directory
@@ -112,11 +112,11 @@ public final class ActivityLog: @unchecked Sendable {
         directory != nil && level.rank >= minimumLevel.rank
     }
 
-    public static func defaultSource(bundleIdentifier: String? = Bundle.main.bundleIdentifier) -> String? {
-        switch bundleIdentifier {
-        case "ai.tiy.nimbussync": "app"
-        case "ai.tiy.nimbussync.fileprovider": "fileprovider"
-        default: nil
+    public static func defaultSource(bundleIdentifier: String? = Bundle.main.bundleIdentifier, baseIdentifier: String = AppIdentity.baseIdentifier) -> String? {
+        switch AppIdentity.role(of: bundleIdentifier, baseIdentifier: baseIdentifier) {
+        case .app: "app"
+        case .fileProvider: "fileprovider"
+        case .fileProviderUI, nil: nil
         }
     }
 

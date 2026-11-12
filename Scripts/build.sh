@@ -9,8 +9,34 @@ BUILD_ROOT=${BUILD_ROOT:-${NIMBUSSYNC_APP_BUILD_ROOT:-"$ROOT/.build/ci"}}
 DIST_DIR=${DIST_DIR:-${NIMBUSSYNC_DIST_DIR:-"$ROOT/Dist"}}
 VERSION=${VERSION:-${NIMBUSSYNC_VERSION:-0.1.0}}
 SIGNING_MODE=${SIGNING_MODE:-${NIMBUSSYNC_SIGNING_MODE:-unsigned}}
-APP_GROUP_IDENTIFIER=${APP_GROUP_IDENTIFIER:-${NIMBUSSYNC_APP_GROUP_IDENTIFIER:-group.ai.tiy.nimbussync}}
-CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY:-${CI_SIGNING_IDENTITY:-${NIMBUSSYNC_CODE_SIGN_IDENTITY:-}}}
+
+# The App Group, Keychain group and bundle IDs come from Config/<Configuration>.xcconfig: Debug
+# builds use the `.dev` identity, Release the shipping one. A single override for every
+# configuration would make the Dev build share (and corrupt) the Release app's data.
+if [ -n "${APP_GROUP_IDENTIFIER:-}${NIMBUSSYNC_APP_GROUP_IDENTIFIER:-}" ]; then
+    printf '%s\n' "APP_GROUP_IDENTIFIER/NIMBUSSYNC_APP_GROUP_IDENTIFIER is no longer supported; the App Group is set per configuration in Config/*.xcconfig. Remove it from Config/build.local.sh or the environment." >&2
+    exit 2
+fi
+
+case "$CONFIGURATION" in
+    Debug) CONFIG_KEY=DEBUG ;;
+    Release) CONFIG_KEY=RELEASE ;;
+    *)
+        printf '%s\n' "unsupported CONFIGURATION: $CONFIGURATION" >&2
+        exit 2
+        ;;
+esac
+
+# Signing value for this configuration: NIMBUSSYNC_<DEBUG|RELEASE>_<NAME>, then NIMBUSSYNC_<NAME>,
+# then the legacy NIMBUSSYNC_<NAME>_UUID. Debug and Release are different App IDs, so each needs its
+# own provisioning profiles (and Debug, with File Provider testing mode, a development identity).
+# CONFIG_KEY and every NAME are fixed literals above and below, so the eval sees no user input.
+signing_value() {
+    eval "signing_value_result=\${NIMBUSSYNC_${CONFIG_KEY}_$1:-\${NIMBUSSYNC_$1:-\${NIMBUSSYNC_$1_UUID:-}}}"
+    printf '%s' "$signing_value_result"
+}
+
+CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY:-${CI_SIGNING_IDENTITY:-$(signing_value CODE_SIGN_IDENTITY)}}
 
 require_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -130,9 +156,9 @@ case "$SIGNING_MODE" in
         ;;
     signed)
         DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM:-${NIMBUSSYNC_DEVELOPMENT_TEAM:-}}
-        NIMBUSSYNC_APP_PROFILE=${NIMBUSSYNC_APP_PROFILE:-${NIMBUSSYNC_APP_PROFILE_UUID:-}}
-        NIMBUSSYNC_FILE_PROVIDER_PROFILE=${NIMBUSSYNC_FILE_PROVIDER_PROFILE:-${NIMBUSSYNC_FILE_PROVIDER_PROFILE_UUID:-}}
-        NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE=${NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE:-${NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE_UUID:-}}
+        NIMBUSSYNC_APP_PROFILE=$(signing_value APP_PROFILE)
+        NIMBUSSYNC_FILE_PROVIDER_PROFILE=$(signing_value FILE_PROVIDER_PROFILE)
+        NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE=$(signing_value FILE_PROVIDER_UI_PROFILE)
         : "${DEVELOPMENT_TEAM:?DEVELOPMENT_TEAM or NIMBUSSYNC_DEVELOPMENT_TEAM is required for a signed build}"
         : "${CODE_SIGN_IDENTITY:?CODE_SIGN_IDENTITY is required for a signed build}"
         : "${NIMBUSSYNC_APP_PROFILE:?NIMBUSSYNC_APP_PROFILE is required for a signed build}"
@@ -144,7 +170,6 @@ case "$SIGNING_MODE" in
             CODE_SIGNING_REQUIRED=YES \
             CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
             DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-            APP_GROUP_IDENTIFIER="$APP_GROUP_IDENTIFIER" \
             NIMBUSSYNC_APP_PROFILE="$NIMBUSSYNC_APP_PROFILE" \
             NIMBUSSYNC_FILE_PROVIDER_PROFILE="$NIMBUSSYNC_FILE_PROVIDER_PROFILE" \
             NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE="$NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE"
@@ -173,7 +198,8 @@ if [ "$SIGNING_MODE" = signed ]; then
     fi
 fi
 
-# Keep the bundle name stable. Renaming a signed .app after codesign breaks the
+# Keep the bundle name stable. Debug (Dev) and Release builds are both NimbusSync.app; they coexist
+# because their bundle IDs differ, so keep the Dev copy outside /Applications (for example Dist/). Renaming a signed .app after codesign breaks the
 # bundle-level signature even when the Mach-O executable still carries a valid signature.
 artifact="$DIST_DIR/NimbusSync.app"
 archive="$DIST_DIR/NimbusSync-$VERSION.zip"

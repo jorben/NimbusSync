@@ -126,9 +126,9 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
         self.isShared = false
         self.isSharedByCurrentUser = false
         var decorationIDs: [NSFileProviderItemDecorationIdentifier] = []
-        if projectedConflict { decorationIDs.append(NSFileProviderItemDecorationIdentifier("ai.tiy.nimbussync.conflict")) }
-        if self.uploadingError != nil || self.downloadingError != nil { decorationIDs.append(NSFileProviderItemDecorationIdentifier("ai.tiy.nimbussync.error")) }
-        if effectiveKeepPolicy == .keepDownloaded { decorationIDs.append(NSFileProviderItemDecorationIdentifier("ai.tiy.nimbussync.keep-downloaded")) }
+        if projectedConflict { decorationIDs.append(NSFileProviderItemDecorationIdentifier("io.github.jorben.nimbussync.conflict")) }
+        if self.uploadingError != nil || self.downloadingError != nil { decorationIDs.append(NSFileProviderItemDecorationIdentifier("io.github.jorben.nimbussync.error")) }
+        if effectiveKeepPolicy == .keepDownloaded { decorationIDs.append(NSFileProviderItemDecorationIdentifier("io.github.jorben.nimbussync.keep-downloaded")) }
         self.decorations = decorationIDs.isEmpty ? nil : decorationIDs
     }
 
@@ -868,7 +868,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
     private var systemSetCoordinator: SystemSetCoordinator?
     private var cacheRefreshCoordinator: FrameworkCacheRefreshCoordinator?
     private var backgroundTask: Task<Void, Never>?
-    private let reconciliationLogger = Logger(subsystem: "ai.tiy.nimbussync", category: "file-provider-reconciliation")
+    private let reconciliationLogger = Logger(subsystem: AppIdentity.baseIdentifier, category: "file-provider-reconciliation")
 
     @objc public required init(domain: NSFileProviderDomain) {
         self.domain = domain
@@ -1356,10 +1356,10 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         let progress = Progress(totalUnitCount: 1)
         let completion = ErrorCompletion(completionHandler)
         let supportedActions = [
-            "ai.tiy.nimbussync.check-for-updates",
-            "ai.tiy.nimbussync.keep-downloaded",
-            "ai.tiy.nimbussync.allow-automatic-freeing",
-            "ai.tiy.nimbussync.remove-download"
+            "io.github.jorben.nimbussync.check-for-updates",
+            "io.github.jorben.nimbussync.keep-downloaded",
+            "io.github.jorben.nimbussync.allow-automatic-freeing",
+            "io.github.jorben.nimbussync.remove-download"
         ]
         guard supportedActions.contains(actionIdentifier.rawValue) else { completion.call(FileProviderErrorMapper.map(CoreFailure(code: .unsupportedMetadata, retryable: false))); return progress }
         let task = Task { [weak self] in
@@ -1370,10 +1370,10 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 completion.call(FileProviderErrorMapper.map(error))
                 return
             }
-            if actionIdentifier.rawValue == "ai.tiy.nimbussync.keep-downloaded" || actionIdentifier.rawValue == "ai.tiy.nimbussync.allow-automatic-freeing" {
+            if actionIdentifier.rawValue == "io.github.jorben.nimbussync.keep-downloaded" || actionIdentifier.rawValue == "io.github.jorben.nimbussync.allow-automatic-freeing" {
                 do {
                     guard let store = self.store else { throw CoreFailure(code: .database, retryable: false, userActionRequired: true) }
-                    let policy: KeepDownloadedPolicy = actionIdentifier.rawValue == "ai.tiy.nimbussync.keep-downloaded" ? .keepDownloaded : .automatic
+                    let policy: KeepDownloadedPolicy = actionIdentifier.rawValue == "io.github.jorben.nimbussync.keep-downloaded" ? .keepDownloaded : .automatic
                     for identifier in itemIdentifiers {
                         guard !progress.isCancelled, !Task.isCancelled else {
                             throw CoreFailure(code: .cancelled, retryable: false)
@@ -1400,7 +1400,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 } catch { completion.call(FileProviderErrorMapper.map(error)) }
                 return
             }
-            if actionIdentifier.rawValue == "ai.tiy.nimbussync.remove-download" {
+            if actionIdentifier.rawValue == "io.github.jorben.nimbussync.remove-download" {
                 do {
                     guard let manager = NSFileProviderManager(for: self.domain) else { throw CoreFailure(code: .database, retryable: true) }
                     for identifier in itemIdentifiers {
@@ -1685,7 +1685,7 @@ public enum FileProviderErrorMapper {
         return map(error)
     }
 
-    private static let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "file-provider-error")
+    private static let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "file-provider-error")
 
     /// Redacted, enum-only description of an error before it collapses into
     /// a File Provider code. Never includes messages, URIs, names or SQL.

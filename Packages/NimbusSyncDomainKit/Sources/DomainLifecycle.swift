@@ -330,7 +330,7 @@ public struct DomainRemovalPolicy: Sendable {
 }
 
 public enum AppGroupPaths {
-    public static let identifier = "group.ai.tiy.nimbussync"
+    public static let identifier = AppIdentity.appGroupIdentifier
 
     public static func root(fileManager: FileManager = .default) -> URL? {
         fileManager.containerURL(forSecurityApplicationGroupIdentifier: identifier)

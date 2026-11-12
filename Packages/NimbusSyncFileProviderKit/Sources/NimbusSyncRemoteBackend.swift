@@ -199,7 +199,7 @@ public final class NimbusSyncRemoteBackend: FileProviderBackend, @unchecked Send
     private let providerName: String
     private let secretVault: OpaqueSecretVault
     private let credentialRefresh: CredentialRefreshService
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "file-provider-download")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "file-provider-download")
     private let clientID: String?
 
     public init(origin: URL, rootURI: String, store: SQLiteStateStore, vault: CredentialVault, credentialReference: String, capabilitySnapshot: CapabilitySnapshot = CapabilitySnapshot(), providerName: String = "unverified", secretVault: OpaqueSecretVault, requestTimeout: TimeInterval = 60, clientID: String? = nil, domainIdentifier: String? = nil, urlSessionConfiguration: URLSessionConfiguration? = nil) {

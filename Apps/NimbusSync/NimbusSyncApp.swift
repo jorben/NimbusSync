@@ -76,8 +76,8 @@ struct NimbusSyncApp: App {
 
 @MainActor
 private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcurrency UNUserNotificationCenterDelegate {
-    private static let forwardedURLNotification = Notification.Name("ai.tiy.nimbussync.forwarded-external-urls")
-    private static let instanceLockFilename = "ai.tiy.nimbussync.instance.lock"
+    private static let forwardedURLNotification = Notification.Name("\(AppIdentity.baseIdentifier).forwarded-external-urls")
+    private static let instanceLockFilename = "\(AppIdentity.baseIdentifier).instance.lock"
 
     private let instanceLockDescriptor: Int32?
     private var primaryApplication: NSRunningApplication?
@@ -651,8 +651,8 @@ private final class NimbusSyncAppState: ObservableObject {
     private let registry: SQLiteStateStore?
     private let productStore: ProductStore
     private let oauth = OAuthAuthorizationSession()
-    private let oauthLogger = Logger(subsystem: "ai.tiy.nimbussync", category: "oauth")
-    private let lifecycleLogger = Logger(subsystem: "ai.tiy.nimbussync", category: "lifecycle")
+    private let oauthLogger = Logger(subsystem: AppIdentity.baseIdentifier, category: "oauth")
+    private let lifecycleLogger = Logger(subsystem: AppIdentity.baseIdentifier, category: "lifecycle")
     private let heartbeat: HeartbeatCoordinator
     private let notifications: NotificationCoordinator
     private var started = false
@@ -1220,7 +1220,7 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     /// Reveals the newest log file (or the folder) in Finder. The folder lives in the App Group
-    /// container: ~/Library/Group Containers/group.ai.tiy.nimbussync/Logs.
+    /// container: ~/Library/Group Containers/<AppIdentity.appGroupIdentifier>/Logs.
     var logsDirectoryPath: String? { ActivityLog.shared.directory?.path }
 
     func openLogsFolder() {
@@ -1598,7 +1598,7 @@ private final class NimbusSyncAppState: ObservableObject {
     }
 
     private func openNotificationSettings() {
-        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "ai.tiy.nimbussync"
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? AppIdentity.baseIdentifier
         guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleIdentifier)") else { return }
         NSWorkspace.shared.open(url)
     }

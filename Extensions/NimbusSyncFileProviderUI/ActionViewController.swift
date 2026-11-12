@@ -6,7 +6,7 @@ final class ActionViewController: FPUIActionExtensionViewController {
 	let itemIdentifier = itemIdentifiers.first?.rawValue ?? ""
 	let isOpaqueItemIdentifier = itemIdentifier.hasPrefix("cri-") && UUID(uuidString: String(itemIdentifier.dropFirst(4))) != nil
 		guard itemIdentifiers.count == 1,
-			["ai.tiy.nimbussync.open-in-nimbussync", "ai.tiy.nimbussync.resolve-conflict"].contains(actionIdentifier),
+			["io.github.jorben.nimbussync.open-in-nimbussync", "io.github.jorben.nimbussync.resolve-conflict"].contains(actionIdentifier),
 			isOpaqueItemIdentifier else {
 			extensionContext.cancelRequest(withError: NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
 			return
@@ -17,8 +17,10 @@ final class ActionViewController: FPUIActionExtensionViewController {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 80))
         view.addSubview(label)
         self.view = view
-		let destination = actionIdentifier == "ai.tiy.nimbussync.resolve-conflict" ? "conflict-item" : "item"
-		let url = URL(string: "nimbussync://\(destination)/\(itemIdentifier)")!
+		let destination = actionIdentifier == "io.github.jorben.nimbussync.resolve-conflict" ? "conflict-item" : "item"
+		// Dev builds register their own deep-link scheme so they never open the Release app.
+		let scheme = (Bundle.main.object(forInfoDictionaryKey: "NimbusSyncURLScheme") as? String).flatMap { $0.isEmpty || $0.contains("$(") ? nil : $0 } ?? "nimbussync"
+		let url = URL(string: "\(scheme)://\(destination)/\(itemIdentifier)")!
 		extensionContext.open(url) { [weak self] _ in self?.extensionContext.completeRequest() }
     }
 

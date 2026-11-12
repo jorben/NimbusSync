@@ -57,7 +57,7 @@ private actor SSEStreamState {
     private let session: URLSession
     private let credentialRefresh: CredentialRefreshService
     private let channel = AsyncStreamChannel()
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "remote-events")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "remote-events")
     private var started = false
     private var task: Task<Void, Never>?
     static let idleTimeout: TimeInterval = 90

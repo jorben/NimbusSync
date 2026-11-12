@@ -595,6 +595,23 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(DeepLinkRouter.destination(url: URL(string: "nimbussync://item/\(itemID)")!), .item(itemID))
         XCTAssertEqual(DeepLinkRouter.destination(url: URL(string: "nimbussync://settings")!), .settings)
         XCTAssertNil(DeepLinkRouter.destination(url: URL(string: "cloudreve-macos://settings")!))
+        XCTAssertNil(DeepLinkRouter.destination(url: URL(string: "nimbussync-dev://settings")!), "a Release build must ignore Dev deep links")
+        XCTAssertEqual(DeepLinkRouter.destination(url: URL(string: "nimbussync-dev://item/\(itemID)")!, scheme: "nimbussync-dev"), .item(itemID))
+        XCTAssertNil(DeepLinkRouter.destination(url: URL(string: "nimbussync://settings")!, scheme: "nimbussync-dev"))
+    }
+
+    func testAppIdentityKeepsReleaseAndDevSeparate() {
+        XCTAssertEqual(AppIdentity.baseIdentifier, AppIdentity.releaseBaseIdentifier, "processes without the Info.plist keys use the Release identity")
+        XCTAssertEqual(AppIdentity.appGroupIdentifier, "group.io.github.jorben.nimbussync")
+        XCTAssertEqual(AppIdentity.urlScheme, "nimbussync")
+        XCTAssertEqual(AppGroupPaths.identifier, AppIdentity.appGroupIdentifier)
+        let release = "io.github.jorben.nimbussync", dev = "io.github.jorben.nimbussync.dev"
+        XCTAssertEqual(AppIdentity.role(of: "\(dev).fileprovider", baseIdentifier: dev), .fileProvider)
+        XCTAssertNil(AppIdentity.role(of: dev, baseIdentifier: release))
+        let groups = ["TEAM123456.\(dev)", "TEAM123456.\(release)"]
+        XCTAssertEqual(KeychainAccessGroup.matching(groups, suffix: release), "TEAM123456.\(release)")
+        XCTAssertEqual(KeychainAccessGroup.matching(groups, suffix: dev), "TEAM123456.\(dev)")
+        XCTAssertNil(KeychainAccessGroup.matching(["TEAM123456.x\(release)"], suffix: release))
     }
 
     func testProvisioningRecoveryAndRemovalDefaultToFailClosed() {

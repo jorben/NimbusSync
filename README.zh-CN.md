@@ -138,7 +138,22 @@ flowchart LR
 | `NIMBUSSYNC_APP_PROFILE` | 应用描述文件 UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_PROFILE` | File Provider 描述文件 UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE` | File Provider UI 描述文件 UUID |
-| `NIMBUSSYNC_APP_GROUP_IDENTIFIER` | App Group（默认 `group.ai.tiy.nimbussync`） |
+| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | 按配置覆盖上面的签名身份和三个描述文件，例如 `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+
+Debug 与 Release 使用两套独立身份，可以同时装在一台 Mac 上：
+
+| | Release | Debug（Dev） |
+| --- | --- | --- |
+| 应用 | `io.github.jorben.nimbussync` | `io.github.jorben.nimbussync.dev` |
+| 扩展 | `….nimbussync.fileprovider` / `.fileproviderui` | `….nimbussync.dev.fileprovider` / `.fileproviderui` |
+| App Group | `group.io.github.jorben.nimbussync` | `group.io.github.jorben.nimbussync.dev` |
+| Keychain 组 | `TEAMID.io.github.jorben.nimbussync` | `TEAMID.io.github.jorben.nimbussync.dev` |
+| 名称 / 深链 | NimbusSync / `nimbussync://` | NimbusSyncDev / `nimbussync-dev://` |
+
+两套身份各自需要 App ID、App Group 和描述文件（Dev 的 File Provider 还需要
+File Provider Testing Mode）。两个构建产物都叫 `NimbusSync.app`，Dev 版请直接从
+`Dist/` 运行，不要放进 `/Applications`。两者都注册了服务端规定的 `cloudreve://`
+OAuth 回调，macOS 只会交给其中一个：登录或重新授权前请先退出另一个版本。
 
 命令行中也可以使用不带前缀的名称（`SIGNING_MODE`、`CONFIGURATION`、
 `DEVELOPMENT_TEAM` 等），以及 `BUILD_ROOT`、`DIST_DIR` 和 `VERSION`：

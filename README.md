@@ -151,7 +151,23 @@ environment variables:
 | `NIMBUSSYNC_APP_PROFILE` | App provisioning profile UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_PROFILE` | File Provider profile UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE` | File Provider UI profile UUID |
-| `NIMBUSSYNC_APP_GROUP_IDENTIFIER` | App Group (default: `group.ai.tiy.nimbussync`) |
+| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | Per-configuration override of the identity and three profiles above, e.g. `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+
+Debug and Release use separate identities so both can be installed on one Mac:
+
+| | Release | Debug (Dev) |
+| --- | --- | --- |
+| App | `io.github.jorben.nimbussync` | `io.github.jorben.nimbussync.dev` |
+| Extensions | `….nimbussync.fileprovider` / `.fileproviderui` | `….nimbussync.dev.fileprovider` / `.fileproviderui` |
+| App Group | `group.io.github.jorben.nimbussync` | `group.io.github.jorben.nimbussync.dev` |
+| Keychain group | `TEAMID.io.github.jorben.nimbussync` | `TEAMID.io.github.jorben.nimbussync.dev` |
+| Name / deep link | NimbusSync / `nimbussync://` | NimbusSyncDev / `nimbussync-dev://` |
+
+Each column needs its own App IDs, App Group and provisioning profiles (Dev's
+File Provider also needs File Provider Testing Mode). Both builds are named
+`NimbusSync.app`, so run the Dev build from `Dist/` rather than `/Applications`.
+Both register the server-defined `cloudreve://` OAuth callback, and macOS hands
+it to only one of them: quit the other build before signing in or reauthorizing.
 
 The unprefixed names (`SIGNING_MODE`, `CONFIGURATION`, `DEVELOPMENT_TEAM`, …)
 also work on the command line, as do `BUILD_ROOT`, `DIST_DIR` and `VERSION`:

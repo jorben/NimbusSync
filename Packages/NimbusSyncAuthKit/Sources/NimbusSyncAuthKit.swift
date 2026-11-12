@@ -41,9 +41,15 @@ private func sharedKeychainQuery(service: String, account: String, accessGroup: 
 }
 
 public enum KeychainAccessGroup {
-    public static func current(suffix: String = "ai.tiy.nimbussync") -> String? {
+    public static func current(suffix: String = AppIdentity.baseIdentifier) -> String? {
         guard let task = SecTaskCreateFromSelf(nil), let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil) as? [String] else { return nil }
-        return value.first { $0.hasSuffix(suffix) }
+        return matching(value, suffix: suffix)
+    }
+
+    /// The entitled group for this build's identity: `TEAMID.<suffix>`. A whole-component match keeps
+    /// a Release build from picking a Dev group (`<suffix>.dev`) and vice versa.
+    public static func matching(_ groups: [String], suffix: String) -> String? {
+        groups.first { $0 == suffix || $0.hasSuffix(".\(suffix)") }
     }
 }
 
@@ -279,7 +285,7 @@ public final class OAuthAuthorizationSession: NSObject, ASWebAuthenticationPrese
     private let coordinator: OAuthCoordinator
     private let configuration: CloudreveOAuthConfiguration
     private let openURL: (@MainActor @Sendable (URL) -> Bool)?
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "oauth")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "oauth")
     private var pending: PendingAuthorization?
     private var webAuthenticationSession: ASWebAuthenticationSession?
     private lazy var fallbackPresentationAnchor = NSWindow()
@@ -405,7 +411,7 @@ public final class OAuthAuthorizationSession: NSObject, ASWebAuthenticationPrese
 public final class OAuthTokenExchange: @unchecked Sendable {
     private let session: URLSession
     private let configuration: CloudreveOAuthConfiguration
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "oauth")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "oauth")
     public init(session: URLSession? = nil, configuration: CloudreveOAuthConfiguration = CloudreveOAuthConfiguration()) {
         if let session { self.session = session }
         else { self.session = URLSession(configuration: .ephemeral, delegate: SameOriginRedirectPolicy(), delegateQueue: nil) }

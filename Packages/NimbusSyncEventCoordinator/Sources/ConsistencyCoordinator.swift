@@ -135,7 +135,7 @@ public final class CloudreveEventEnricher: RemoteEventEnricher, @unchecked Senda
     private let capabilitySnapshot: CapabilitySnapshot
     private let session: URLSession
     private let credentialRefresh: CredentialRefreshService
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "remote-events")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "remote-events")
 
     /// `credentialRefresh` defaults to the App Group-locked shared service; tests inject one
     /// without the cross-process lock.
@@ -284,7 +284,7 @@ public final class CloudreveReconciliationService: @unchecked Sendable {
     private let credentialReference: String
     private let session: URLSession
     private let credentialRefresh: CredentialRefreshService
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "reconciliation")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "reconciliation")
 
     public init(origin: URL, store: SQLiteStateStore, registry: SQLiteStateStore? = nil, vault: CredentialVault, credentialReference: String, session: URLSession? = nil, credentialRefresh: CredentialRefreshService? = nil) {
         self.origin = origin; self.store = store; self.registry = registry; self.vault = vault; self.credentialReference = credentialReference

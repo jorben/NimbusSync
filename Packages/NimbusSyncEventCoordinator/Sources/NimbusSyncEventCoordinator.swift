@@ -421,7 +421,7 @@ public final class FileProviderWorkingSetSignaller: WorkingSetSignaller, @unchec
 public actor SignalOutboxDrainer {
     private let store: SQLiteStateStore
     private let signaller: WorkingSetSignaller
-    private let logger = Logger(subsystem: "ai.tiy.nimbussync", category: "signal-outbox")
+    private let logger = Logger(subsystem: AppIdentity.baseIdentifier, category: "signal-outbox")
 
     public init(store: SQLiteStateStore, signaller: WorkingSetSignaller) { self.store = store; self.signaller = signaller }
 

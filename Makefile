@@ -40,12 +40,15 @@ XCODEBUILD := xcodebuild \
 	-scheme NimbusSync \
 	-destination platform=macOS
 
-# Quit the running app, wait until it has really exited, then open the new
-# build. Opening while the old instance is still terminating makes
+# Quit the copy being replaced, wait until it has really exited, then open the
+# new build. Match by executable path, not process name: Debug (NimbusSyncDev)
+# and an installed Release app are both "NimbusSync" and must not kill each
+# other. Opening while the old instance is still terminating makes
 # LaunchServices fail with -600 (procNotFound), so retry once after a pause.
 RELAUNCH = relaunch() { \
-		pkill -x NimbusSync 2>/dev/null || true; \
-		i=0; while pgrep -x NimbusSync >/dev/null 2>&1 && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i + 1)); done; \
+		exe="$$(cd "$$1" && pwd)/Contents/MacOS/NimbusSync"; \
+		pkill -f "$$exe" 2>/dev/null || true; \
+		i=0; while pgrep -f "$$exe" >/dev/null 2>&1 && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i + 1)); done; \
 		open "$$1" || { sleep 1; open "$$1"; }; \
 	}; relaunch
 
