@@ -9,6 +9,7 @@
 
 **把自托管的 Cloudreve 原生接入 Finder。**
 
+[![CI](https://img.shields.io/github/actions/workflow/status/jorben/NimbusSync/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/jorben/NimbusSync/actions/workflows/ci.yml)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#环境要求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](Package.swift)
 [![Cloudreve 4.12+](https://img.shields.io/badge/Cloudreve-4.12%2B-0070F3?style=flat-square)](#环境要求)
