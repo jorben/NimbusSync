@@ -1,0 +1,103 @@
+# Generates CHANGELOG.md from Conventional Commits (with gitmoji) when a stable release tag
+# is pushed, then opens a pull request against master with the updated file.
+#
+# Tags: stable releases are X.Y.Z or vX.Y.Z; pre-release tags (e.g. 1.2.0-rc.1) are ignored.
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   PAT_TOKEN  optional; a token with contents + pull-requests write access, so the created PR
+#              can trigger other workflows. Falls back to GITHUB_TOKEN, which requires
+#              "Allow GitHub Actions to create and approve pull requests" in Settings > Actions.
+name: Update Changelog
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Existing release tag (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: changelog-${{ inputs.release_version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Resolve tags
+        id: tags
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_version }}
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="${INPUT_TAG:-$REF_TAG}"
+          if ! git rev-parse -q --verify "refs/tags/${CURRENT_TAG}" >/dev/null; then
+            echo "::error::Tag '${CURRENT_TAG}' does not exist."
+            exit 1
+          fi
+          # Previous stable tag: newest X.Y.Z / vX.Y.Z tag (excluding the current one)
+          # that is an ancestor of the current tag.
+          PREV_TAG=$(git tag -l --sort=-v:refname \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vxF "${CURRENT_TAG}" \
+            | while read -r tag; do
+                if git merge-base --is-ancestor "$tag" "$CURRENT_TAG"; then echo "$tag"; break; fi
+              done || true)
+          {
+            echo "current_tag=${CURRENT_TAG}"
+            echo "prev_tag=${PREV_TAG}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current tag: ${CURRENT_TAG}, previous stable tag: ${PREV_TAG:-<none>}"
+
+      - name: Update CHANGELOG (since previous stable tag)
+        if: steps.tags.outputs.prev_tag != ''
+        uses: requarks/changelog-action@v1.10.3
+        with:
+          token: ${{ github.token }}
+          fromTag: ${{ steps.tags.outputs.current_tag }}
+          toTag: ${{ steps.tags.outputs.prev_tag }}
+          changelogFilePath: CHANGELOG.md
+
+      - name: Update CHANGELOG (first release)
+        if: steps.tags.outputs.prev_tag == ''
+        uses: requarks/changelog-action@v1.10.3
+        with:
+          token: ${{ github.token }}
+          tag: ${{ steps.tags.outputs.current_tag }}
+          changelogFilePath: CHANGELOG.md
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          commit-message: "docs: 📝 update CHANGELOG.md for ${{ steps.tags.outputs.current_tag }}"
+          title: "docs: 📝 update CHANGELOG.md for ${{ steps.tags.outputs.current_tag }}"
+          body: |
+            Auto-generated changelog update for release `${{ steps.tags.outputs.current_tag }}`.
+            Comparing changes from `${{ steps.tags.outputs.prev_tag || 'repository start' }}` to `${{ steps.tags.outputs.current_tag }}`.
+
+            This PR was automatically created by the changelog workflow.
+          branch: changelog/${{ steps.tags.outputs.current_tag }}
+          base: master
+          add-paths: CHANGELOG.md
+          labels: documentation,automated
+          delete-branch: true
