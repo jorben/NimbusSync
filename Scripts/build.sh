@@ -9,6 +9,13 @@ BUILD_ROOT=${BUILD_ROOT:-${NIMBUSSYNC_APP_BUILD_ROOT:-"$ROOT/.build/ci"}}
 DIST_DIR=${DIST_DIR:-${NIMBUSSYNC_DIST_DIR:-"$ROOT/Dist"}}
 VERSION=${VERSION:-${NIMBUSSYNC_VERSION:-0.1.0}}
 SIGNING_MODE=${SIGNING_MODE:-${NIMBUSSYNC_SIGNING_MODE:-unsigned}}
+# platform=macOS builds only the host architecture; CI passes generic/platform=macOS for a
+# universal (arm64 + x86_64) bundle.
+DESTINATION=${DESTINATION:-${NIMBUSSYNC_DESTINATION:-platform=macOS}}
+# Optional version stamping: CFBundleShortVersionString and CFBundleVersion. Unset keeps the
+# values from Config/*.xcconfig and the project.
+MARKETING_VERSION=${MARKETING_VERSION:-${NIMBUSSYNC_MARKETING_VERSION:-}}
+BUILD_NUMBER=${BUILD_NUMBER:-${NIMBUSSYNC_BUILD_NUMBER:-}}
 
 # The App Group, Keychain group and bundle IDs come from Config/<Configuration>.xcconfig: Debug
 # builds use the `.dev` identity, Release the shipping one. A single override for every
@@ -143,12 +150,15 @@ set -- xcodebuild \
     -project "$ROOT/NimbusSync.xcodeproj" \
     -scheme NimbusSync \
     -configuration "$CONFIGURATION" \
-    -destination platform=macOS \
+    -destination "$DESTINATION" \
     -derivedDataPath "$BUILD_ROOT/derived" \
     -clonedSourcePackagesDirPath "$BUILD_ROOT/source-packages" \
     -packageCachePath "$BUILD_ROOT/package-cache" \
     -skipPackageUpdates \
     build
+
+[ -z "$MARKETING_VERSION" ] || set -- "$@" MARKETING_VERSION="$MARKETING_VERSION"
+[ -z "$BUILD_NUMBER" ] || set -- "$@" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
 case "$SIGNING_MODE" in
     unsigned)
