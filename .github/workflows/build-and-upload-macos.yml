@@ -185,14 +185,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          STAGING="$RUNNER_TEMP/dmg-root"
           DMG="$DIST_DIR/NimbusSync-$VERSION.dmg"
-          rm -rf "$STAGING" "$DMG"
-          mkdir -p "$STAGING"
-          ditto "$DIST_DIR/NimbusSync.app" "$STAGING/NimbusSync.app"
-          ln -s /Applications "$STAGING/Applications"
-          # ULFO (lzfse, macOS 10.11+) compresses faster and smaller than UDZO (zlib).
-          hdiutil create -volname "NimbusSync" -srcfolder "$STAGING" -fs HFS+ -format ULFO -ov "$DMG"
+          # dmgbuild writes the Finder layout (600x400 window, background with a drag hint,
+          # icon positions) without driving Finder via AppleScript, so it works headless.
+          python3 -m venv "$RUNNER_TEMP/dmgbuild-venv"
+          "$RUNNER_TEMP/dmgbuild-venv/bin/pip" install --quiet 'dmgbuild==1.6.*'
+          DMGBUILD="$RUNNER_TEMP/dmgbuild-venv/bin/dmgbuild" \
+            Scripts/make-dmg.sh "$DIST_DIR/NimbusSync.app" "$DMG" NimbusSync
           codesign --force --timestamp --sign "$NIMBUSSYNC_RELEASE_CODE_SIGN_IDENTITY" "$DMG"
           codesign --verify --verbose=2 "$DMG"
           (cd "$DIST_DIR" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")

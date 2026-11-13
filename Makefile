@@ -52,7 +52,7 @@ RELAUNCH = relaunch() { \
 	}; relaunch
 
 .DEFAULT_GOAL := help
-.PHONY: help dev dev-unsigned build test test-swift lint \
+.PHONY: help dev dev-unsigned build dmg test test-swift lint \
 	clean clean-swift clean-dist
 
 help: ## Show available targets
@@ -81,6 +81,10 @@ dev-unsigned: ## Fast UI-only build; File Provider extension will NOT load
 
 build: ## Unified build via Scripts/build.sh (scans + Dist/ artifacts)
 	$(BUILD_ARGS) ./Scripts/build.sh
+
+dmg: ## Package the built app into a styled DMG (needs: pip install dmgbuild)
+	@app="$$($(BUILD_ARGS) ./Scripts/build.sh --print-app-path)"; \
+	./Scripts/make-dmg.sh "$$app" "$(DIST_DIR)/$$(basename "$$app" .app).dmg" NimbusSync
 
 test: test-swift ## Run all tests
 
