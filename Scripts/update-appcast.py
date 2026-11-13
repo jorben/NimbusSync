@@ -6,6 +6,8 @@ Sparkle's `sparkle:version`). Prereleases are published to the `beta` channel; p
 prerelease republishes the same build without a channel, which replaces its beta item, so
 beta testers are not offered the same version twice.
 
+A beta publish of a build that is already stable leaves the appcast unchanged.
+
 The script only rewrites the XML. The feed's EdDSA signature (SURequireSignedFeed) is added
 afterwards by Sparkle's sign_update, so any existing signature comment is dropped here.
 
@@ -152,6 +154,10 @@ def main(argv):
         old = item.find(sparkle("shortVersionString"))
         if old is not None and old.text != args.version:
             fail(f"build {args.build} is already published as {old.text}, not {args.version}")
+        # A late or repeated beta publish must not take a promoted build off the stable channel.
+        if args.channel == "beta" and item.find(sparkle("channel")) is None:
+            print(f"{args.version} (build {args.build}) is already on the stable channel; leaving it there")
+            return
     items.append(make_item(args))
     items.sort(key=lambda item: build_key(item_build(item)), reverse=True)
     channel.extend(items[:MAX_ITEMS])

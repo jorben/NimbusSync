@@ -1,11 +1,16 @@
 # Publishes a built release to the Sparkle appcast on GitHub Pages
 # (https://jorben.github.io/NimbusSync/appcast.xml), which installed copies check once a day.
 #
-#   beta    Run by hand (Actions > Publish Appcast) once the prerelease's notarization was
-#           accepted. Only users who turned on "Include beta versions" are offered it.
+#   beta    Runs by itself after build-and-upload-macos.yml built a prerelease (`workflow_run`),
+#           and can be run by hand. Only users who turned on "Include beta versions" are offered
+#           it. A release promoted before this ran is left to the stable publish.
 #   stable  Runs by itself when a prerelease is promoted to a full release (`released`), and can
 #           be run by hand. It republishes the same build without a channel, so beta testers
 #           who already have it are not offered it again.
+#
+# The build only submits the DMG for notarization, so every publish waits for Apple's verdict
+# (up to NOTARIZATION_WAIT_MINUTES): Accepted publishes, Invalid or Rejected fails, and a
+# timeout fails with a note to run the workflow again by hand once notarization is done.
 #
 # Nothing is rebuilt: the ZIP attached to the release by build-and-upload-macos.yml is checked
 # (checksum, bundle identity, Developer ID signature, accepted notarization, EdDSA key match),
@@ -24,6 +29,9 @@ name: Publish Appcast
 on:
   release:
     types: [released]
+  workflow_run:
+    workflows: ["Build and Upload macOS App"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -46,11 +54,16 @@ concurrency:
 env:
   BUNDLE_IDENTIFIER: io.github.jorben.nimbussync
   APPCAST_URL: https://jorben.github.io/NimbusSync/appcast.xml
+  NOTARIZATION_WAIT_MINUTES: 60
 
 jobs:
   publish:
+    # After a build: only successful builds of a release (not manual build runs).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release')
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -62,21 +75,31 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
           EVENT_TAG: ${{ github.event.release.tag_name }}
+          # A release-triggered run's head branch is the release tag.
+          BUILT_TAG: ${{ github.event.workflow_run.head_branch }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = release ]; then
-            TAG="$EVENT_TAG"; CHANNEL=stable
-          else
-            TAG="$INPUT_TAG"; CHANNEL="$INPUT_CHANNEL"
-          fi
+          case "$EVENT_NAME" in
+            release) TAG="$EVENT_TAG"; CHANNEL=stable ;;
+            workflow_run) TAG="$BUILT_TAG"; CHANNEL=beta ;;
+            *) TAG="$INPUT_TAG"; CHANNEL="$INPUT_CHANNEL" ;;
+          esac
           if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::'$TAG' is not X.Y.Z or vX.Y.Z (optionally with a -suffix)"; exit 1
           fi
           VERSION="${TAG#v}"
           IS_PRERELEASE=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease)
+          if [ "$EVENT_NAME" = workflow_run ] && [ "$IS_PRERELEASE" != true ]; then
+            # Promoted while it was building: the `released` run publishes it to stable, and a
+            # beta publish racing it must not take the build back to the beta channel.
+            echo "$TAG is no longer a prerelease; leaving it to the stable publish"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
           case "$CHANNEL" in
             stable)
               [ "$IS_PRERELEASE" = false ] || { echo "::error::$TAG is still a prerelease; promote it to a full release first"; exit 1; }
@@ -94,6 +117,7 @@ jobs:
           echo "Publishing $TAG to the $CHANNEL channel"
 
       - name: Download and check the update archive
+        if: env.SKIP != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -141,6 +165,7 @@ jobs:
       # The build only submits the DMG for notarization; an update must not go out before Apple
       # has accepted it, or Gatekeeper would reject the installed app.
       - name: Require accepted notarization
+        if: env.SKIP != 'true'
         shell: bash
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -149,23 +174,39 @@ jobs:
         run: |
           set -euo pipefail
           DMG="NimbusSync-$VERSION.dmg"
-          history=$(xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" --output-format json)
           # The newest submission of this DMG name is the one attached to the release (a re-run
           # rebuilds and resubmits it).
-          status=$(DMG="$DMG" python3 -c '
+          notarization_status() {
+            xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" --output-format json \
+              | DMG="$DMG" python3 -c '
           import json, os, sys
           history = json.load(sys.stdin).get("history", [])
           matches = [entry for entry in history if entry.get("name") == os.environ["DMG"]]
           matches.sort(key=lambda entry: entry.get("createdDate", ""), reverse=True)
           print(matches[0]["status"] if matches else "missing")
-          ' <<<"$history")
-          echo "Notarization of $DMG: $status"
-          [ "$status" = Accepted ] || { echo "::error::notarization of $DMG is '$status'; publish once it is Accepted"; exit 1; }
+          '
+          }
+          deadline=$(( $(date +%s) + NOTARIZATION_WAIT_MINUTES * 60 ))
+          while :; do
+            status=$(notarization_status) || status="unreadable"
+            echo "$(date -u +%H:%M:%S) notarization of $DMG: $status"
+            case "$status" in
+              Accepted) break ;;
+              Invalid|Rejected)
+                echo "::error::notarization of $DMG is '$status'; see xcrun notarytool log for the submission"; exit 1 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::notarization of $DMG is still '$status' after $NOTARIZATION_WAIT_MINUTES minutes; run Publish Appcast by hand once it is Accepted"
+              exit 1
+            fi
+            sleep 60
+          done
           # Informational: Gatekeeper's own (online) view of the app in the ZIP.
           spctl --assess --type execute --verbose=2 "$WORK/app/NimbusSync.app" 2>&1 || true
 
       - name: Resolve Sparkle tools
+        if: env.SKIP != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -178,6 +219,7 @@ jobs:
           echo "SPARKLE_BIN=$BIN" >> "$GITHUB_ENV"
 
       - name: Sign the update archive
+        if: env.SKIP != 'true'
         shell: bash
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -214,6 +256,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Check out gh-pages
+        if: env.SKIP != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -227,6 +270,7 @@ jobs:
           fi
 
       - name: Update and sign appcast.xml
+        if: env.SKIP != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -251,6 +295,7 @@ jobs:
           touch "$WORK/pages/.nojekyll"
 
       - name: Push gh-pages
+        if: env.SKIP != 'true'
         shell: bash
         run: |
           set -euo pipefail

@@ -41,13 +41,18 @@ without `SUPublicEDKey` keeps the updater off, and the release workflow refuses 
 1. Push a tag (`0.2.0-rc.1`, or `0.2.0` for a release you intend to promote).
    `create-prerelease.yml` creates the GitHub prerelease, which starts
    `build-and-upload-macos.yml`: signed universal app, DMG + ZIP, notarization submitted.
-2. Wait for notarization to be **Accepted**
-   (`xcrun notarytool history` or the submission ID in the build log).
-3. **Beta:** run *Actions › Publish Appcast* with the tag and channel `beta`.
-4. **Stable:** promote the prerelease to a full release on GitHub. Its `released` event runs
+2. **Beta, automatic:** when the build succeeds, *Publish Appcast* starts by itself
+   (`workflow_run`) and publishes the prerelease to the `beta` channel as soon as Apple has
+   accepted its notarization. It checks the notary history once a minute for up to 60 minutes
+   (`NOTARIZATION_WAIT_MINUTES`); **Invalid**/**Rejected** fails the run, and so does a
+   timeout. After a timeout, run *Actions › Publish Appcast* by hand (tag, channel `beta`) once
+   `xcrun notarytool history` shows **Accepted**. Publishes run one at a time, so a stable
+   publish queued behind a beta one that is still waiting starts when that one finishes.
+3. **Stable:** promote the prerelease to a full release on GitHub. Its `released` event runs
    *Publish Appcast* for the `stable` channel. Nothing is rebuilt: the prerelease's notarized
    ZIP is republished without a channel, replacing its beta entry. Only tags without a suffix
-   can go stable.
+   can go stable. A release promoted before its beta publish ran is skipped by the beta run,
+   and a late beta publish never takes a stable build back to `beta`.
 
 *Publish Appcast* refuses to publish when the ZIP's checksum, bundle identifier, version,
 team signature or notarization doesn't check out, or when `SPARKLE_PRIVATE_KEY` does not match
