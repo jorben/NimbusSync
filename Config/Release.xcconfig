@@ -13,6 +13,10 @@ SWIFT_VERSION = 6.0
 MACOSX_DEPLOYMENT_TARGET = 13.0
 // CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
 MARKETING_VERSION = 0.1.0
+// The full version the app shows (Info.plist NimbusSyncVersion), including a pre-release suffix
+// such as 0.1.0-rc.3 that CFBundleShortVersionString cannot carry. Scripts/build.sh sets it from
+// VERSION (the release tag in CI).
+NIMBUSSYNC_VERSION = $(MARKETING_VERSION)
 CODE_SIGN_IDENTITY = Developer ID Application
 CODE_SIGNING_REQUIRED = YES
 CODE_SIGNING_ALLOWED = YES

@@ -14,6 +14,7 @@ public enum AppIdentity {
     public static let appGroupInfoKey = "NimbusSyncAppGroupIdentifier"
     public static let urlSchemeInfoKey = "NimbusSyncURLScheme"
     public static let displayNameInfoKey = "NimbusSyncDisplayName"
+    public static let versionInfoKey = "NimbusSyncVersion"
     public static let releaseDisplayName = "NimbusSync"
 
     /// The main app's bundle identifier; extensions append `.fileprovider` / `.fileproviderui`.
@@ -30,6 +31,20 @@ public enum AppIdentity {
     /// Settings (where macOS lists each build by its bundle name).
     public static let displayName: String = infoValue(displayNameInfoKey) ?? releaseDisplayName
 
+    /// The full version of this build, e.g. "0.1.0-rc.3": the release tag CI built from, which
+    /// keeps the pre-release suffix that CFBundleShortVersionString must drop. Falls back to
+    /// CFBundleShortVersionString, and is nil outside a bundled build.
+    public static let version: String? = version(
+        full: Bundle.main.object(forInfoDictionaryKey: versionInfoKey) as? String,
+        short: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    )
+
+    /// Resolves the version from the Info.plist values: the full version when it was stamped, otherwise
+    /// the numeric short version.
+    public static func version(full: String?, short: String?) -> String? {
+        normalized(full) ?? normalized(short)
+    }
+
     /// The extension role of `bundleIdentifier` within the identity rooted at `baseIdentifier`.
     public static func role(of bundleIdentifier: String?, baseIdentifier: String = baseIdentifier) -> Role? {
         switch bundleIdentifier {
@@ -43,7 +58,11 @@ public enum AppIdentity {
     public enum Role: Sendable, Equatable { case app, fileProvider, fileProviderUI }
 
     static func infoValue(_ key: String, bundle: Bundle = .main) -> String? {
-        guard let value = bundle.object(forInfoDictionaryKey: key) as? String else { return nil }
+        normalized(bundle.object(forInfoDictionaryKey: key) as? String)
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         // An unexpanded build setting means the target is missing its xcconfig; treat as absent.
         guard !trimmed.isEmpty, !trimmed.contains("$(") else { return nil }

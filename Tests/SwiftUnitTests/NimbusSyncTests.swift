@@ -605,6 +605,10 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(AppIdentity.appGroupIdentifier, "group.io.github.jorben.nimbussync")
         XCTAssertEqual(AppIdentity.urlScheme, "nimbussync")
         XCTAssertEqual(AppIdentity.displayName, "NimbusSync", "the Dev build gets NimbusSyncDev from its Info.plist")
+        XCTAssertEqual(AppIdentity.version(full: "0.1.0-rc.3", short: "0.1.0"), "0.1.0-rc.3", "the tag version keeps its pre-release suffix")
+        XCTAssertEqual(AppIdentity.version(full: "$(NIMBUSSYNC_VERSION)", short: "0.1.0"), "0.1.0", "an unexpanded setting falls back to the short version")
+        XCTAssertEqual(AppIdentity.version(full: " ", short: "0.1.0"), "0.1.0")
+        XCTAssertNil(AppIdentity.version(full: nil, short: nil))
         XCTAssertEqual(AppGroupPaths.identifier, AppIdentity.appGroupIdentifier)
         let release = "io.github.jorben.nimbussync", dev = "io.github.jorben.nimbussync.dev"
         XCTAssertEqual(AppIdentity.role(of: "\(dev).fileprovider", baseIdentifier: dev), .fileProvider)

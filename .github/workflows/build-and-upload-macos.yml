@@ -58,6 +58,8 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          # The release tag (X.Y.Z or vX.Y.Z, optionally -suffix) is the version; build.sh stamps
+          # VERSION into NimbusSyncVersion, MARKETING_VERSION and BUILD_NUMBER into the bundle.
           RAW="${RELEASE_TAG:-$INPUT_VERSION}"
           VERSION="${RAW#v}"
           # CFBundleShortVersionString must be numeric: drop a pre-release suffix such as -rc.1.
@@ -178,8 +180,23 @@ jobs:
             grep -q 'flags=.*(runtime)' <<<"$details" || { echo "::error::$name lacks the hardened runtime"; exit 1; }
             echo "$name: $archs, hardened, timestamped, no get-task-allow"
           done
-          version=$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")
-          [ "$version" = "$MARKETING_VERSION" ] || { echo "::error::bundle version $version != $MARKETING_VERSION"; exit 1; }
+          # The tag's version must reach the bundle: numeric CFBundleShortVersionString, the full
+          # tag version (with any -rc suffix) in NimbusSyncVersion, and the run number as the build.
+          info="$APP/Contents/Info.plist"
+          check_info() {
+            local key=$1 expected=$2 actual
+            actual=$(plutil -extract "$key" raw -o - "$info")
+            [ "$actual" = "$expected" ] || { echo "::error::$key is '$actual', expected '$expected'"; exit 1; }
+            echo "$key: $actual"
+          }
+          check_info CFBundleShortVersionString "$MARKETING_VERSION"
+          check_info NimbusSyncVersion "$VERSION"
+          check_info CFBundleVersion "$BUILD_NUMBER"
+          for appex in "$APP"/Contents/PlugIns/*.appex; do
+            actual=$(plutil -extract CFBundleShortVersionString raw -o - "$appex/Contents/Info.plist")
+            [ "$actual" = "$MARKETING_VERSION" ] \
+              || { echo "::error::$(basename "$appex") version '$actual' != '$MARKETING_VERSION'"; exit 1; }
+          done
 
       - name: Create DMG
         shell: bash

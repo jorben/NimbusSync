@@ -7,15 +7,33 @@ CONFIG_FILE=${NIMBUSSYNC_CONFIG:-"$ROOT/Config/build.local.sh"}
 CONFIGURATION=${CONFIGURATION:-${NIMBUSSYNC_CONFIGURATION:-Debug}}
 BUILD_ROOT=${BUILD_ROOT:-${NIMBUSSYNC_APP_BUILD_ROOT:-"$ROOT/.build/ci"}}
 DIST_DIR=${DIST_DIR:-${NIMBUSSYNC_DIST_DIR:-"$ROOT/Dist"}}
-VERSION=${VERSION:-${NIMBUSSYNC_VERSION:-0.1.0}}
+# Release version, e.g. 0.2.0 or 0.2.0-rc.1 (CI passes the release tag without a leading v). It
+# names the ZIP and, when given, is stamped into the app as NimbusSyncVersion; unset builds keep
+# the xcconfig version and name the ZIP 0.1.0.
+VERSION=${VERSION:-${NIMBUSSYNC_VERSION:-}}
+VERSION=${VERSION#v}
 SIGNING_MODE=${SIGNING_MODE:-${NIMBUSSYNC_SIGNING_MODE:-unsigned}}
 # platform=macOS builds only the host architecture; CI passes generic/platform=macOS for a
 # universal (arm64 + x86_64) bundle.
 DESTINATION=${DESTINATION:-${NIMBUSSYNC_DESTINATION:-platform=macOS}}
 # Optional version stamping: CFBundleShortVersionString and CFBundleVersion. Unset keeps the
 # values from Config/*.xcconfig and the project.
-MARKETING_VERSION=${MARKETING_VERSION:-${NIMBUSSYNC_MARKETING_VERSION:-}}
+# MARKETING_VERSION defaults to VERSION without its pre-release suffix (0.2.0-rc.1 -> 0.2.0), since
+# CFBundleShortVersionString must be numeric.
+MARKETING_VERSION=${MARKETING_VERSION:-${NIMBUSSYNC_MARKETING_VERSION:-${VERSION%%-*}}}
 BUILD_NUMBER=${BUILD_NUMBER:-${NIMBUSSYNC_BUILD_NUMBER:-}}
+if [ -n "$VERSION" ] && ! printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z.-]+)?$'; then
+    printf '%s\n' "unsupported VERSION: $VERSION (expected X.Y or X.Y.Z, optionally with a -suffix)" >&2
+    exit 2
+fi
+if [ -n "$MARKETING_VERSION" ] && ! printf '%s\n' "$MARKETING_VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$'; then
+    printf '%s\n' "unsupported MARKETING_VERSION: $MARKETING_VERSION (expected X.Y or X.Y.Z)" >&2
+    exit 2
+fi
+if [ -n "$BUILD_NUMBER" ] && ! printf '%s\n' "$BUILD_NUMBER" | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$'; then
+    printf '%s\n' "unsupported BUILD_NUMBER: $BUILD_NUMBER (expected up to three dot-separated integers)" >&2
+    exit 2
+fi
 # Optional Xcode compilation cache (LLVM CAS) directory. CI restores and saves it between runs;
 # cache keys include the derived data path, so keep BUILD_ROOT stable for hits.
 COMPILATION_CACHE_PATH=${COMPILATION_CACHE_PATH:-${NIMBUSSYNC_COMPILATION_CACHE_PATH:-}}
@@ -171,6 +189,7 @@ set -- xcodebuild \
     build
 
 [ -z "$MARKETING_VERSION" ] || set -- "$@" MARKETING_VERSION="$MARKETING_VERSION"
+[ -z "$VERSION" ] || set -- "$@" NIMBUSSYNC_VERSION="$VERSION"
 [ -z "$BUILD_NUMBER" ] || set -- "$@" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 [ -z "$COMPILATION_CACHE_PATH" ] || set -- "$@" \
     COMPILATION_CACHE_ENABLE_CACHING=YES \
@@ -234,7 +253,7 @@ fi
 # NimbusSyncDev.app (Debug). Renaming a signed .app after codesign breaks the bundle-level
 # signature even when the Mach-O executable still carries a valid signature.
 artifact="$DIST_DIR/$APP_NAME.app"
-archive="$DIST_DIR/$APP_NAME-$VERSION.zip"
+archive="$DIST_DIR/$APP_NAME-${VERSION:-0.1.0}.zip"
 rm -rf "$artifact" "$archive" "$archive.sha256"
 ditto "$app" "$artifact"
 if [ "$SIGNING_MODE" = signed ]; then

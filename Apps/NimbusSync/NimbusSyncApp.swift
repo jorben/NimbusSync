@@ -843,7 +843,7 @@ private final class NimbusSyncAppState: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let version = AppIdentity.version ?? "?"
         ActivityLog.shared.info("app", "NimbusSync \(version) started")
         reload()
         refreshFinderIntegration()
@@ -2310,7 +2310,7 @@ private struct SettingsView: View {
                                     .font(.system(size: 20, weight: .semibold))
                                     .accessibilityAddTraits(.isHeader)
                                 SettingsTagBadge(SettingsAboutText.version(
-                                    short: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+                                    short: AppIdentity.version,
                                     build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
                                 ), tint: NimbusSyncDesignTokens.brandTextColor)
                             }
