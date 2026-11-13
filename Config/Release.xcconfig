@@ -12,3 +12,7 @@ CODE_SIGNING_REQUIRED = YES
 CODE_SIGNING_ALLOWED = YES
 APP_GROUP_IDENTIFIER = group.$(NIMBUSSYNC_BUNDLE_ID_BASE)
 KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)$(NIMBUSSYNC_BUNDLE_ID_BASE)
+// xcodebuild build otherwise injects com.apple.security.get-task-allow, which notarization rejects.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+// Notarization requires a secure timestamp; plain xcodebuild build signs with --timestamp=none.
+OTHER_CODE_SIGN_FLAGS = $(inherited) --timestamp
