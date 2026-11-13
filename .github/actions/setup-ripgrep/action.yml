@@ -1,0 +1,42 @@
+# Installs a pinned, checksum-verified ripgrep binary for Scripts/build.sh's scans.
+# Downloading the release tarball takes ~1s, versus ~9s for `brew install ripgrep`.
+name: Set up ripgrep
+description: Install a pinned ripgrep release on a macOS runner
+
+runs:
+  using: composite
+  steps:
+    - name: Install ripgrep
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v rg >/dev/null 2>&1; then
+          rg --version | head -n 1
+          exit 0
+        fi
+        RG_VERSION=15.2.0
+        case "$(uname -m)" in
+          arm64)
+            RG_TARGET=aarch64-apple-darwin
+            RG_SHA256=3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4
+            ;;
+          x86_64)
+            RG_TARGET=x86_64-apple-darwin
+            RG_SHA256=af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1
+            ;;
+          *)
+            echo "::error::unsupported architecture $(uname -m)"
+            exit 1
+            ;;
+        esac
+        RG_NAME="ripgrep-${RG_VERSION}-${RG_TARGET}"
+        RG_ARCHIVE="$RUNNER_TEMP/$RG_NAME.tar.gz"
+        curl -fsSL --retry 3 -o "$RG_ARCHIVE" \
+          "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_NAME}.tar.gz"
+        echo "${RG_SHA256}  ${RG_ARCHIVE}" | shasum -a 256 -c -
+        tar -xzf "$RG_ARCHIVE" -C "$RUNNER_TEMP"
+        mkdir -p "$RUNNER_TEMP/bin"
+        mv "$RUNNER_TEMP/$RG_NAME/rg" "$RUNNER_TEMP/bin/rg"
+        rm -rf "$RG_ARCHIVE" "$RUNNER_TEMP/$RG_NAME"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/bin/rg" --version | head -n 1

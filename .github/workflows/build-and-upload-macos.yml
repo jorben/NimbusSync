@@ -45,6 +45,9 @@ jobs:
             echo "BUILD_ROOT=$RUNNER_TEMP/nimbussync-build"
             echo "DIST_DIR=$GITHUB_WORKSPACE/Dist"
             echo "SIGNING_KEYCHAIN=$RUNNER_TEMP/nimbussync-signing.keychain-db"
+            # Xcode compilation cache (LLVM CAS). Its keys include BUILD_ROOT, so ci.yml's
+            # release-cache job must use the same paths for the restored cache to hit.
+            echo "COMPILATION_CACHE_PATH=$RUNNER_TEMP/nimbussync-cas"
           } >> "$GITHUB_ENV"
 
       - name: Resolve version
@@ -75,10 +78,25 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Install build tools
+      - name: Resolve Xcode version
+        id: xcode
+        shell: bash
         run: |
           xcodebuild -version
-          command -v rg >/dev/null 2>&1 || brew install ripgrep
+          echo "version=$(xcodebuild -version | awk '/^Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        uses: ./.github/actions/setup-ripgrep
+
+      # Seeded by the release-cache job in ci.yml on every push to master. Caches from the
+      # default branch are readable from tag/release runs; this workflow never saves one.
+      - name: Restore compilation cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.COMPILATION_CACHE_PATH }}
+          key: xcode-cas-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-${{ hashFiles('Apps/**', 'Extensions/**', 'Packages/**', 'Config/**', 'NimbusSync.xcodeproj/**', 'Package.swift', 'Scripts/build.sh') }}
+          restore-keys: |
+            xcode-cas-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-
 
       - name: Import signing certificate and profiles
         shell: bash
@@ -173,7 +191,8 @@ jobs:
           mkdir -p "$STAGING"
           ditto "$DIST_DIR/NimbusSync.app" "$STAGING/NimbusSync.app"
           ln -s /Applications "$STAGING/Applications"
-          hdiutil create -volname "NimbusSync" -srcfolder "$STAGING" -fs HFS+ -format UDZO -ov "$DMG"
+          # ULFO (lzfse, macOS 10.11+) compresses faster and smaller than UDZO (zlib).
+          hdiutil create -volname "NimbusSync" -srcfolder "$STAGING" -fs HFS+ -format ULFO -ov "$DMG"
           codesign --force --timestamp --sign "$NIMBUSSYNC_RELEASE_CODE_SIGN_IDENTITY" "$DMG"
           codesign --verify --verbose=2 "$DMG"
           (cd "$DIST_DIR" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")

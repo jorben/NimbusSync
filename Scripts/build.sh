@@ -16,6 +16,9 @@ DESTINATION=${DESTINATION:-${NIMBUSSYNC_DESTINATION:-platform=macOS}}
 # values from Config/*.xcconfig and the project.
 MARKETING_VERSION=${MARKETING_VERSION:-${NIMBUSSYNC_MARKETING_VERSION:-}}
 BUILD_NUMBER=${BUILD_NUMBER:-${NIMBUSSYNC_BUILD_NUMBER:-}}
+# Optional Xcode compilation cache (LLVM CAS) directory. CI restores and saves it between runs;
+# cache keys include the derived data path, so keep BUILD_ROOT stable for hits.
+COMPILATION_CACHE_PATH=${COMPILATION_CACHE_PATH:-${NIMBUSSYNC_COMPILATION_CACHE_PATH:-}}
 
 # The App Group, Keychain group and bundle IDs come from Config/<Configuration>.xcconfig: Debug
 # builds use the `.dev` identity, Release the shipping one. A single override for every
@@ -159,6 +162,9 @@ set -- xcodebuild \
 
 [ -z "$MARKETING_VERSION" ] || set -- "$@" MARKETING_VERSION="$MARKETING_VERSION"
 [ -z "$BUILD_NUMBER" ] || set -- "$@" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+[ -z "$COMPILATION_CACHE_PATH" ] || set -- "$@" \
+    COMPILATION_CACHE_ENABLE_CACHING=YES \
+    COMPILATION_CACHE_CAS_PATH="$COMPILATION_CACHE_PATH"
 
 case "$SIGNING_MODE" in
     unsigned)

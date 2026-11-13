@@ -1,6 +1,10 @@
 # Continuous integration: runs the SwiftPM test suite and an unsigned Debug build of the app
 # (including the secret, release-entitlement and whitespace scans in Scripts/build.sh).
 # Needs no secrets, so it also runs for pull requests from forks.
+#
+# On master, the release-cache job also builds the unsigned universal Release app to keep the
+# Xcode compilation cache warm for build-and-upload-macos.yml (caches saved on the default
+# branch are readable from tag and release runs; GitHub evicts caches unused for 7 days).
 name: CI
 
 on:
@@ -54,9 +58,7 @@ jobs:
           xcode-version: latest-stable
 
       - name: Install build tools
-        run: |
-          xcodebuild -version
-          command -v rg >/dev/null 2>&1 || brew install ripgrep
+        uses: ./.github/actions/setup-ripgrep
 
       - name: Check whitespace in pull request changes
         if: github.event_name == 'pull_request'
@@ -76,3 +78,64 @@ jobs:
           BUILD_ROOT="$RUNNER_TEMP/nimbussync-build" \
           DIST_DIR="$RUNNER_TEMP/nimbussync-dist" \
             Scripts/build.sh
+
+  release-cache:
+    name: Release compilation cache
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Keep these paths identical to build-and-upload-macos.yml: cache keys include them.
+      - name: Prepare build paths
+        shell: bash
+        run: |
+          {
+            echo "BUILD_ROOT=$RUNNER_TEMP/nimbussync-build"
+            echo "DIST_DIR=$RUNNER_TEMP/nimbussync-dist"
+            echo "COMPILATION_CACHE_PATH=$RUNNER_TEMP/nimbussync-cas"
+          } >> "$GITHUB_ENV"
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve Xcode version
+        id: xcode
+        shell: bash
+        run: |
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | awk '/^Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        uses: ./.github/actions/setup-ripgrep
+
+      # Lookup only, without restore-keys: each saved cache comes from a clean build, so it
+      # holds just the current sources' outputs instead of growing with every push.
+      - name: Check compilation cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.COMPILATION_CACHE_PATH }}
+          key: xcode-cas-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.version }}-${{ hashFiles('Apps/**', 'Extensions/**', 'Packages/**', 'Config/**', 'NimbusSync.xcodeproj/**', 'Package.swift', 'Scripts/build.sh') }}
+          lookup-only: true
+
+      - name: Build app (Release, universal, unsigned)
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          CONFIGURATION: Release
+          SIGNING_MODE: unsigned
+          DESTINATION: generic/platform=macOS
+          NIMBUSSYNC_CONFIG: /dev/null
+        run: Scripts/build.sh
+
+      - name: Save compilation cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.COMPILATION_CACHE_PATH }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
