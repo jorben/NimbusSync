@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleDisplayName</key>
+    <string>$(NIMBUSSYNC_DISPLAY_NAME) File Provider UI</string>
+    <key>CFBundleName</key>
+    <string>NimbusSyncFileProviderUI</string>
+    <key>NimbusSyncBundleIdentifierBase</key>
+    <string>$(NIMBUSSYNC_BUNDLE_ID_BASE)</string>
+    <key>NimbusSyncAppGroupIdentifier</key>
+    <string>$(APP_GROUP_IDENTIFIER)</string>
+    <key>NimbusSyncURLScheme</key>
+    <string>$(NIMBUSSYNC_URL_SCHEME)</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.fileprovider-actions-ui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).ActionViewController</string>
+        <key>NSExtensionFileProviderActions</key>
+        <array>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.open-in-nimbussync</string>
+                <key>Title</key>
+                <string>Open in NimbusSync</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.resolve-conflict</string>
+                <key>Title</key>
+                <string>Resolve Conflict</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.hasConflict == TRUE ).@count &gt; 0</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+</plist>

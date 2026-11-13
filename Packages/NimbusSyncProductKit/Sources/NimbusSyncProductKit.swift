@@ -1,0 +1,569 @@
+import Foundation
+import UserNotifications
+import AppKit
+import CryptoKit
+import CloudreveDomainKit
+import CloudreveStoreBridge
+import CloudreveObservability
+import CloudreveAuthKit
+
+public enum ProductTaskDirection: String, Codable, Sendable { case upload, download, reconcile, other }
+public enum ProductTaskState: String, Codable, Sendable { case queued, running, retrying, succeeded, failed, cancelled }
+
+public struct ProductTask: Identifiable, Codable, Equatable, Sendable {
+    public let id: UUID
+    public let domainIdentifier: String
+    public let itemIdentifier: String?
+    public let title: String
+    public let direction: ProductTaskDirection
+    public var state: ProductTaskState
+    public var processedBytes: Int64
+    public var totalBytes: Int64?
+    public var speedBytesPerSecond: Int64?
+    public var errorCode: String?
+    public var updatedAt: Date
+    /// Whether `ProductStore.retryTask` can run it again. Only queued operations can; a download
+    /// is started by the system, so a failed one is retried by asking the system to download the
+    /// item again (see `isSystemDownload`).
+    public let retryable: Bool
+    public init(id: UUID = UUID(), domainIdentifier: String, itemIdentifier: String? = nil, title: String, direction: ProductTaskDirection, state: ProductTaskState, processedBytes: Int64 = 0, totalBytes: Int64? = nil, speedBytesPerSecond: Int64? = nil, errorCode: String? = nil, updatedAt: Date = Date(), retryable: Bool = false) { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.title = title; self.direction = direction; self.state = state; self.processedBytes = processedBytes; self.totalBytes = totalBytes; self.speedBytesPerSecond = speedBytesPerSecond; self.errorCode = errorCode; self.updatedAt = updatedAt; self.retryable = retryable }
+    public var progress: Double? { guard let totalBytes, totalBytes > 0 else { return nil }; return min(1, max(0, Double(processedBytes) / Double(totalBytes))) }
+    /// A download the system started for one item, outside the operation queue. The app retries
+    /// it through the File Provider manager rather than `ProductStore.retryTask`.
+    public var isSystemDownload: Bool { !retryable && direction == .download && itemIdentifier != nil }
+
+    /// The error an operation shows in the activity list. Terminal failure states name their own;
+    /// an operation still on its way shows its latest transfer's error. One that finished,
+    /// succeeded or was cancelled shows none: a failed earlier attempt's transfer must not outlive
+    /// the outcome (a cancelled trash kept showing "Outcome unknown" from an attempt before it).
+    public static func errorCode(forOperationState state: String, latestTransferErrorCode: String?) -> String? {
+        switch state {
+        case "unknown_outcome": return "unknown_outcome"
+        case "conflict": return "version_conflict"
+        case "auth_expired": return "authentication_required"
+        case "committed", "resolved", "cancelled": return nil
+        default: return latestTransferErrorCode
+        }
+    }
+
+    /// Drops failures nobody can retry once the same item later went through in the same
+    /// direction: a download that failed and then succeeded is one success, not an issue.
+    /// Retryable failures stay, since retrying them is still the user's call.
+    public static func droppingSupersededFailures(_ tasks: [ProductTask]) -> [ProductTask] {
+        struct Key: Hashable { let domain: String; let item: String; let direction: ProductTaskDirection }
+        var succeededAt: [Key: Date] = [:]
+        for task in tasks where task.state == .succeeded {
+            guard let item = task.itemIdentifier else { continue }
+            let key = Key(domain: task.domainIdentifier, item: item, direction: task.direction)
+            succeededAt[key] = max(succeededAt[key] ?? task.updatedAt, task.updatedAt)
+        }
+        return tasks.filter { task in
+            guard task.state == .failed, !task.retryable, let item = task.itemIdentifier,
+                  let success = succeededAt[Key(domain: task.domainIdentifier, item: item, direction: task.direction)] else { return true }
+            return success < task.updatedAt
+        }
+    }
+}
+
+public struct ProductTaskProjection: Sendable {
+    public let tasks: [ProductTask]
+    public init(tasks: [ProductTask]) { self.tasks = tasks }
+    public var active: [ProductTask] { tasks.filter { [.queued, .running, .retrying].contains($0.state) } }
+    public var recent: [ProductTask] { Array(tasks.sorted { $0.updatedAt > $1.updatedAt }.prefix(20)) }
+}
+
+public struct TaskProjection: Sendable {
+    private var values: [UUID: ProductTask] = [:]
+    public init() {}
+    public mutating func upsert(_ task: ProductTask) { values[task.id] = task }
+    public mutating func requestCancel(_ id: UUID) { guard var task = values[id], [.queued, .running, .retrying].contains(task.state) else { return }; task.state = .cancelled; task.updatedAt = Date(); values[id] = task }
+    public mutating func retry(_ id: UUID) { guard var task = values[id], task.state == .failed else { return }; task.state = .retrying; task.errorCode = nil; task.updatedAt = Date(); values[id] = task }
+    public func active() -> [ProductTask] { values.values.filter { [.queued, .running, .retrying].contains($0.state) }.sorted { $0.updatedAt > $1.updatedAt } }
+    public func recent(limit: Int = 20) -> [ProductTask] { Array(values.values.sorted { $0.updatedAt > $1.updatedAt }.prefix(limit)) }
+}
+
+public struct ProductConflict: Identifiable, Codable, Equatable, Sendable {
+    public let id: UUID
+    public let domainIdentifier: String
+    public let itemIdentifier: String
+    public let filename: String
+    public let kind: String
+    public let baseSummary: String
+    public let localSummary: String
+    public let remoteSummary: String
+    public let remoteVersion: Data?
+    public let localSourceKind: String?
+    public let sourceAvailable: Bool
+    public let sourceGeneration: UInt64
+    public let expectedBaseVersion: Data?
+    public let expectedSourceHash: Data?
+    public let expectedSourceSize: Int64?
+    public let createdAt: Date
+    public var state: String
+    public init(id: UUID, domainIdentifier: String, itemIdentifier: String, filename: String, kind: String, baseSummary: String, localSummary: String, remoteSummary: String, remoteVersion: Data? = nil, localSourceKind: String? = nil, sourceAvailable: Bool = false, sourceGeneration: UInt64 = 0, expectedBaseVersion: Data? = nil, expectedSourceHash: Data? = nil, expectedSourceSize: Int64? = nil, createdAt: Date, state: String = "pending") { self.id = id; self.domainIdentifier = domainIdentifier; self.itemIdentifier = itemIdentifier; self.filename = filename; self.kind = kind; self.baseSummary = baseSummary; self.localSummary = localSummary; self.remoteSummary = remoteSummary; self.remoteVersion = remoteVersion; self.localSourceKind = localSourceKind; self.sourceAvailable = sourceAvailable; self.sourceGeneration = sourceGeneration; self.expectedBaseVersion = expectedBaseVersion; self.expectedSourceHash = expectedSourceHash; self.expectedSourceSize = expectedSourceSize; self.createdAt = createdAt; self.state = state }
+}
+
+public struct ConflictCenterModel: Sendable {
+    public var conflicts: [ProductConflict]
+    public init(conflicts: [ProductConflict] = []) { self.conflicts = conflicts }
+    public mutating func resolve(_ id: UUID) { if let index = conflicts.firstIndex(where: { $0.id == id }) { conflicts[index].state = "resolved" } }
+    public var pending: [ProductConflict] { conflicts.filter { $0.state == "pending" }.sorted { $0.createdAt > $1.createdAt } }
+}
+
+public struct ProductSnapshot: Equatable, Sendable {
+    public var domains: [DomainDescriptor]
+    public var tasks: [ProductTask]
+    public var conflicts: [ProductConflict]
+    public var metrics: ConsistencyMetrics
+    public var notificationPreferences: NotificationPreferences
+    public var exclusionRules: [String: String]
+    /// Full-check progress keyed by Domain identifier, only for Domains currently checking.
+    public var checkProgress: [String: DomainCheckProgress]
+    /// When each Domain last took in a change, keyed by Domain identifier: the newest of a live
+    /// update, a finished full check and a finished transfer. Domains that never synced are absent.
+    public var lastSyncedAt: [String: Date]
+    public init(domains: [DomainDescriptor] = [], tasks: [ProductTask] = [], conflicts: [ProductConflict] = [], metrics: ConsistencyMetrics = ConsistencyMetrics(), notificationPreferences: NotificationPreferences = NotificationPreferences(), exclusionRules: [String: String] = [:], checkProgress: [String: DomainCheckProgress] = [:], lastSyncedAt: [String: Date] = [:]) { self.domains = domains; self.tasks = tasks; self.conflicts = conflicts; self.metrics = metrics; self.notificationPreferences = notificationPreferences; self.exclusionRules = exclusionRules; self.checkProgress = checkProgress; self.lastSyncedAt = lastSyncedAt }
+
+    /// The newest of the given moments, or nil when there are none.
+    public static func lastSynced(eventAt: Date?, reconcileAt: Date?, tasks: [ProductTask]) -> Date? {
+        let transferredAt = tasks.filter { $0.state == .succeeded }.map(\.updatedAt).max()
+        return [eventAt, reconcileAt, transferredAt].compactMap { $0 }.max()
+    }
+    public var highestStatus: DomainStatus {
+        domains.map(\.status).sorted { $0.priority > $1.priority }.first ?? .initializing
+    }
+    public var activeTasks: [ProductTask] { tasks.filter { [.queued, .running, .retrying].contains($0.state) } }
+    /// Drives the menu bar animation: a transfer is queued or running, or a domain is applying or
+    /// checking remote changes. Problem states (auth, offline, errors) are not "syncing".
+    public var isSyncing: Bool {
+        !activeTasks.isEmpty || domains.contains { $0.status == .syncing || $0.status == .reconciling }
+    }
+    public var actionableConflicts: [ProductConflict] { conflicts.filter { $0.state == "pending" } }
+    public var taskProjection: ProductTaskProjection { ProductTaskProjection(tasks: tasks) }
+}
+
+public struct NotificationPreferences: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var authExpired: Bool
+    public var conflicts: Bool
+    public var permanentFailures: Bool
+    public var syncComplete: Bool
+    public init(enabled: Bool = true, authExpired: Bool = true, conflicts: Bool = true, permanentFailures: Bool = true, syncComplete: Bool = false) { self.enabled = enabled; self.authExpired = authExpired; self.conflicts = conflicts; self.permanentFailures = permanentFailures; self.syncComplete = syncComplete }
+}
+
+public enum ProductCopy {
+    public static func text(_ key: String) -> String { String(localized: String.LocalizationValue(key), bundle: .module) }
+}
+
+public actor ProductStore {
+    private let registry: SQLiteStateStore?
+    private let storeFactory: AppGroupStoreFactory?
+    private let userDefaults: UserDefaults
+    private let metrics: MetricsStore
+    private let notificationKey = "nimbussync.notification.preferences"
+
+    public init(registry: SQLiteStateStore? = nil, storeFactory: AppGroupStoreFactory? = nil, userDefaults: UserDefaults = .standard, metrics: MetricsStore = MetricsStore()) { self.registry = registry; self.storeFactory = storeFactory; self.userDefaults = userDefaults; self.metrics = metrics }
+
+    public func snapshot() -> ProductSnapshot {
+        let domains = (try? registry?.allDomains() ?? [])?.compactMap { stored -> DomainDescriptor? in
+            guard let scope = try? RemoteScope(origin: stored.origin, accountID: stored.accountID, rootURI: stored.rootURI) else { return nil }
+            var descriptor = DomainDescriptor(identifier: stored.identifier, displayName: stored.displayName, scope: scope, rootRemoteID: stored.rootRemoteID, accountID: stored.accountID, secretReference: stored.secretReference, capabilitySnapshot: stored.capabilitySnapshot, iconURL: stored.iconURL)
+            descriptor.status = stored.status
+            return descriptor
+        } ?? []
+        var tasks: [ProductTask] = []
+        var conflicts: [ProductConflict] = []
+        var exclusionRules: [String: String] = [:]
+        var checkProgress: [String: DomainCheckProgress] = [:]
+        var lastSyncedAt: [String: Date] = [:]
+        for domain in domains {
+            let domainStore: SQLiteStateStore?
+            if let storeFactory { domainStore = try? storeFactory.domainStore(identifier: domain.identifier) } else { domainStore = nil }
+            if let domainStore {
+                do {
+                    if let encoded = try domainStore.preference(key: "exclusion.rules.\(domain.identifier)"),
+                       let data = encoded.data(using: .utf8),
+                       let snapshot = try? JSONDecoder().decode(ExclusionRuleSnapshot.self, from: data) {
+                        exclusionRules[domain.identifier] = snapshot.rules.joined(separator: "\n")
+                    }
+                } catch {
+                    // A malformed local rule snapshot is handled by the
+                    // Store matcher as fail-closed; it should not hide the
+                    // rest of the product snapshot.
+                }
+            }
+            // A crashed check leaves its run active; the status gate keeps it from showing forever.
+            if domain.status == .reconciling, let progress = try? domainStore?.activeCheckProgress() {
+                checkProgress[domain.identifier] = progress
+            }
+            // Tasks are keyed by item identifier; show the file's name where the store still knows it.
+            func itemName(_ identifier: String?) -> String? {
+                guard let identifier, let name = try? domainStore?.item(identifier: identifier)?.name, !name.isEmpty else { return nil }
+                return name
+            }
+            let storedOperations = (try? domainStore?.operations(limit: 100) ?? []) ?? []
+            tasks.append(contentsOf: storedOperations.map { stored in
+                let transfer: TransferTaskSnapshot?
+                if let domainStore {
+                    transfer = try? domainStore.latestTransferTask(operationID: stored.operation.operationID)
+                } else {
+                    transfer = nil
+                }
+                let errorCode = ProductTask.errorCode(forOperationState: stored.operation.state, latestTransferErrorCode: transfer?.errorCode)
+                return ProductTask(id: stored.operation.operationID, domainIdentifier: domain.identifier, itemIdentifier: stored.operation.itemIdentifier, title: itemName(stored.operation.itemIdentifier) ?? stored.operation.itemIdentifier ?? stored.operation.kind, direction: direction(for: stored.operation.kind), state: taskState(for: stored.operation.state, cancelRequested: stored.operation.cancelRequested), processedBytes: transfer?.bytes ?? 0, totalBytes: transfer?.totalBytes, errorCode: errorCode, updatedAt: stored.updatedAt, retryable: true)
+            })
+            let transferTasks: [TransferTaskSnapshot]
+            if let domainStore {
+                transferTasks = (try? domainStore.transferTasks(limit: 100)) ?? []
+            } else {
+                transferTasks = []
+            }
+            tasks.append(contentsOf: transferTasks.compactMap { transfer in
+                guard transfer.operationID == nil else { return nil }
+                return ProductTask(
+                    id: transfer.taskID,
+                    domainIdentifier: domain.identifier,
+                    itemIdentifier: transfer.itemIdentifier,
+                    title: itemName(transfer.itemIdentifier) ?? transfer.itemIdentifier ?? transfer.direction,
+                    direction: transferDirection(for: transfer.direction),
+                    state: transferTaskState(for: transfer.state),
+                    processedBytes: transfer.bytes,
+                    totalBytes: transfer.totalBytes,
+                    errorCode: transfer.errorCode,
+                    updatedAt: transfer.updatedAt
+                )
+            })
+            tasks = ProductTask.droppingSupersededFailures(tasks)
+            let syncState = try? domainStore?.syncState()
+            if let date = ProductSnapshot.lastSynced(eventAt: syncState?.lastEventAt, reconcileAt: syncState?.lastReconcileAt, tasks: tasks.filter { $0.domainIdentifier == domain.identifier }) {
+                lastSyncedAt[domain.identifier] = date
+            }
+            let storedConflicts: [ConflictProjection]
+            if let domainStore { storedConflicts = (try? domainStore.pendingConflicts(limit: 100)) ?? [] } else { storedConflicts = [] }
+            conflicts.append(contentsOf: storedConflicts.map { conflict in
+                let filename = (try? domainStore?.item(identifier: conflict.itemIdentifier)?.name) ?? conflict.itemIdentifier
+                let sourceAvailable = conflict.expectedSourceHash != nil &&
+                    conflict.expectedSourceSize != nil &&
+                    (domain.capabilitySnapshot.operationVerified("fallback_conflict"))
+                return ProductConflict(id: conflict.conflictID, domainIdentifier: domain.identifier, itemIdentifier: conflict.itemIdentifier, filename: filename, kind: conflict.kind, baseSummary: conflict.baseSummary, localSummary: conflict.localSummary, remoteSummary: conflict.remoteSummary, remoteVersion: conflict.remoteVersion, localSourceKind: conflict.localSourceKind, sourceAvailable: sourceAvailable, sourceGeneration: conflict.sourceGeneration, expectedBaseVersion: conflict.expectedBaseVersion, expectedSourceHash: conflict.expectedSourceHash, expectedSourceSize: conflict.expectedSourceSize, createdAt: conflict.createdAt, state: conflict.state)
+            })
+        }
+        let preferences = userDefaults.data(forKey: notificationKey).flatMap { try? JSONDecoder().decode(NotificationPreferences.self, from: $0) } ?? NotificationPreferences()
+        return ProductSnapshot(domains: domains, tasks: tasks, conflicts: conflicts, metrics: metrics.snapshot(), notificationPreferences: preferences, exclusionRules: exclusionRules, checkProgress: checkProgress, lastSyncedAt: lastSyncedAt)
+    }
+
+    public func saveNotificationPreferences(_ preferences: NotificationPreferences) throws {
+        userDefaults.set(try JSONEncoder().encode(preferences), forKey: notificationKey)
+    }
+
+    public func cancelTask(_ taskID: UUID) throws {
+        guard let registry, let storeFactory else { return }
+        for domain in try registry.allDomains() {
+            guard let store = try? storeFactory.domainStore(identifier: domain.identifier) else { continue }
+            if try store.operation(operationID: taskID) != nil {
+                try store.requestCancel(operationID: taskID)
+                return
+            }
+        }
+    }
+
+    public func retryTask(_ taskID: UUID) throws {
+        guard let registry, let storeFactory else { return }
+        for domain in try registry.allDomains() {
+            guard let store = try? storeFactory.domainStore(identifier: domain.identifier) else { continue }
+            if try store.operation(operationID: taskID) != nil {
+                try store.retryOperation(operationID: taskID)
+                return
+            }
+        }
+    }
+
+    /// Takes one task off the activity list. An operation is only hidden, so its state and any
+    /// later retry are unaffected; a download record, which nothing else reads, is forgotten.
+    public func clearTask(_ taskID: UUID) throws {
+        guard let registry, let storeFactory else { return }
+        let stores = try registry.allDomains().compactMap { try? storeFactory.domainStore(identifier: $0.identifier) }
+        for store in stores {
+            if try store.operation(operationID: taskID) != nil {
+                try store.hideOperationFromHistory(operationID: taskID)
+                return
+            }
+        }
+        for store in stores {
+            try store.deleteTransferTask(taskID: taskID)
+        }
+    }
+
+    public func clearTaskHistory() throws {
+        guard let registry, let storeFactory else { return }
+        for domain in try registry.allDomains() {
+            try storeFactory.domainStore(identifier: domain.identifier).clearCompletedOperations()
+        }
+    }
+
+    public func store() -> SQLiteStateStore? { registry }
+}
+
+private func direction(for kind: String) -> ProductTaskDirection {
+    switch kind.lowercased() { case "create", "modify", "rename", "move", "trash", "restore", "delete": return .upload; default: return .other }
+}
+
+private func transferDirection(for direction: String) -> ProductTaskDirection {
+    switch direction.lowercased() {
+    case "upload": return .upload
+    case "download": return .download
+    default: return .other
+    }
+}
+
+private func transferTaskState(for state: String) -> ProductTaskState {
+    switch state.lowercased() {
+    case "running", "queued": return .running
+    case "succeeded", "completed": return .succeeded
+    case "cancelled": return .cancelled
+    case "failed": return .failed
+    default: return .failed
+    }
+}
+
+private func taskState(for state: String, cancelRequested: Bool = false) -> ProductTaskState {
+    if cancelRequested && !["committed", "cancelled", "permanently_failed", "resolved"].contains(state) { return .cancelled }
+    switch state {
+    case "queued": return .queued
+    case "committed", "resolved": return .succeeded
+    case "cancelled": return .cancelled
+    case "retry_wait": return .retrying
+    case "permanently_failed", "conflict", "unknown_outcome", "auth_expired": return .failed
+    default: return .running
+    }
+}
+
+public actor NotificationCoordinator {
+    private let center: UNUserNotificationCenter
+    private let userDefaults: UserDefaults
+    private let dedupeKey = "nimbussync.notification.dedupe"
+    private let preferences: ProductStore
+
+    public init(center: UNUserNotificationCenter = .current(), userDefaults: UserDefaults = .standard, preferences: ProductStore) { self.center = center; self.userDefaults = userDefaults; self.preferences = preferences }
+
+    public func requestAuthorizationIfNeeded() async throws -> Bool {
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            return try await center.requestAuthorization(options: [.alert, .sound, .badge])
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    public func configureCategories() {
+        let categories = [
+            UNNotificationCategory(identifier: "auth", actions: [], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "conflict", actions: [], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "failure", actions: [], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "complete", actions: [], intentIdentifiers: [], options: []),
+        ]
+        center.setNotificationCategories(Set(categories))
+    }
+
+    public func notify(kind: String, opaqueID: String, title: String, body: String, enabled: Bool) async throws {
+        guard enabled else { return }
+        var sent = userDefaults.stringArray(forKey: dedupeKey) ?? []
+        let key = "\(kind):\(opaqueID)"
+        guard !sent.contains(key) else { return }
+        let content = UNMutableNotificationContent(); content.title = title; content.body = body; content.categoryIdentifier = kind; content.sound = .default
+        let action = kind == "auth" ? "reauthorize" : (kind == "failure" ? "task" : kind)
+        content.userInfo = ["deepLink": "\(AppIdentity.urlScheme)://\(action)/\(opaqueID)"]
+        let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
+        try await center.add(request)
+        sent.append(key); userDefaults.set(Array(sent.suffix(500)), forKey: dedupeKey)
+    }
+}
+
+public enum DeepLinkDestination: Equatable, Sendable { case conflict(UUID), reauthorize(String), task(UUID), item(String), conflictItem(String), settings }
+
+public enum DeepLinkRouter {
+    public static func destination(url: URL, scheme: String = AppIdentity.urlScheme) -> DeepLinkDestination? {
+        guard url.scheme == scheme, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+        let pathComponents = url.pathComponents.filter { $0 != "/" }
+        let action: String
+        let identifiers: ArraySlice<String>
+        if let host = url.host, !host.isEmpty {
+            action = host
+            identifiers = pathComponents[...]
+        } else if let first = pathComponents.first {
+            action = first
+            identifiers = pathComponents.dropFirst()
+        } else {
+            return .settings
+        }
+        switch action {
+        case "conflict": guard let id = identifiers.first.flatMap(UUID.init(uuidString:)), identifiers.count == 1 else { return nil }; return .conflict(id)
+        case "reauthorize": guard let id = identifiers.first, identifiers.count == 1, CloudreveIdentifier.validate(id, prefix: CloudreveIdentifier.domainPrefix) else { return nil }; return .reauthorize(id)
+        case "task": guard let id = identifiers.first.flatMap(UUID.init(uuidString:)), identifiers.count == 1 else { return nil }; return .task(id)
+        case "item": guard let id = identifiers.first, identifiers.count == 1, CloudreveIdentifier.validate(id, prefix: CloudreveIdentifier.itemPrefix) else { return nil }; return .item(id)
+        case "conflict-item": guard let id = identifiers.first, identifiers.count == 1, CloudreveIdentifier.validate(id, prefix: CloudreveIdentifier.itemPrefix) else { return nil }; return .conflictItem(id)
+        case "settings": return .settings
+        default: return nil
+        }
+    }
+}
+
+public struct ExclusionRuleSet: Codable, Equatable, Sendable {
+    public let revision: UInt64
+    public let rules: [String]
+    public let caseSensitive: Bool
+    public init(revision: UInt64, rules: [String], caseSensitive: Bool = false) throws { self.revision = revision; self.rules = try rules.map(ExclusionRuleSet.normalize); self.caseSensitive = caseSensitive }
+
+    private enum CodingKeys: String, CodingKey { case revision, rules, caseSensitive }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try container.decodeIfPresent(UInt64.self, forKey: .revision) ?? 0
+        rules = try container.decodeIfPresent([String].self, forKey: .rules)?.map(ExclusionRuleSet.normalize) ?? []
+        caseSensitive = try container.decodeIfPresent(Bool.self, forKey: .caseSensitive) ?? false
+    }
+
+    public func matches(relativePath: String, isRoot: Bool = false) -> Bool {
+        ExclusionMatcher.matches(relativePath: relativePath, rules: rules, caseSensitive: caseSensitive, isRoot: isRoot)
+    }
+    public static func normalize(_ raw: String) throws -> String {
+        try ExclusionMatcher.normalize(raw)
+    }
+}
+
+public struct ExclusionImpact: Equatable, Sendable { public let remoteMatches: Int; public let dirtyMatches: Int; public init(remoteMatches: Int, dirtyMatches: Int) { self.remoteMatches = remoteMatches; self.dirtyMatches = dirtyMatches } }
+
+private func relativePath(_ uri: String, rootURI: String) -> String? {
+    if uri.hasPrefix("cloudreve://") || rootURI.hasPrefix("cloudreve://") { return CloudreveRemoteURI.relativePath(uri, root: rootURI) }
+    let normalizedURI = uri.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    let normalizedRoot = rootURI.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    guard normalizedRoot.isEmpty || normalizedURI == normalizedRoot || normalizedURI.hasPrefix(normalizedRoot + "/") else { return nil }
+    if normalizedRoot.isEmpty { return normalizedURI }
+    return String(normalizedURI.dropFirst(normalizedRoot.count).trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+}
+
+public actor ExclusionRuleService {
+    private let store: SQLiteStateStore
+    public init(store: SQLiteStateStore) { self.store = store }
+    public func compile(revision: UInt64, text: String) throws -> ExclusionRuleSet {
+        let rules = text.split(whereSeparator: \.isNewline).map(String.init).filter {
+            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !trimmed.isEmpty && !trimmed.hasPrefix("#")
+        }
+        return try ExclusionRuleSet(revision: revision, rules: rules)
+    }
+    public func preview(_ ruleSet: ExclusionRuleSet, items: [RemoteItem], rootURI: String = "/") -> ExclusionImpact {
+        let matches = items.filter { item in
+            guard let relativePath = relativePath(item.uri, rootURI: rootURI) else { return false }
+            return ruleSet.matches(relativePath: relativePath, isRoot: item.itemIdentifier == "NSFileProviderRootContainerItemIdentifier")
+        }
+        return ExclusionImpact(remoteMatches: matches.count, dirtyMatches: matches.filter { !$0.tombstone && !$0.trashed }.count)
+    }
+    public func persist(_ ruleSet: ExclusionRuleSet, domainIdentifier: String) throws { let data = try JSONEncoder().encode(ruleSet); try store.setPreference(key: "exclusion.rules.\(domainIdentifier)", value: String(data: data, encoding: .utf8) ?? "") }
+    public func applyView(_ ruleSet: ExclusionRuleSet, domainIdentifier: String, rootURI: String) throws -> [JournalChange] {
+        let snapshot = ExclusionRuleSnapshot(revision: ruleSet.revision, rules: ruleSet.rules, caseSensitive: ruleSet.caseSensitive)
+        return try store.applyExclusionRules(snapshot, domainIdentifier: domainIdentifier, rootURI: rootURI)
+    }
+}
+
+public struct ExclusionApplication: Sendable {
+    public let ruleSet: ExclusionRuleSet
+    public let impact: ExclusionImpact
+    public let requiresDirtyPreservation: Bool
+    public init(ruleSet: ExclusionRuleSet, impact: ExclusionImpact) { self.ruleSet = ruleSet; self.impact = impact; self.requiresDirtyPreservation = impact.dirtyMatches > 0 }
+}
+
+public actor ExclusionApplicationService {
+    private let rules: ExclusionRuleService
+    private let store: SQLiteStateStore
+    public init(store: SQLiteStateStore) { self.store = store; self.rules = ExclusionRuleService(store: store) }
+    public func preview(revision: UInt64, text: String, items: [RemoteItem], rootURI: String = "/") async throws -> ExclusionApplication { let ruleSet = try await rules.compile(revision: revision, text: text); let impact = await rules.preview(ruleSet, items: items, rootURI: rootURI); return ExclusionApplication(ruleSet: ruleSet, impact: impact) }
+    @discardableResult
+    public func apply(_ application: ExclusionApplication, domainIdentifier: String, preserveDirty: Bool) async throws -> [JournalChange] {
+        guard !application.requiresDirtyPreservation || preserveDirty else { throw CoreFailure(code: .cannotSynchronize, retryable: false, userActionRequired: true) }
+        guard let domain = try store.domain(identifier: domainIdentifier) else { throw CoreFailure(code: .database, retryable: false) }
+        let snapshot = ExclusionRuleSnapshot(revision: application.ruleSet.revision, rules: application.ruleSet.rules, caseSensitive: application.ruleSet.caseSensitive)
+        return try store.applyExclusionRules(snapshot, domainIdentifier: domainIdentifier, rootURI: domain.rootURI)
+    }
+}
+
+public struct DiagnosticArchive: Sendable {
+    public let manifest: DiagnosticManifest
+    public let health: [HealthCheck]
+    public init(manifest: DiagnosticManifest, health: [HealthCheck]) { self.manifest = manifest; self.health = health }
+    public func export(to directory: URL, includeFileNames: Bool = false) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(manifest).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
+        try encoder.encode(health).write(to: directory.appendingPathComponent("health.json"), options: .atomic)
+        let privacy = ["includesFileNames": includeFileNames, "includesPaths": false, "includesTokens": false, "includesSignedURLs": false, "includesContent": false]
+        try JSONSerialization.data(withJSONObject: privacy, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("privacy.json"), options: .atomic)
+        return directory
+    }
+}
+
+public enum ReleaseSupportStatus: String, Codable, Sendable { case verified, readOnly, unsupported, unverified }
+
+public struct SupportMatrixEntry: Codable, Equatable, Sendable {
+    public let component: String
+    public let version: String
+    public let architecture: String
+    public let status: ReleaseSupportStatus
+    public let evidence: String
+    public init(component: String, version: String, architecture: String, status: ReleaseSupportStatus, evidence: String) { self.component = component; self.version = version; self.architecture = architecture; self.status = status; self.evidence = evidence }
+}
+
+public struct ReleaseManifest: Codable, Equatable, Sendable {
+    public let version: String
+    public let commit: String
+    public let swiftVersion: String
+    public let architectures: [String]
+    public let artifacts: [String: String]
+    public let supportMatrix: [SupportMatrixEntry]
+    public let gates: [String: Bool]
+    public init(version: String, commit: String, swiftVersion: String, architectures: [String], artifacts: [String: String], supportMatrix: [SupportMatrixEntry], gates: [String: Bool]) { self.version = version; self.commit = commit; self.swiftVersion = swiftVersion; self.architectures = architectures; self.artifacts = artifacts; self.supportMatrix = supportMatrix; self.gates = gates }
+    public var isReleaseCandidate: Bool { gates.values.allSatisfy { $0 } && !supportMatrix.contains { $0.status == .unverified } }
+}
+
+public enum UpgradeFence {
+    public static func canWrite(schemaVersion: Int, compatibilityMinimum: Int, compatibilityMaximum: Int, processGeneration: Int, currentGeneration: Int, migrationState: String = "ready") -> Bool {
+        migrationState == "ready" && schemaVersion >= compatibilityMinimum && schemaVersion <= compatibilityMaximum && processGeneration == currentGeneration
+    }
+}
+
+public enum RepairCoordinator {
+    public static func check(_ store: SQLiteStateStore) throws -> HealthCheck {
+        let healthy = try store.quickCheck()
+        return HealthCheck(name: "Database", state: healthy ? .pass : .fail, stableCode: healthy ? "db_ok" : "db_quick_check_failed")
+    }
+    public static func quarantine(_ store: SQLiteStateStore) throws -> URL? { try store.isolateForRepair() }
+}
+
+public struct UninstallPreflight: Equatable, Sendable {
+    public let domainIdentifier: String
+    public let preserveDirtyData: Bool
+    public let reason: String
+    public init(domainIdentifier: String, preserveDirtyData: Bool, reason: String) { self.domainIdentifier = domainIdentifier; self.preserveDirtyData = preserveDirtyData; self.reason = reason }
+}
+
+public enum ReleaseArtifacts {
+    public static func checksum(_ url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        return SHA256Digest.hex(data)
+    }
+}
+
+private enum SHA256Digest {
+    static func hex(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private extension DomainStatus {
+    var priority: Int { switch self { case .authExpired: 100; case .rootUnavailable, .scopeConflict, .preservedRemoval: 90; case .conflict, .permanentError: 80; case .offline: 70; case .reconciling: 60; case .syncing: 50; case .eventDegraded, .appNotRunning: 40; case .healthy: 10; default: 0 } }
+}

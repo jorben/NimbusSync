@@ -1,0 +1,20 @@
+// Release identity. Keep these values stable once shipped: the bundle ID, App Group and Keychain
+// access group are what tie an installed copy to its data and credentials.
+NIMBUSSYNC_BUNDLE_ID_BASE = io.github.jorben.nimbussync
+NIMBUSSYNC_DISPLAY_NAME = NimbusSync
+NIMBUSSYNC_URL_SCHEME = nimbussync
+PRODUCT_BUNDLE_IDENTIFIER = $(NIMBUSSYNC_BUNDLE_ID_BASE)
+PRODUCT_NAME = NimbusSync
+SWIFT_VERSION = 6.0
+MACOSX_DEPLOYMENT_TARGET = 13.0
+// CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
+MARKETING_VERSION = 0.1.0
+CODE_SIGN_IDENTITY = Developer ID Application
+CODE_SIGNING_REQUIRED = YES
+CODE_SIGNING_ALLOWED = YES
+APP_GROUP_IDENTIFIER = group.$(NIMBUSSYNC_BUNDLE_ID_BASE)
+KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)$(NIMBUSSYNC_BUNDLE_ID_BASE)
+// xcodebuild build otherwise injects com.apple.security.get-task-allow, which notarization rejects.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+// Notarization requires a secure timestamp; plain xcodebuild build signs with --timestamp=none.
+OTHER_CODE_SIGN_FLAGS = $(inherited) --timestamp

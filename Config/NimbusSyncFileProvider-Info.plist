@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleDisplayName</key>
+    <string>$(NIMBUSSYNC_DISPLAY_NAME) File Provider</string>
+    <key>CFBundleName</key>
+    <string>NimbusSyncFileProvider</string>
+    <key>NimbusSyncBundleIdentifierBase</key>
+    <string>$(NIMBUSSYNC_BUNDLE_ID_BASE)</string>
+    <key>NimbusSyncAppGroupIdentifier</key>
+    <string>$(APP_GROUP_IDENTIFIER)</string>
+    <key>NimbusSyncURLScheme</key>
+    <string>$(NIMBUSSYNC_URL_SCHEME)</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.fileprovider-nonui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+        <key>NSExtensionFileProviderDocumentGroup</key>
+        <string>$(APP_GROUP_IDENTIFIER)</string>
+        <key>NSExtensionFileProviderSupportsEnumeration</key>
+        <true/>
+        <key>NSExtensionFileProviderDownloadPipelineDepth</key>
+        <integer>2</integer>
+        <key>NSExtensionFileProviderMetadataOnlyUploadPipelineDepth</key>
+        <integer>2</integer>
+        <key>NSExtensionFileProviderActions</key>
+        <array>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.check-for-updates</string>
+                <key>Title</key>
+                <string>Check for Updates</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.keep-downloaded</string>
+                <key>Title</key>
+                <string>Keep Downloaded</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == FALSE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.allow-automatic-freeing</string>
+                <key>Title</key>
+                <string>Allow Automatic Freeing</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.remove-download</string>
+                <key>Title</key>
+                <string>Remove Download</string>
+                <key>Predicate</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canEvict == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+            </dict>
+        </array>
+        <key>NSFileProviderDecorations</key>
+        <array>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.conflict</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.exclamationmark</string>
+                <key>Label</key>
+                <string>Conflict</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.error</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.exclamationmark</string>
+                <key>Label</key>
+                <string>Sync Error</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+            <dict>
+                <key>Identifier</key>
+                <string>io.github.jorben.nimbussync.keep-downloaded</string>
+                <key>BadgeImageType</key>
+                <string>com.apple.icon-decoration.badge.lock</string>
+                <key>Label</key>
+                <string>Keep Downloaded</string>
+                <key>Category</key>
+                <string>Badge</string>
+            </dict>
+        </array>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,236 @@
+# Builds the signed, universal Release app, packages it as DMG + ZIP, submits the DMG for
+# notarization (async, not stapled) and attaches both to the GitHub release.
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   APPLE_CERTIFICATE                    base64 of the Developer ID Application .p12 (with private key)
+#   APPLE_CERTIFICATE_PASSWORD           password of that .p12
+#   APPLE_TEAM_ID                        Apple Developer Team ID
+#   APPLE_ID                             Apple ID used for notarization
+#   APPLE_APP_SPECIFIC_PASSWORD          app-specific password of that Apple ID
+#   NIMBUSSYNC_APP_PROFILE               base64 of the app's Developer ID .provisionprofile
+#   NIMBUSSYNC_FILE_PROVIDER_PROFILE     base64 of the File Provider's Developer ID .provisionprofile
+#   NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE  base64 of the File Provider UI's Developer ID .provisionprofile
+name: Build and Upload macOS App
+
+on:
+  release:
+    types: [prereleased, released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (e.g. 0.2.0); artifacts are uploaded to the run, not a release"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-build-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare build paths
+        shell: bash
+        run: |
+          {
+            echo "BUILD_ROOT=$RUNNER_TEMP/nimbussync-build"
+            echo "DIST_DIR=$GITHUB_WORKSPACE/Dist"
+            echo "SIGNING_KEYCHAIN=$RUNNER_TEMP/nimbussync-signing.keychain-db"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          RAW="${RELEASE_TAG:-$INPUT_VERSION}"
+          VERSION="${RAW#v}"
+          # CFBundleShortVersionString must be numeric: drop a pre-release suffix such as -rc.1.
+          MARKETING_VERSION="${VERSION%%-*}"
+          if ! [[ "$MARKETING_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            echo "::error::version '$RAW' is not X.Y or X.Y.Z (optionally with a -suffix)"
+            exit 1
+          fi
+          {
+            echo "VERSION=$VERSION"
+            echo "MARKETING_VERSION=$MARKETING_VERSION"
+            echo "BUILD_NUMBER=$RUN_NUMBER"
+          } >> "$GITHUB_ENV"
+          echo "Version: $VERSION, bundle version: $MARKETING_VERSION ($RUN_NUMBER)"
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install build tools
+        run: |
+          xcodebuild -version
+          command -v rg >/dev/null 2>&1 || brew install ripgrep
+
+      - name: Import signing certificate and profiles
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APP_PROFILE: ${{ secrets.NIMBUSSYNC_APP_PROFILE }}
+          FILE_PROVIDER_PROFILE: ${{ secrets.NIMBUSSYNC_FILE_PROVIDER_PROFILE }}
+          FILE_PROVIDER_UI_PROFILE: ${{ secrets.NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APP_PROFILE FILE_PROVIDER_PROFILE FILE_PROVIDER_UI_PROFILE; do
+            [ -n "${!name}" ] || { echo "::error::missing signing secret for $name"; exit 1; }
+          done
+
+          # Temporary keychain that holds only the Developer ID identity.
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+          security import "$CERT_PATH" -k "$SIGNING_KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$SIGNING_KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$CERT_PATH"
+
+          # Sign with the exact SHA-1 so a same-named certificate can never be picked instead.
+          IDENTITY=$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" | awk '/"Developer ID Application: /{print $2; exit}')
+          [ -n "$IDENTITY" ] || { echo "::error::no Developer ID Application identity in APPLE_CERTIFICATE"; exit 1; }
+          echo "NIMBUSSYNC_RELEASE_CODE_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+          # Install each Developer ID profile under its UUID; build.sh selects them by UUID.
+          install_profile() {
+            local var=$1 data=$2 file uuid dir
+            file="$RUNNER_TEMP/$var.provisionprofile"
+            printf '%s' "$data" | base64 --decode > "$file"
+            uuid=$(security cms -D -i "$file" | plutil -extract UUID raw -o - -)
+            for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+              mkdir -p "$dir"
+              cp "$file" "$dir/$uuid.provisionprofile"
+            done
+            rm -f "$file"
+            echo "NIMBUSSYNC_RELEASE_$var=$uuid" >> "$GITHUB_ENV"
+            echo "$var -> $uuid"
+          }
+          install_profile APP_PROFILE "$APP_PROFILE"
+          install_profile FILE_PROVIDER_PROFILE "$FILE_PROVIDER_PROFILE"
+          install_profile FILE_PROVIDER_UI_PROFILE "$FILE_PROVIDER_UI_PROFILE"
+
+      - name: Build signed universal app
+        env:
+          CONFIGURATION: Release
+          SIGNING_MODE: signed
+          DESTINATION: generic/platform=macOS
+          NIMBUSSYNC_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: Scripts/build.sh
+
+      - name: Verify release signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$DIST_DIR/NimbusSync.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          for bundle in "$APP" "$APP"/Contents/PlugIns/*.appex; do
+            name=$(basename "$bundle")
+            archs=$(lipo -archs "$bundle/Contents/MacOS/${name%.*}")
+            [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] \
+              || { echo "::error::$name is not universal ($archs)"; exit 1; }
+            # Capture first: grep -q at the end of a pipe can SIGPIPE codesign and trip pipefail.
+            entitlements=$(codesign -d --entitlements :- "$bundle" 2>/dev/null)
+            details=$(codesign -dvv "$bundle" 2>&1)
+            if grep -q 'com.apple.security.get-task-allow' <<<"$entitlements"; then
+              echo "::error::$name carries get-task-allow, which notarization rejects"; exit 1
+            fi
+            grep -q '^Timestamp=' <<<"$details" || { echo "::error::$name has no secure timestamp"; exit 1; }
+            grep -q 'flags=.*(runtime)' <<<"$details" || { echo "::error::$name lacks the hardened runtime"; exit 1; }
+            echo "$name: $archs, hardened, timestamped, no get-task-allow"
+          done
+          version=$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")
+          [ "$version" = "$MARKETING_VERSION" ] || { echo "::error::bundle version $version != $MARKETING_VERSION"; exit 1; }
+
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING="$RUNNER_TEMP/dmg-root"
+          DMG="$DIST_DIR/NimbusSync-$VERSION.dmg"
+          rm -rf "$STAGING" "$DMG"
+          mkdir -p "$STAGING"
+          ditto "$DIST_DIR/NimbusSync.app" "$STAGING/NimbusSync.app"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname "NimbusSync" -srcfolder "$STAGING" -fs HFS+ -format UDZO -ov "$DMG"
+          codesign --force --timestamp --sign "$NIMBUSSYNC_RELEASE_CODE_SIGN_IDENTITY" "$DMG"
+          codesign --verify --verbose=2 "$DMG"
+          (cd "$DIST_DIR" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
+
+      - name: Submit notarization (async)
+        continue-on-error: true
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # One submission covers the DMG and the app inside it, so the ZIP's identical app
+          # also passes Gatekeeper's online check. Nothing is stapled; follow up with
+          #   xcrun notarytool info <submission-id> --apple-id ... --team-id ...
+          DMG="$DIST_DIR/NimbusSync-$VERSION.dmg"
+          echo "Submitting $(basename "$DMG") for notarization..."
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+
+      - name: Collect release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          for file in "NimbusSync-$VERSION.dmg" "NimbusSync-$VERSION.zip"; do
+            cp "$DIST_DIR/$file" "$DIST_DIR/$file.sha256" release-artifacts/
+          done
+          ls -la release-artifacts/
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: release-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save artifacts for later use
+        uses: actions/upload-artifact@v4
+        with:
+          name: nimbussync-macos-universal-${{ env.VERSION }}
+          path: release-artifacts/*
+          retention-days: 30
+
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" 2>/dev/null || true
+          for name in APP_PROFILE FILE_PROVIDER_PROFILE FILE_PROVIDER_UI_PROFILE; do
+            var="NIMBUSSYNC_RELEASE_$name"
+            uuid="${!var:-}"
+            [ -n "$uuid" ] || continue
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$uuid.provisionprofile" \
+              "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/$uuid.provisionprofile"
+          done

@@ -1,0 +1,17 @@
+// Dev identity: everything derived from NIMBUSSYNC_BUNDLE_ID_BASE gets a `.dev` suffix so a Debug
+// build can be installed next to the Release app without sharing data, credentials or deep links.
+NIMBUSSYNC_BUNDLE_ID_BASE = io.github.jorben.nimbussync.dev
+NIMBUSSYNC_DISPLAY_NAME = NimbusSyncDev
+NIMBUSSYNC_URL_SCHEME = nimbussync-dev
+PRODUCT_BUNDLE_IDENTIFIER = $(NIMBUSSYNC_BUNDLE_ID_BASE)
+PRODUCT_NAME = NimbusSync
+SWIFT_VERSION = 6.0
+MACOSX_DEPLOYMENT_TARGET = 13.0
+// CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
+MARKETING_VERSION = 0.1.0
+CODE_SIGN_IDENTITY = -
+CODE_SIGNING_REQUIRED = NO
+CODE_SIGNING_ALLOWED = NO
+DEVELOPMENT_TEAM =
+APP_GROUP_IDENTIFIER = group.$(NIMBUSSYNC_BUNDLE_ID_BASE)
+KEYCHAIN_ACCESS_GROUP = $(AppIdentifierPrefix)$(NIMBUSSYNC_BUNDLE_ID_BASE)

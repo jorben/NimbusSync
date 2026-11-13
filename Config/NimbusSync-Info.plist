@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleDisplayName</key>
+    <string>$(NIMBUSSYNC_DISPLAY_NAME)</string>
+    <key>CFBundleName</key>
+    <string>$(NIMBUSSYNC_DISPLAY_NAME)</string>
+    <key>NimbusSyncBundleIdentifierBase</key>
+    <string>$(NIMBUSSYNC_BUNDLE_ID_BASE)</string>
+    <key>NimbusSyncAppGroupIdentifier</key>
+    <string>$(APP_GROUP_IDENTIFIER)</string>
+    <key>NimbusSyncURLScheme</key>
+    <string>$(NIMBUSSYNC_URL_SCHEME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>$(NIMBUSSYNC_BUNDLE_ID_BASE)</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>cloudreve</string>
+                <string>$(NIMBUSSYNC_URL_SCHEME)</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
