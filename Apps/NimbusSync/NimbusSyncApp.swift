@@ -642,7 +642,7 @@ private final class NimbusSyncAppState: ObservableObject {
     /// Each Domain's live-update connection, keyed by Domain identifier. Only Domains that
     /// currently have an event supervisor appear here.
     @Published private(set) var connectionStatuses: [String: DomainConnectionStatus] = [:]
-    /// Whether Finder shows NimbusSync's locations, as macOS reports it; read when Settings opens.
+    /// Whether Finder shows NimbusSync's locations, as macOS reports it; re-read on Domain changes.
     @Published private(set) var finderIntegration: FinderIntegrationState = .unknown
     /// Each Domain's folder as Finder shows it, home written as "~", keyed by Domain identifier.
     @Published private(set) var domainFolderPaths: [String: String] = [:]
@@ -666,6 +666,11 @@ private final class NimbusSyncAppState: ObservableObject {
     private var notificationAuthorizationRequested = false
     private var isQuitting = false
     private var terminationObserver: NSObjectProtocol?
+    /// Re-reads Finder integration when macOS reports a Domain change or the app comes forward,
+    /// so a switch flipped in System Settings shows up while Settings is still open.
+    private var finderIntegrationObservers: [NSObjectProtocol] = []
+    /// Orders overlapping Finder integration reads so a slow, older one cannot overwrite a newer one.
+    private var finderIntegrationGeneration = 0
 
     init() {
         registry = try? factory.registryStore()
@@ -676,6 +681,14 @@ private final class NimbusSyncAppState: ObservableObject {
             guard let self else { return }
             Task { await self.markApplicationNotRunning() }
         }
+        // macOS posts this only after getDomainsWithCompletionHandler has been called once;
+        // start() and every refresh call it, so the subscription is live from launch.
+        let refreshNames: [Notification.Name] = [.fileProviderDomainDidChange, NSApplication.didBecomeActiveNotification]
+        finderIntegrationObservers = refreshNames.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshFinderIntegration() }
+            }
+        }
     }
 
     func start() {
@@ -684,6 +697,7 @@ private final class NimbusSyncAppState: ObservableObject {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         ActivityLog.shared.info("app", "NimbusSync \(version) started")
         reload()
+        refreshFinderIntegration()
         Task { await notifications.configureCategories() }
         Task { [heartbeat] in
             while !Task.isCancelled {
@@ -748,6 +762,10 @@ private final class NimbusSyncAppState: ObservableObject {
             let next = await productStore.snapshot()
             let previous = snapshot
             snapshot = next
+            // Finder integration counts only this app's Domains, so recount when that set changes.
+            if previous.domains.map(\.identifier) != next.domains.map(\.identifier) {
+                refreshFinderIntegration()
+            }
             menuBarIcon.setState(MenuBarIconState(domains: next.domains, isSyncing: next.isSyncing, hasActionableConflicts: !next.actionableConflicts.isEmpty))
             menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
             let lines = await Task.detached(priority: .utility) { ActivityLog.shared.recentLines(limit: Self.settingsLogLineLimit) }.value
@@ -1260,6 +1278,8 @@ private final class NimbusSyncAppState: ObservableObject {
     /// one. Read-only: unlike opening Finder, it never adds, migrates or reconnects a domain.
     func refreshFinderIntegration() {
         let identifiers = Set(snapshot.domains.map(\.identifier))
+        finderIntegrationGeneration += 1
+        let generation = finderIntegrationGeneration
         Task { [weak self] in
             guard let self else { return }
             let registered: [FinderSystemDomainBox]
@@ -1274,18 +1294,22 @@ private final class NimbusSyncAppState: ObservableObject {
                     }
                 }
             } catch {
+                guard generation == self.finderIntegrationGeneration else { return }
                 self.finderIntegration = .unknown
                 return
             }
+            guard generation == self.finderIntegrationGeneration else { return }
             let ours = registered.filter { identifiers.contains($0.domain.identifier.rawValue) }
             let enabled = ours.filter { $0.domain.userEnabled }
-            self.finderIntegration = ours.isEmpty ? .notSetUp : (enabled.isEmpty ? .off : .on)
+            let state: FinderIntegrationState = ours.isEmpty ? .notSetUp : (enabled.isEmpty ? .off : .on)
+            if state != self.finderIntegration { self.finderIntegration = state }
             var paths: [String: String] = [:]
             for box in enabled {
                 guard let manager = NSFileProviderManager(for: box.domain),
                       let url = try? await self.userVisibleURLOnce(for: manager) else { continue }
                 paths[box.domain.identifier.rawValue] = SettingsDomainText.displayPath(url.path, home: UserHomeDirectory.path)
             }
+            guard generation == self.finderIntegrationGeneration else { return }
             if paths != self.domainFolderPaths { self.domainFolderPaths = paths }
         }
     }
