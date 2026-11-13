@@ -1,0 +1,78 @@
+# Continuous integration: runs the SwiftPM test suite and an unsigned Debug build of the app
+# (including the secret, release-entitlement and whitespace scans in Scripts/build.sh).
+# Needs no secrets, so it also runs for pull requests from forks.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Swift tests
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run tests
+        run: swift test --disable-sandbox --scratch-path "$RUNNER_TEMP/swiftpm"
+
+  build:
+    name: Unsigned build
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install build tools
+        run: |
+          xcodebuild -version
+          command -v rg >/dev/null 2>&1 || brew install ripgrep
+
+      - name: Check whitespace in pull request changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git --no-pager diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Build app (Debug, unsigned)
+        env:
+          CONFIGURATION: Debug
+          SIGNING_MODE: unsigned
+          NIMBUSSYNC_CONFIG: /dev/null
+        run: |
+          BUILD_ROOT="$RUNNER_TEMP/nimbussync-build" \
+          DIST_DIR="$RUNNER_TEMP/nimbussync-dist" \
+            Scripts/build.sh
