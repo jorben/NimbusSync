@@ -14,11 +14,14 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
 
     static let maximumDomainLines = 5
 
-    public init(domains: [DomainDescriptor], activeTaskCount: Int, hasActionableConflicts: Bool) {
+    public init(domains: [DomainDescriptor], activeTaskCount: Int, hasActionableConflicts: Bool, finderIntegrationOff: Bool = false) {
         let attentionCount = domains.filter { $0.status.needsAttention }.count
         let overall = domains.map(\.status).max { $0.priority < $1.priority } ?? .initializing
 
-        if domains.isEmpty {
+        if finderIntegrationOff {
+            headline = FinderIntegrationGuideText.offHeadline
+            detail = FinderIntegrationGuideText.offDetail
+        } else if domains.isEmpty {
             headline = "Ready to connect"
             detail = "Connect a Cloudreve domain to get started."
         } else if attentionCount > 0 {
@@ -40,10 +43,14 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
             }
         }
 
-        subtitle = Self.subtitle(domains: domains, attentionCount: attentionCount, activeTaskCount: activeTaskCount, overall: overall)
+        subtitle = finderIntegrationOff
+            ? FinderIntegrationGuideText.offSubtitle
+            : Self.subtitle(domains: domains, attentionCount: attentionCount, activeTaskCount: activeTaskCount, overall: overall)
 
-        var lines = ["NimbusSync — \(headline)"]
-        if domains.isEmpty {
+        var lines = ["\(AppIdentity.displayName) — \(headline)"]
+        if finderIntegrationOff {
+            lines.append(detail)
+        } else if domains.isEmpty {
             lines.append(detail)
         } else {
             for domain in domains.prefix(Self.maximumDomainLines) {

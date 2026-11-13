@@ -24,6 +24,9 @@ public struct MenuBarPopoverView: View {
     public let onCheckDomain: ((DomainDescriptor) -> Void)?
     /// nil hides the Quit button.
     public let onQuit: (() -> Void)?
+    /// Finder integration is switched off in System Settings, so nothing can sync.
+    public let finderIntegrationOff: Bool
+    public let onOpenFinderIntegrationSettings: () -> Void
     /// The scrolling content's natural height. The menu bar window sizes itself to the smallest
     /// height the popover accepts, and a flexible ScrollView accepts zero, so the scroll area
     /// is pinned to this measured height instead (capped, and scrolling beyond the cap).
@@ -58,7 +61,9 @@ public struct MenuBarPopoverView: View {
         checkProgress: [String: DomainCheckProgress] = [:],
         checkableDomainIdentifiers: Set<String> = [],
         onCheckDomain: ((DomainDescriptor) -> Void)? = nil,
-        onQuit: (() -> Void)? = nil
+        onQuit: (() -> Void)? = nil,
+        finderIntegrationOff: Bool = false,
+        onOpenFinderIntegrationSettings: @escaping () -> Void = {}
     ) {
         self.domains = domains
         self.tasks = tasks
@@ -76,6 +81,8 @@ public struct MenuBarPopoverView: View {
         self.checkableDomainIdentifiers = checkableDomainIdentifiers
         self.onCheckDomain = onCheckDomain
         self.onQuit = onQuit
+        self.finderIntegrationOff = finderIntegrationOff
+        self.onOpenFinderIntegrationSettings = onOpenFinderIntegrationSettings
     }
 
     public var body: some View {
@@ -83,6 +90,10 @@ public struct MenuBarPopoverView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing16) {
+                    if finderIntegrationOff {
+                        finderIntegrationBanner
+                    }
+
                     if !issues.isEmpty {
                         issueBanner
                     }
@@ -153,6 +164,17 @@ public struct MenuBarPopoverView: View {
     }
 
     // MARK: Banners
+
+    private var finderIntegrationBanner: some View {
+        PopoverBanner(
+            symbol: "pause.circle.fill",
+            title: FinderIntegrationGuideText.offHeadline,
+            detail: FinderIntegrationGuideText.bannerDetail,
+            actionTitle: "Turn On",
+            action: onOpenFinderIntegrationSettings,
+            actionSymbol: "arrow.up.forward.app"
+        )
+    }
 
     private var issueBanner: some View {
         let retryable = issues.filter(\.canRetry)
@@ -572,7 +594,7 @@ public struct MenuBarPopoverView: View {
     }
 
     private var summary: MenuBarStatusSummary {
-        MenuBarStatusSummary(domains: domains, activeTaskCount: tasks.count, hasActionableConflicts: hasActionableConflicts)
+        MenuBarStatusSummary(domains: domains, activeTaskCount: tasks.count, hasActionableConflicts: hasActionableConflicts, finderIntegrationOff: finderIntegrationOff)
     }
 }
 

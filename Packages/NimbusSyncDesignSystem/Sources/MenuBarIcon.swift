@@ -8,14 +8,17 @@ import SwiftUI
 ///   gone, permanent error…). It outranks syncing, as the status summary's headline does.
 /// - `syncing`: `ProductSnapshot.isSyncing`, a transfer is queued or running, or a Domain is
 ///   applying or checking remote changes.
-/// - `paused`: a Domain is offline, so its syncing waits for the network. NimbusSync has no
-///   user-facing pause; offline is the state that actually holds syncing back.
+/// - `paused`: Finder integration is switched off in System Settings, or a Domain is offline.
+///   NimbusSync has no user-facing pause; these are the states that actually hold syncing back.
+///   With Finder integration off nothing can sync at all, so it outranks every other state.
 /// - `upToDate`: everything else, including no Domains yet.
 public enum MenuBarIconState: Equatable, Sendable {
     case upToDate, syncing, paused, attention
 
-    public init(domains: [DomainDescriptor], isSyncing: Bool, hasActionableConflicts: Bool) {
-        if hasActionableConflicts || domains.contains(where: { $0.status.needsAttention && $0.status != .offline }) {
+    public init(domains: [DomainDescriptor], isSyncing: Bool, hasActionableConflicts: Bool, finderIntegrationOff: Bool = false) {
+        if finderIntegrationOff {
+            self = .paused
+        } else if hasActionableConflicts || domains.contains(where: { $0.status.needsAttention && $0.status != .offline }) {
             self = .attention
         } else if isSyncing {
             self = .syncing

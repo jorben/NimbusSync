@@ -89,6 +89,9 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     private var didFinishLaunching = false
     private var onboardingWindowController: NSWindowController?
     private var conflictsWindowController: NSWindowController?
+    private var finderGuideWindowController: NSWindowController?
+    /// The guide opens by itself at most once per run (see `FinderIntegrationPromptPolicy`).
+    private var finderGuidePromptedThisRun = false
     private var menuBarPanel: MenuBarPanelController?
     private(set) var isPrimaryInstance: Bool
 
@@ -128,6 +131,9 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
             onboardingWindowController?.window?.delegate = self
             runtime.openFinder(domain: domain)
         }
+        runtime.onFinderIntegrationChanged = { [weak self] state in
+            self?.finderIntegrationChanged(state)
+        }
         guard didFinishLaunching else { return }
         installMenuBarPanelIfNeeded()
         startRuntimeIfNeeded()
@@ -141,7 +147,8 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
                 runtime: runtime,
                 onOpenSettings: { [weak self] in self?.openFromMenuBarPanel { $0.openSettingsWindow() } },
                 onAddDomain: { [weak self] in self?.openFromMenuBarPanel { $0.openOnboardingWindow() } },
-                onOpenConflicts: { [weak self] in self?.openFromMenuBarPanel { $0.openConflictsWindow() } }
+                onOpenConflicts: { [weak self] in self?.openFromMenuBarPanel { $0.openConflictsWindow() } },
+                onOpenFinderIntegrationGuide: { [weak self] in self?.openFromMenuBarPanel { $0.openFinderIntegrationGuide() } }
             )
         }
     }
@@ -305,6 +312,56 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         conflictsWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
+    /// Opens the guide by itself when Finder integration is found off, and closes it as soon as
+    /// the user has turned NimbusSync on (or the last Domain is gone).
+    private func finderIntegrationChanged(_ state: FinderIntegrationState) {
+        switch state {
+        case .on, .notSetUp:
+            finderGuideWindowController?.close()
+        case .off:
+            guard FinderIntegrationPromptPolicy.shouldPrompt(
+                state: state,
+                alreadyPromptedThisRun: finderGuidePromptedThisRun,
+                lastPromptedAt: FinderIntegrationPromptPolicy.lastPrompted()
+            ) else { return }
+            finderGuidePromptedThisRun = true
+            FinderIntegrationPromptPolicy.recordPrompt()
+            openFinderIntegrationGuide()
+        case .unknown:
+            break
+        }
+    }
+
+    func openFinderIntegrationGuide() {
+        guard isPrimaryInstance, let runtime else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        if finderGuideWindowController == nil {
+            let hostingView = NSHostingView(rootView: FinderIntegrationGuideView(
+                onOpenSettings: { runtime.openFileProviderSettings() },
+                onLater: { [weak self] in self?.finderGuideWindowController?.close() }
+            ))
+            let contentSize = hostingView.fittingSize
+            hostingView.frame = NSRect(origin: .zero, size: contentSize)
+            let window = NSWindow(
+                contentRect: NSRect(origin: .zero, size: contentSize),
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = hostingView
+            // The title stays for the Window menu and accessibility; the view draws its own.
+            window.title = FinderIntegrationGuideText.guideTitle
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.isReleasedWhenClosed = false
+            window.center()
+            finderGuideWindowController = NSWindowController(window: window)
+        }
+        finderGuideWindowController?.showWindow(nil)
+        finderGuideWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
     private func startRuntimeIfNeeded() {
         guard isPrimaryInstance, !runtimeStarted, let runtime else { return }
         runtimeStarted = true
@@ -466,6 +523,7 @@ private struct StatusPopoverContent: View {
     let onOpenSettings: () -> Void
     let onAddDomain: () -> Void
     let onOpenConflicts: () -> Void
+    let onOpenFinderIntegrationGuide: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -487,7 +545,9 @@ private struct StatusPopoverContent: View {
                 checkProgress: runtime.snapshot.checkProgress,
                 checkableDomainIdentifiers: runtime.checkableDomainIdentifiers,
                 onCheckDomain: runtime.checkNow,
-                onQuit: runtime.quitApplication
+                onQuit: runtime.quitApplication,
+                finderIntegrationOff: runtime.finderIntegration == .off,
+                onOpenFinderIntegrationSettings: onOpenFinderIntegrationGuide
             )
         }
         .frame(width: NimbusSyncDesignTokens.popoverWidth)
@@ -643,7 +703,20 @@ private final class NimbusSyncAppState: ObservableObject {
     /// currently have an event supervisor appear here.
     @Published private(set) var connectionStatuses: [String: DomainConnectionStatus] = [:]
     /// Whether Finder shows NimbusSync's locations, as macOS reports it; re-read on Domain changes.
-    @Published private(set) var finderIntegration: FinderIntegrationState = .unknown
+    /// While it is off nothing syncs, so the menu bar shows paused and the guide is offered.
+    @Published private(set) var finderIntegration: FinderIntegrationState = .unknown {
+        didSet {
+            guard finderIntegration != oldValue else { return }
+            lifecycleLogger.info("finder.integration state=\(self.finderIntegration.title, privacy: .public)")
+            if finderIntegration == .off || oldValue == .off {
+                ActivityLog.shared.info("lifecycle", "Finder integration \(finderIntegration.title.lowercased())")
+            }
+            updateMenuBarStatus()
+            onFinderIntegrationChanged?(finderIntegration)
+        }
+    }
+    /// Tells the app delegate, which owns the guide window.
+    var onFinderIntegrationChanged: ((FinderIntegrationState) -> Void)?
     /// Each Domain's folder as Finder shows it, home written as "~", keyed by Domain identifier.
     @Published private(set) var domainFolderPaths: [String: String] = [:]
 
@@ -766,13 +839,20 @@ private final class NimbusSyncAppState: ObservableObject {
             if previous.domains.map(\.identifier) != next.domains.map(\.identifier) {
                 refreshFinderIntegration()
             }
-            menuBarIcon.setState(MenuBarIconState(domains: next.domains, isSyncing: next.isSyncing, hasActionableConflicts: !next.actionableConflicts.isEmpty))
-            menuBarIcon.setTooltip(MenuBarStatusSummary(domains: next.domains, activeTaskCount: next.activeTasks.count, hasActionableConflicts: !next.actionableConflicts.isEmpty).tooltip)
+            updateMenuBarStatus()
             let lines = await Task.detached(priority: .utility) { ActivityLog.shared.recentLines(limit: Self.settingsLogLineLimit) }.value
             if lines != recentLogLines { recentLogLines = lines }
             syncEventSupervisors(for: next.domains)
             await notifyChanges(from: previous, to: next)
         }
+    }
+
+    /// The menu bar glyph and tooltip, from the latest snapshot and Finder integration state.
+    private func updateMenuBarStatus() {
+        let finderOff = finderIntegration == .off
+        let conflicts = !snapshot.actionableConflicts.isEmpty
+        menuBarIcon.setState(MenuBarIconState(domains: snapshot.domains, isSyncing: snapshot.isSyncing, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff))
+        menuBarIcon.setTooltip(MenuBarStatusSummary(domains: snapshot.domains, activeTaskCount: snapshot.activeTasks.count, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff).tooltip)
     }
 
     private func notifyChanges(from old: ProductSnapshot, to next: ProductSnapshot) async {
@@ -1443,10 +1523,13 @@ private final class NimbusSyncAppState: ObservableObject {
     func openFileProviderSettings() {
         finderError = nil
         finderSettingsActionAvailable = false
-        let candidates = [
-            "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
-            "x-apple.systempreferences:com.apple.ExtensionsPreferences",
-        ]
+        // macOS 15 moved File Providers from Privacy & Security › Extensions to Login Items &
+        // Extensions; macOS 13 and 14 also have a Login Items pane, but without the switch.
+        let loginItems = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+        let extensions = "x-apple.systempreferences:com.apple.ExtensionsPreferences"
+        let candidates = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15
+            ? [loginItems, extensions]
+            : [extensions, loginItems]
         for value in candidates {
             guard let url = URL(string: value) else { continue }
             if NSWorkspace.shared.open(url) { return }
@@ -2208,6 +2291,12 @@ private struct SettingsView: View {
                 // Relative times such as "Last synced 2 min. ago" age while the window stays open.
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     VStack(alignment: .leading, spacing: 14) {
+                        if finderIntegration == .off {
+                            FinderIntegrationGuideCard(
+                                onOpenSettings: onOpenFileProviderSettings,
+                                onCheckAgain: onRefreshFinderIntegration
+                            )
+                        }
                         if domains.isEmpty {
                             SettingsDomainsEmptyState(onAddDomain: onAddDomain)
                         } else {
