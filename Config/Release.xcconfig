@@ -4,7 +4,11 @@ NIMBUSSYNC_BUNDLE_ID_BASE = io.github.jorben.nimbussync
 NIMBUSSYNC_DISPLAY_NAME = NimbusSync
 NIMBUSSYNC_URL_SCHEME = nimbussync
 PRODUCT_BUNDLE_IDENTIFIER = $(NIMBUSSYNC_BUNDLE_ID_BASE)
-PRODUCT_NAME = NimbusSync
+// The app bundle and its executable: NimbusSync.app.
+NIMBUSSYNC_APP_NAME = NimbusSync
+NIMBUSSYNC_APP_ICON_NAME = AppIcon
+// The Dev icon is part of the target for Debug only; keep it out of the shipping bundle.
+EXCLUDED_SOURCE_FILE_NAMES = AppIconDev.icon
 SWIFT_VERSION = 6.0
 MACOSX_DEPLOYMENT_TARGET = 13.0
 // CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.

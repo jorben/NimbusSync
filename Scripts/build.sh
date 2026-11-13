@@ -28,14 +28,24 @@ if [ -n "${APP_GROUP_IDENTIFIER:-}${NIMBUSSYNC_APP_GROUP_IDENTIFIER:-}" ]; then
     exit 2
 fi
 
+# The bundle name follows the identity (Config/<Configuration>.xcconfig NIMBUSSYNC_APP_NAME): macOS
+# lists apps by bundle name in Login Items and System Settings' File Providers, so the Dev build
+# is NimbusSyncDev.app and never shows up as a second "NimbusSync".
 case "$CONFIGURATION" in
-    Debug) CONFIG_KEY=DEBUG ;;
-    Release) CONFIG_KEY=RELEASE ;;
+    Debug) CONFIG_KEY=DEBUG; APP_NAME=NimbusSyncDev ;;
+    Release) CONFIG_KEY=RELEASE; APP_NAME=NimbusSync ;;
     *)
         printf '%s\n' "unsupported CONFIGURATION: $CONFIGURATION" >&2
         exit 2
         ;;
 esac
+
+# `build.sh --print-app-path` resolves the configuration exactly as a build would (local config,
+# environment) and prints where the app will land, so `make dev` can launch the right bundle.
+if [ "${1:-}" = --print-app-path ]; then
+    printf '%s\n' "$DIST_DIR/$APP_NAME.app"
+    exit 0
+fi
 
 # Signing value for this configuration: NIMBUSSYNC_<DEBUG|RELEASE>_<NAME>, then NIMBUSSYNC_<NAME>,
 # then the legacy NIMBUSSYNC_<NAME>_UUID. Debug and Release are different App IDs, so each needs its
@@ -196,7 +206,7 @@ case "$SIGNING_MODE" in
         ;;
 esac
 
-app="$BUILD_ROOT/derived/Build/Products/$CONFIGURATION/NimbusSync.app"
+app="$BUILD_ROOT/derived/Build/Products/$CONFIGURATION/$APP_NAME.app"
 # Rebuild the app bundle every time so it never keeps an extension embedded by an
 # earlier incremental build. Xcode can skip re-copying an .appex whose only change is
 # its signature (for example a newly enabled hardened runtime), which leaves the old
@@ -214,11 +224,11 @@ if [ "$SIGNING_MODE" = signed ]; then
     fi
 fi
 
-# Keep the bundle name stable. Debug (Dev) and Release builds are both NimbusSync.app; they coexist
-# because their bundle IDs differ, so keep the Dev copy outside /Applications (for example Dist/). Renaming a signed .app after codesign breaks the
-# bundle-level signature even when the Mach-O executable still carries a valid signature.
-artifact="$DIST_DIR/NimbusSync.app"
-archive="$DIST_DIR/NimbusSync-$VERSION.zip"
+# Copy the bundle under the name it was built and signed with: NimbusSync.app (Release) or
+# NimbusSyncDev.app (Debug). Renaming a signed .app after codesign breaks the bundle-level
+# signature even when the Mach-O executable still carries a valid signature.
+artifact="$DIST_DIR/$APP_NAME.app"
+archive="$DIST_DIR/$APP_NAME-$VERSION.zip"
 rm -rf "$artifact" "$archive" "$archive.sha256"
 ditto "$app" "$artifact"
 if [ "$SIGNING_MODE" = signed ]; then

@@ -5,6 +5,7 @@
 #   Design/AppIcon-Dark.png  (1024 × 1024, opaque, full bleed)  -> dark appearance
 #     -> Apps/NimbusSync/AppIcon.icon  (Icon Composer document)
 #     -> Apps/NimbusSync/Assets.xcassets/AppIconImage.imageset  (in-app icon, light + dark)
+#     -> Apps/NimbusSync/AppIconDev.icon  (the Dev build's icon, with a "DEV" badge)
 #
 # Run from the repository root:  Scripts/make-app-icon.sh
 #
@@ -89,3 +90,11 @@ cat > "$imageset/Contents.json" <<'JSON'
 }
 JSON
 echo "wrote $imageset/Contents.json"
+
+# The Dev build's icon: the same document around the artwork with its badge drawn in.
+dev_icon=Apps/NimbusSync/AppIconDev.icon
+rm -rf "$dev_icon"
+swift Scripts/make-dev-app-icon.swift
+sed -e 's/AppIcon-Light.png/AppIconDev-Light.png/' -e 's/AppIcon-Dark.png/AppIconDev-Dark.png/' \
+    "$icon/icon.json" > "$dev_icon/icon.json"
+echo "wrote $dev_icon"

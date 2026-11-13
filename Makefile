@@ -33,7 +33,7 @@ SWIFT_TEST_FLAGS ?=
 
 # Fast unsigned iteration target (UI only — File Provider will NOT load).
 DEV_UNSIGNED_BUILD_ROOT ?= .build/dev
-DEV_UNSIGNED_APP := $(DEV_UNSIGNED_BUILD_ROOT)/Build/Products/Debug/NimbusSync.app
+DEV_UNSIGNED_APP := $(DEV_UNSIGNED_BUILD_ROOT)/Build/Products/Debug/NimbusSyncDev.app
 
 XCODEBUILD := xcodebuild \
 	-project NimbusSync.xcodeproj \
@@ -41,12 +41,11 @@ XCODEBUILD := xcodebuild \
 	-destination platform=macOS
 
 # Quit the copy being replaced, wait until it has really exited, then open the
-# new build. Match by executable path, not process name: Debug (NimbusSyncDev)
-# and an installed Release app are both "NimbusSync" and must not kill each
-# other. Opening while the old instance is still terminating makes
+# new build. Match by executable path, not process name, so relaunching one
+# copy never kills another build of the same configuration elsewhere. Opening while the old instance is still terminating makes
 # LaunchServices fail with -600 (procNotFound), so retry once after a pause.
 RELAUNCH = relaunch() { \
-		exe="$$(cd "$$1" && pwd)/Contents/MacOS/NimbusSync"; \
+		exe="$$(cd "$$1" && pwd)/Contents/MacOS/$$(basename "$$1" .app)"; \
 		pkill -f "$$exe" 2>/dev/null || true; \
 		i=0; while pgrep -f "$$exe" >/dev/null 2>&1 && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i + 1)); done; \
 		open "$$1" || { sleep 1; open "$$1"; }; \
@@ -63,11 +62,12 @@ help: ## Show available targets
 
 dev: ## Build via Scripts/build.sh (signed per local config) and launch it
 	$(BUILD_ARGS) ./Scripts/build.sh
-	@if ! codesign -dv "$(DIST_DIR)/NimbusSync.app" 2>&1 | grep -Eq '^TeamIdentifier=[A-Z0-9]+'; then \
+	@app="$$($(BUILD_ARGS) ./Scripts/build.sh --print-app-path)"; \
+	if ! codesign -dv "$$app" 2>&1 | grep -Eq '^TeamIdentifier=[A-Z0-9]+'; then \
 		printf 'WARNING: unsigned/ad-hoc build — Finder will report the File Provider extension as unavailable.\n' >&2; \
-	fi
-	@$(RELAUNCH) "$(DIST_DIR)/NimbusSync.app"
-	@printf 'launched: %s\n' "$(DIST_DIR)/NimbusSync.app"
+	fi; \
+	$(RELAUNCH) "$$app"; \
+	printf 'launched: %s\n' "$$app"
 
 dev-unsigned: ## Fast UI-only build; File Provider extension will NOT load
 	$(XCODEBUILD) \

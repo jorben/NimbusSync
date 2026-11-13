@@ -4,7 +4,12 @@ NIMBUSSYNC_BUNDLE_ID_BASE = io.github.jorben.nimbussync.dev
 NIMBUSSYNC_DISPLAY_NAME = NimbusSyncDev
 NIMBUSSYNC_URL_SCHEME = nimbussync-dev
 PRODUCT_BUNDLE_IDENTIFIER = $(NIMBUSSYNC_BUNDLE_ID_BASE)
-PRODUCT_NAME = NimbusSync
+// The app bundle and its executable: NimbusSyncDev.app, so Finder, Login Items and the File
+// Providers list in System Settings (which show the bundle's file name) tell it from the Release app.
+NIMBUSSYNC_APP_NAME = NimbusSyncDev
+// The Release artwork with a "DEV" badge (Scripts/make-dev-app-icon.swift), so the Dock, Finder and
+// System Settings show at a glance which build is which.
+NIMBUSSYNC_APP_ICON_NAME = AppIconDev
 SWIFT_VERSION = 6.0
 MACOSX_DEPLOYMENT_TARGET = 13.0
 // CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
