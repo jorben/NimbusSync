@@ -106,7 +106,13 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$WORK/assets" \
             --pattern "$ZIP" --pattern "$ZIP.sha256" \
             || { echo "::error::$TAG has no $ZIP; was it built by build-and-upload-macos.yml?"; exit 1; }
-          (cd "$WORK/assets" && shasum -a 256 -c "$ZIP.sha256")
+          # Compare the hash only: releases built before 0.1.0-rc.5 recorded the runner's absolute
+          # path in the checksum file instead of the bare file name.
+          EXPECTED=$(awk 'NR == 1 { print $1 }' "$WORK/assets/$ZIP.sha256")
+          ACTUAL=$(shasum -a 256 "$WORK/assets/$ZIP" | awk '{ print $1 }')
+          [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::$ZIP.sha256 holds no SHA-256 hash"; exit 1; }
+          [ "$ACTUAL" = "$EXPECTED" ] || { echo "::error::$ZIP does not match $ZIP.sha256"; exit 1; }
+          echo "$ZIP: SHA-256 matches"
           ditto -x -k "$WORK/assets/$ZIP" "$WORK/app"
           APP="$WORK/app/NimbusSync.app"
           [ -d "$APP" ] || { echo "::error::$ZIP does not contain NimbusSync.app"; exit 1; }

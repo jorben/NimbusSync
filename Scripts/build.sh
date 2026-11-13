@@ -282,7 +282,9 @@ if [ "$SIGNING_MODE" = signed ]; then
     codesign --verify --deep --strict --verbose=2 "$artifact"
 fi
 ditto -c -k --sequesterRsrc --keepParent "$artifact" "$archive"
-shasum -a 256 "$archive" > "$archive.sha256"
+# Bare file name, as for the DMG: the checksum file is published next to the ZIP and must check
+# out with `shasum -c` wherever it is downloaded.
+(cd "$DIST_DIR" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 
 printf '%s\n' "built: $artifact"
 printf '%s\n' "archive: $archive"
