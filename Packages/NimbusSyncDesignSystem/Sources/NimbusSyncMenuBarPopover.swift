@@ -27,6 +27,9 @@ public struct MenuBarPopoverView: View {
     /// Finder integration is switched off in System Settings, so nothing can sync.
     public let finderIntegrationOff: Bool
     public let onOpenFinderIntegrationSettings: () -> Void
+    /// An update found or downloaded by the updater; `.none` hides the banner.
+    public let updateStatus: AppUpdateStatus
+    public let onOpenUpdate: () -> Void
     /// The scrolling content's natural height. The menu bar window sizes itself to the smallest
     /// height the popover accepts, and a flexible ScrollView accepts zero, so the scroll area
     /// is pinned to this measured height instead (capped, and scrolling beyond the cap).
@@ -63,7 +66,9 @@ public struct MenuBarPopoverView: View {
         onCheckDomain: ((DomainDescriptor) -> Void)? = nil,
         onQuit: (() -> Void)? = nil,
         finderIntegrationOff: Bool = false,
-        onOpenFinderIntegrationSettings: @escaping () -> Void = {}
+        onOpenFinderIntegrationSettings: @escaping () -> Void = {},
+        updateStatus: AppUpdateStatus = .none,
+        onOpenUpdate: @escaping () -> Void = {}
     ) {
         self.domains = domains
         self.tasks = tasks
@@ -83,6 +88,8 @@ public struct MenuBarPopoverView: View {
         self.onQuit = onQuit
         self.finderIntegrationOff = finderIntegrationOff
         self.onOpenFinderIntegrationSettings = onOpenFinderIntegrationSettings
+        self.updateStatus = updateStatus
+        self.onOpenUpdate = onOpenUpdate
     }
 
     public var body: some View {
@@ -100,6 +107,10 @@ public struct MenuBarPopoverView: View {
 
                     if hasActionableConflicts {
                         conflictBanner
+                    }
+
+                    if updateStatus.showsBadge {
+                        updateBanner
                     }
 
                     if domains.isEmpty {
@@ -196,6 +207,18 @@ public struct MenuBarPopoverView: View {
             actionTitle: "Review",
             action: onOpenConflicts,
             actionSymbol: "arrow.right"
+        )
+    }
+
+    private var updateBanner: some View {
+        PopoverBanner(
+            symbol: updateStatus.bannerSymbol,
+            title: updateStatus.bannerTitle ?? "",
+            detail: updateStatus.bannerDetail,
+            actionTitle: updateStatus.bannerActionTitle,
+            action: onOpenUpdate,
+            actionSymbol: "arrow.right",
+            tint: NimbusSyncDesignTokens.brandColor
         )
     }
 

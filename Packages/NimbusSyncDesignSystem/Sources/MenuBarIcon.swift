@@ -84,6 +84,36 @@ public enum MenuBarIcon {
         }
     }
 
+    // MARK: - Update badge
+
+    /// The badge's dot, top right of the canvas, and the gap cut around it so it reads apart from
+    /// the cloud in a single template ink.
+    nonisolated static let updateBadgeDiameter: CGFloat = 6
+    nonisolated static let updateBadgeGap: CGFloat = 1.25
+    nonisolated static var updateBadgeRect: NSRect {
+        NSRect(x: canvas.width - updateBadgeDiameter, y: canvas.height - updateBadgeDiameter, width: updateBadgeDiameter, height: updateBadgeDiameter)
+    }
+
+    /// `image` with the update badge: still a template, still the same size.
+    public static func badged(_ image: NSImage) -> NSImage {
+        let badged = NSImage(size: canvas, flipped: false) { rect in
+            image.draw(in: rect)
+            let dot = updateBadgeRect
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            NSBezierPath(ovalIn: dot.insetBy(dx: -updateBadgeGap, dy: -updateBadgeGap)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            return true
+        }
+        badged.isTemplate = true
+        badged.accessibilityDescription = image.accessibilityDescription
+        return badged
+    }
+
+    /// The syncing cycle with the badge, rendered on first use.
+    public static let badgedSyncingFrames: [NSImage] = syncingFrames.map { badged($0) }
+
     /// A bundled glyph (`Scripts/make-menubar-icon.swift` builds them from `Design/MenuBarIcons.png`).
     /// Falls back to an SF Symbol so a missing resource degrades to a plain icon, not an empty item.
     private static func glyph(_ name: String, state: MenuBarIconState?, fallback: String) -> NSImage {
@@ -178,35 +208,72 @@ public final class MenuBarIconAnimator: ObservableObject {
     @Published public private(set) var accessibilityLabel = AppIdentity.displayName
     /// The status item's hover text (see `MenuBarStatusSummary.tooltip`).
     @Published public private(set) var tooltip = AppIdentity.displayName
+    /// An update is waiting (see `AppUpdateStatus`): every glyph carries the badge dot.
+    @Published public private(set) var updateStatus: AppUpdateStatus = .none
+    private var baseTooltip = AppIdentity.displayName
     private var timer: Timer?
     private var frame = 0
 
     public init() {}
 
     public func setTooltip(_ text: String) {
-        if text != tooltip { tooltip = text }
+        baseTooltip = text
+        refreshLabels()
+    }
+
+    public func setUpdateStatus(_ next: AppUpdateStatus) {
+        guard next != updateStatus else { return }
+        let badgeChanged = next.showsBadge != updateStatus.showsBadge
+        updateStatus = next
+        refreshLabels()
+        guard badgeChanged else { return }
+        if isSyncing, timer != nil {
+            image = frameImage(frame)
+        } else if isSyncing {
+            image = present(MenuBarIcon.syncingStill)
+        } else if let state {
+            image = present(MenuBarIcon.still(state))
+        } else {
+            image = present(MenuBarIcon.syncingShell)
+        }
     }
 
     public func setState(_ next: MenuBarIconState) {
         guard next != state else { return }
         state = next
         isSyncing = next == .syncing
-        accessibilityLabel = next.accessibilityLabel
+        refreshLabels()
         if next == .syncing {
             start()
         } else {
             stop()
-            image = MenuBarIcon.still(next)
+            image = present(MenuBarIcon.still(next))
         }
+    }
+
+    private func refreshLabels() {
+        let suffix = updateStatus.accessibilitySuffix
+        let label = [state?.accessibilityLabel ?? AppIdentity.displayName, suffix].compactMap { $0 }.joined(separator: " – ")
+        if label != accessibilityLabel { accessibilityLabel = label }
+        let text = [baseTooltip, suffix].compactMap { $0 }.joined(separator: "\n")
+        if text != tooltip { tooltip = text }
+    }
+
+    private func present(_ glyph: NSImage) -> NSImage {
+        updateStatus.showsBadge ? MenuBarIcon.badged(glyph) : glyph
+    }
+
+    private func frameImage(_ index: Int) -> NSImage {
+        updateStatus.showsBadge ? MenuBarIcon.badgedSyncingFrames[index] : MenuBarIcon.syncingFrames[index]
     }
 
     private func start() {
         frame = 0
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            image = MenuBarIcon.syncingStill
+            image = present(MenuBarIcon.syncingStill)
             return
         }
-        image = MenuBarIcon.syncingFrames[0]
+        image = frameImage(0)
         let timer = Timer(timeInterval: MenuBarIcon.frameInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advance() }
         }
@@ -217,7 +284,7 @@ public final class MenuBarIconAnimator: ObservableObject {
 
     private func advance() {
         frame = (frame + 1) % MenuBarIcon.frameCount
-        image = MenuBarIcon.syncingFrames[frame]
+        image = frameImage(frame)
     }
 
     private func stop() {

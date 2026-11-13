@@ -26,6 +26,32 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>NimbusSyncVersion</key>
     <string>$(NIMBUSSYNC_VERSION)</string>
+    <key>NimbusSyncUpdatesEnabled</key>
+    <string>$(NIMBUSSYNC_UPDATES_ENABLED)</string>
+    <!-- Sparkle (see Apps/NimbusSync/AppUpdater.swift and docs/releasing.md). The feed lists the
+         stable channel plus `beta` items; prereleases reach only users who opt in to betas. -->
+    <key>SUFeedURL</key>
+    <string>https://jorben.github.io/NimbusSync/appcast.xml</string>
+    <!-- EdDSA public key from Sparkle's generate_keys; the private key is the SPARKLE_PRIVATE_KEY
+         repository secret. publish-appcast.yml refuses a private key that does not match. -->
+    <key>SUPublicEDKey</key>
+    <string>TIYT44jkUyXMQZfqUK0CBM7KYsBuIt/JENuHGz06ZEE=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <!-- Sandboxed app: Sparkle's installer runs through its launcher XPC service. Downloads stay
+         in-process (the app has the network client entitlement). -->
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>LSUIElement</key>
     <true/>
     <key>LSMultipleInstancesProhibited</key>

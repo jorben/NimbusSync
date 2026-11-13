@@ -17,6 +17,9 @@ MARKETING_VERSION = 0.1.0
 // such as 0.1.0-rc.3 that CFBundleShortVersionString cannot carry. Scripts/build.sh sets it from
 // VERSION (the release tag in CI).
 NIMBUSSYNC_VERSION = $(MARKETING_VERSION)
+// In-app updates through Sparkle (Info.plist NimbusSyncUpdatesEnabled). Only the shipping identity
+// updates itself; the Dev build would otherwise replace itself with the Release app.
+NIMBUSSYNC_UPDATES_ENABLED = YES
 CODE_SIGN_IDENTITY = Developer ID Application
 CODE_SIGNING_REQUIRED = YES
 CODE_SIGNING_ALLOWED = YES

@@ -68,7 +68,8 @@ struct NimbusSyncApp: App {
             recentLogLines: runtime.recentLogLines,
             logsDirectoryPath: runtime.logsDirectoryPath,
             onOpenLogs: runtime.openLogsFolder,
-            onRefresh: runtime.reload
+            onRefresh: runtime.reload,
+            updater: runtime.appUpdater
         )
     }
 
@@ -146,10 +147,12 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         menuBarPanel = MenuBarPanelController(icon: runtime.menuBarIcon) {
             StatusPopoverContent(
                 runtime: runtime,
+                updater: runtime.appUpdater,
                 onOpenSettings: { [weak self] in self?.openFromMenuBarPanel { $0.openSettingsWindow() } },
                 onAddDomain: { [weak self] in self?.openFromMenuBarPanel { $0.openOnboardingWindow() } },
                 onOpenConflicts: { [weak self] in self?.openFromMenuBarPanel { $0.openConflictsWindow() } },
-                onOpenFinderIntegrationGuide: { [weak self] in self?.openFromMenuBarPanel { $0.openFinderIntegrationGuide() } }
+                onOpenFinderIntegrationGuide: { [weak self] in self?.openFromMenuBarPanel { $0.openFinderIntegrationGuide() } },
+                onOpenUpdate: { [weak self] in self?.openFromMenuBarPanel { $0.runtime?.appUpdater.openUpdate() } }
             )
         }
     }
@@ -195,6 +198,11 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.notification.request.content.userInfo[AppUpdater.notificationActionKey] as? String == AppUpdater.notificationShowUpdateAction {
+            runtime?.appUpdater.checkForUpdates()
+            completionHandler()
+            return
+        }
         if let value = response.notification.request.content.userInfo["deepLink"] as? String,
            let url = URL(string: value) {
             NSWorkspace.shared.open(url)
@@ -230,7 +238,17 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettingsFromDockMenu(_:)), keyEquivalent: "")
         settings.target = self
         menu.addItem(settings)
+        if runtime?.appUpdater.isAvailable == true {
+            let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesFromDockMenu(_:)), keyEquivalent: "")
+            update.target = self
+            menu.addItem(update)
+        }
         return menu
+    }
+
+    @objc private func checkForUpdatesFromDockMenu(_ sender: Any?) {
+        menuBarPanel?.close()
+        runtime?.appUpdater.checkForUpdates()
     }
 
     @objc private func openSettingsFromDockMenu(_ sender: Any?) {
@@ -596,10 +614,12 @@ private struct ConflictWindowContent: View {
 
 private struct StatusPopoverContent: View {
     @ObservedObject var runtime: NimbusSyncAppState
+    @ObservedObject var updater: AppUpdater
     let onOpenSettings: () -> Void
     let onAddDomain: () -> Void
     let onOpenConflicts: () -> Void
     let onOpenFinderIntegrationGuide: () -> Void
+    let onOpenUpdate: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -623,7 +643,9 @@ private struct StatusPopoverContent: View {
                 onCheckDomain: runtime.checkNow,
                 onQuit: runtime.quitApplication,
                 finderIntegrationOff: runtime.finderIntegration == .off,
-                onOpenFinderIntegrationSettings: onOpenFinderIntegrationGuide
+                onOpenFinderIntegrationSettings: onOpenFinderIntegrationGuide,
+                updateStatus: updater.status,
+                onOpenUpdate: onOpenUpdate
             )
         }
         .frame(width: NimbusSyncDesignTokens.popoverWidth)
@@ -772,6 +794,8 @@ private final class NimbusSyncAppState: ObservableObject {
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
     /// The menu bar image: up to date, syncing (animated), paused or needs attention.
     let menuBarIcon = MenuBarIconAnimator()
+    /// Sparkle: daily checks, reminders and installs (see `AppUpdater`).
+    let appUpdater = AppUpdater()
     /// The newest raw log lines from the app and the File Provider extension, for Settings.
     @Published private(set) var recentLogLines: [String] = []
     nonisolated static let settingsLogLineLimit = 100
@@ -845,6 +869,7 @@ private final class NimbusSyncAppState: ObservableObject {
         started = true
         let version = AppIdentity.version ?? "?"
         ActivityLog.shared.info("app", "NimbusSync \(version) started")
+        startUpdater()
         reload()
         refreshFinderIntegration()
         Task { await notifications.configureCategories() }
@@ -1846,6 +1871,17 @@ private final class NimbusSyncAppState: ObservableObject {
         }
     }
 
+    private func startUpdater() {
+        appUpdater.onStatusChange = { [weak self] status in self?.menuBarIcon.setUpdateStatus(status) }
+        appUpdater.notificationsAllowed = { [weak self] in self?.snapshot.notificationPreferences.enabled ?? false }
+        // The same bookkeeping as Quit: the extension then knows the app is gone until the
+        // relaunched copy's first heartbeat.
+        appUpdater.prepareForRelaunch = { [weak self] in
+            await self?.markApplicationNotRunning()
+        }
+        appUpdater.start()
+    }
+
     private func markApplicationNotRunning() async {
         await heartbeat.markQuit()
         for domain in snapshot.domains {
@@ -1878,7 +1914,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .domains: "Cloudreve servers synced to your Finder sidebar"
-        case .general: "Startup, background checks and notifications"
+        case .general: "Startup, updates, background checks and notifications"
         case .diagnostics: "Recent activity from NimbusSync and its Finder extension"
         case .about: "NimbusSync keeps your Cloudreve files available in Finder"
         }
@@ -1949,6 +1985,7 @@ private struct SettingsView: View {
     let logsDirectoryPath: String?
     let onOpenLogs: () -> Void
     let onRefresh: () -> Void
+    @ObservedObject var updater: AppUpdater
     @State private var selectedSection: SettingsSection = .domains
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var notificationPreferences: NotificationPreferences
@@ -1962,7 +1999,7 @@ private struct SettingsView: View {
     /// Shared with the Finder extension through the App Group's defaults.
     @AppStorage(ActivityLogLevelPreference.preferenceKey, store: ActivityLogLevelPreference.sharedDefaults()) private var logLevel = ActivityLogLevelPreference.defaultValue.rawValue
 
-    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, reauthorizationError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void) {
+    init(domains: [DomainDescriptor], exclusionRules: [String: String], notificationPreferences: NotificationPreferences, finderError: Binding<String?>, finderSettingsActionAvailable: Binding<Bool>, domainRemovalError: Binding<String?>, exclusionError: Binding<String?>, removingDomainIdentifier: String?, renamingDomainIdentifier: String?, domainRenameError: Binding<String?>, reauthorizationError: Binding<String?>, onRename: @escaping (DomainDescriptor, String) -> Void, onOpenFinder: @escaping (DomainDescriptor) -> Void, onOpenFileProviderSettings: @escaping () -> Void, onRemove: @escaping (DomainDescriptor) -> Void, onFinalizeRemoval: @escaping (DomainDescriptor) -> Void, onOpenWeb: @escaping (DomainDescriptor) -> Void, onReauthorize: @escaping (DomainDescriptor) -> Void, onApplyExclusionRules: @escaping (DomainDescriptor, String) -> Void, onNotificationsChanged: @escaping (NotificationPreferences) -> Void, onAddDomain: @escaping () -> Void, connections: [String: ServerConnectionDisplay], checkProgress: [String: DomainCheckProgress], checkableDomainIdentifiers: Set<String>, onCheckNow: @escaping (DomainDescriptor) -> Void, lastSyncedAt: [String: Date], domainFolderPaths: [String: String], finderIntegration: FinderIntegrationState, onRefreshFinderIntegration: @escaping () -> Void, recentLogLines: [String], logsDirectoryPath: String?, onOpenLogs: @escaping () -> Void, onRefresh: @escaping () -> Void, updater: AppUpdater) {
         self.domains = domains
         self.exclusionRules = exclusionRules
         persistedNotificationPreferences = notificationPreferences
@@ -1996,6 +2033,7 @@ private struct SettingsView: View {
         self.logsDirectoryPath = logsDirectoryPath
         self.onOpenLogs = onOpenLogs
         self.onRefresh = onRefresh
+        self.updater = updater
         _notificationPreferences = State(initialValue: notificationPreferences)
     }
 
@@ -2150,6 +2188,8 @@ private struct SettingsView: View {
                 }
             }
 
+            updatesGroup
+
             SettingsGroup("Full check") {
                 SettingsRow(symbol: "arrow.triangle.2.circlepath", title: "Background full check", subtitle: "How often every file is compared with the server.") {
                     Picker("Background full check", selection: Binding(
@@ -2203,6 +2243,50 @@ private struct SettingsView: View {
             components.queryItems = [URLQueryItem(name: "id", value: identifier)]
         }
         if let url = components.url { NSWorkspace.shared.open(url) }
+    }
+
+    // MARK: Updates
+
+    @ViewBuilder
+    private var updatesGroup: some View {
+        if let reason = updater.configuration.unavailability {
+            SettingsGroup("Updates") {
+                SettingsRow(symbol: "arrow.down.circle", tint: .blue, title: "Software updates", subtitle: AppUpdateSettingsText.unavailableReason(reason))
+            }
+        } else {
+            SettingsGroup("Updates") {
+                SettingsRow(symbol: "arrow.down.circle", tint: .blue, title: "Check for updates automatically", subtitle: "Looks for a new version once a day.") {
+                    SettingsSwitch("Check for updates automatically", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates },
+                        set: { updater.setAutomaticallyChecksForUpdates($0) }
+                    ))
+                }
+                SettingsRowDivider()
+                SettingsRow(title: "Download and install automatically", subtitle: "Installs when NimbusSync quits, or right away with Restart to Update.", isNested: true) {
+                    SettingsSwitch("Download and install updates automatically", isOn: Binding(
+                        get: { updater.automaticallyDownloadsUpdates },
+                        set: { updater.setAutomaticallyDownloadsUpdates($0) }
+                    ))
+                }
+                .disabled(!updater.automaticallyChecksForUpdates)
+                SettingsRowDivider()
+                SettingsRow(symbol: "testtube.2", tint: .orange, title: "Include beta versions", subtitle: "Get release candidates early. Turning this off keeps your version until a newer stable one is out.") {
+                    SettingsSwitch("Include beta versions", isOn: Binding(
+                        get: { updater.receivesBetaUpdates },
+                        set: { updater.setReceivesBetaUpdates($0) }
+                    ))
+                }
+            } footer: {
+                HStack(alignment: .firstTextBaseline, spacing: NimbusSyncDesignTokens.spacing8) {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        Text(AppUpdateSettingsText.lastChecked(updater.lastUpdateCheckDate, now: context.date))
+                    }
+                    Button("Check for Updates…", action: updater.checkForUpdates)
+                        .buttonStyle(.link)
+                        .disabled(!updater.canCheckForUpdates)
+                }
+            }
+        }
     }
 
     // MARK: Diagnostics page
