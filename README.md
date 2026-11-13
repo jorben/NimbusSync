@@ -10,6 +10,7 @@
 **Your self-hosted Cloudreve, native in Finder.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/jorben/NimbusSync/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/jorben/NimbusSync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jorben/NimbusSync?sort=semver&style=flat-square&label=release)](https://github.com/jorben/NimbusSync/releases)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](Package.swift)
 [![Cloudreve 4.12+](https://img.shields.io/badge/Cloudreve-4.12%2B-0070F3?style=flat-square)](#requirements)
@@ -28,11 +29,8 @@ folder tree right away and downloads a file only when you open it. Edits
 upload in the background.
 
 > [!IMPORTANT]
-> **Technical Preview.** There is no signed or notarized release yet, so you
-> have to build NimbusSync from source. The local test suite passes, but
-> behaviour against real Cloudreve servers, the full Finder flow when signed,
-> and notarization still need validation. Don't rely on it as the only copy
-> of important data.
+> **Early release.** 0.1.1 is the first stable release. Expect rough edges,
+> and don't rely on NimbusSync as the only copy of important data.
 
 ## Highlights
 
@@ -58,33 +56,26 @@ upload in the background.
 
 ## Requirements
 
-- macOS 13 Ventura or later
-- Xcode with Swift 6 to build, plus [ripgrep](https://github.com/BurntSushi/ripgrep)
-  (`rg`), which the build script uses for its pre-build scans
+- macOS 13 Ventura or later, on Apple silicon or Intel
 - A Cloudreve **4.12 or later** server reachable over **HTTPS**
-- An Apple Developer team to sign the build: macOS only loads File Provider
-  extensions from signed apps
+
+To [build from source](#build-from-source) you also need Xcode with Swift 6,
+[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) for the build script's
+pre-build scans, and an Apple Developer team to sign the build: macOS only
+loads File Provider extensions from signed apps.
 
 ## Getting Started
 
-### 1. Build and launch
+### 1. Install
 
-```sh
-git clone https://github.com/jorben/NimbusSync.git
-cd NimbusSync
-cp Config/build.local.sh.example Config/build.local.sh   # fill in your signing settings
-make dev
-```
+Download `NimbusSync-<version>.dmg` from the
+[latest release](https://github.com/jorben/NimbusSync/releases/latest), open it and
+drag NimbusSync into Applications. The app is a universal build, signed with
+a Developer ID and notarized by Apple. To check the download, run
+`shasum -a 256 -c NimbusSync-<version>.dmg.sha256` next to the `.sha256`
+file from the same release.
 
-`make dev` builds through [`Scripts/build.sh`](Scripts/build.sh), places the app
-in `Dist/` (`NimbusSyncDev.app` for Debug, `NimbusSync.app` for Release) and
-relaunches it. Without signing settings you get
-an unsigned build. The app runs, but Finder reports the extension as
-unavailable. For signing details, see [Signed builds](#signed-builds).
-
-> [!TIP]
-> Just working on the UI? `make dev-unsigned` is a faster Debug build that
-> skips signing and the pre-build scans.
+Open NimbusSync from Applications. It lives in the menu bar.
 
 ### 2. Add your Cloudreve server
 
@@ -96,6 +87,32 @@ The new domain appears under **Locations** in the Finder sidebar. Manage it
 later from **Settings → Domains**: rename, reauthorize, run a full check,
 edit exclusions or remove it. Removing a domain never deletes anything on the
 server.
+
+> [!TIP]
+> If the menu bar says **Finder integration is off**, macOS has NimbusSync
+> switched off and nothing syncs. Turn it on under System Settings ›
+> General › Login Items & Extensions › File Providers (macOS 15 and later)
+> or Privacy & Security › Extensions › File Providers (macOS 13 and 14).
+> NimbusSync opens a guide that takes you there.
+
+### 3. Stay up to date
+
+NimbusSync updates itself with [Sparkle](https://sparkle-project.org). It
+checks once a day, marks the menu bar icon when a new version is out, and
+lets you skip a version. Settings › General › **Updates** has the switches:
+
+- **Check for updates automatically**: on by default.
+- **Download and install automatically**: off by default. When on, updates
+  install when NimbusSync quits, or right away with **Restart**.
+- **Include beta versions**: release candidates (`-rc.N`). On by default
+  when you're running one, off otherwise.
+
+**Check for Updates…** is in Settings and the Dock menu.
+
+> [!NOTE]
+> 0.1.0-rc.1 to 0.1.0-rc.5 can't update themselves: rc.1 to rc.3 have no
+> updater, and rc.4 and rc.5 quit at launch. If you have one of them,
+> download the latest release and install it by hand once.
 
 ## How It Works
 
@@ -124,11 +141,34 @@ before it touches the server. For the invariants behind this design, see the
 
 ## Development
 
+### Build from source
+
+```sh
+git clone https://github.com/jorben/NimbusSync.git
+cd NimbusSync
+cp Config/build.local.sh.example Config/build.local.sh   # fill in your signing settings
+make dev
+```
+
+`make dev` builds through [`Scripts/build.sh`](Scripts/build.sh), places the app
+in `Dist/` (`NimbusSyncDev.app` for Debug, `NimbusSync.app` for Release) and
+relaunches it. Without signing settings you get an unsigned build. The app
+runs, but Finder reports the extension as unavailable. For signing details,
+see [Signed builds](#signed-builds). The Dev build never updates itself and
+can sit next to an installed release.
+
+> [!TIP]
+> Just working on the UI? `make dev-unsigned` is a faster Debug build that
+> skips signing and the pre-build scans.
+
+### Commands
+
 | Command | What it does |
 | --- | --- |
 | `make dev` | Build (signed if configured), then relaunch the app |
 | `make dev-unsigned` | Fast unsigned Debug build for UI work |
 | `make build` | Full build with secret/entitlement scans and `Dist/` zip + checksum |
+| `make dmg` | Package the built app into a styled DMG (needs `pip install dmgbuild`) |
 | `make test` | Run the Swift package tests (`swift test --disable-sandbox`) |
 | `make lint` | `git diff --check` |
 | `make clean` | Remove `.build/` and `Dist/` |
@@ -202,7 +242,8 @@ Packages/                 Shared Swift modules
   NimbusSyncDesignSystem/   Menu-bar panel, Settings and design tokens
   NimbusSyncObservability/  Shared activity log and redacted diagnostics
 Tests/                    Swift unit tests and the golden SQLite schema
-Scripts/                  Build, release-manifest and icon scripts
+Scripts/                  Build, DMG, appcast, release-manifest and icon scripts
+.github/workflows/        CI, release builds and appcast publishing
 docs/                     Product requirements, architecture, phase plans
 ```
 

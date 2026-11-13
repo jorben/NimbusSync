@@ -10,6 +10,7 @@
 **把自托管的 Cloudreve 原生接入 Finder。**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/jorben/NimbusSync/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/jorben/NimbusSync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jorben/NimbusSync?sort=semver&style=flat-square&label=release)](https://github.com/jorben/NimbusSync/releases)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?style=flat-square&logo=apple&logoColor=white)](#环境要求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white)](Package.swift)
 [![Cloudreve 4.12+](https://img.shields.io/badge/Cloudreve-4.12%2B-0070F3?style=flat-square)](#环境要求)
@@ -27,9 +28,8 @@ NimbusSync 是一款 macOS 菜单栏应用，它把你的
 本地修改在后台上传回服务器。
 
 > [!IMPORTANT]
-> **Technical Preview（技术预览）。** 目前还没有签名、公证过的发布版，需要从源码
-> 构建。本地测试套件已全部通过，但对接真实 Cloudreve 服务器的行为、签名后的
-> Finder 完整流程以及公证仍待验证。请不要把它作为重要数据的唯一副本。
+> **早期版本。** 0.1.1 是第一个正式版，可能仍有不完善之处，请不要把
+> NimbusSync 作为重要数据的唯一副本。
 
 ## 亮点
 
@@ -49,30 +49,24 @@ NimbusSync 是一款 macOS 菜单栏应用，它把你的
 
 ## 环境要求
 
-- macOS 13 Ventura 或更高版本
-- 构建需要支持 Swift 6 的 Xcode，以及构建脚本做预检扫描时用到的
-  [ripgrep](https://github.com/BurntSushi/ripgrep)（`rg`）
+- macOS 13 Ventura 或更高版本，Apple 芯片或 Intel 均可
 - 可通过 **HTTPS** 访问的 Cloudreve **4.12 或更高版本**服务器
-- 用于签名构建的 Apple Developer 团队：macOS 只会加载已签名应用中的
-  File Provider 扩展
+
+如需[从源码构建](#从源码构建)，还需要支持 Swift 6 的 Xcode、构建脚本做预检扫描时
+用到的 [ripgrep](https://github.com/BurntSushi/ripgrep)（`rg`），以及用于签名构建的
+Apple Developer 团队：macOS 只会加载已签名应用中的 File Provider 扩展。
 
 ## 快速开始
 
-### 1. 构建并启动
+### 1. 安装
 
-```sh
-git clone https://github.com/jorben/NimbusSync.git
-cd NimbusSync
-cp Config/build.local.sh.example Config/build.local.sh   # 填写你的签名配置
-make dev
-```
+从[最新发布](https://github.com/jorben/NimbusSync/releases/latest)下载
+`NimbusSync-<version>.dmg`，打开后把 NimbusSync 拖进「应用程序」。应用为通用
+二进制（universal），使用 Developer ID 签名并经过 Apple 公证。如需校验下载文件，
+把同一发布中的 `.sha256` 文件放在一起，运行
+`shasum -a 256 -c NimbusSync-<version>.dmg.sha256`。
 
-`make dev` 通过 [`Scripts/build.sh`](Scripts/build.sh) 构建，把应用放到
-`Dist/`（Debug 为 `NimbusSyncDev.app`，Release 为 `NimbusSync.app`）并重新启动。如果没有签名配置，得到的是未签名构建：应用能
-运行，但 Finder 会提示扩展不可用。签名细节见[签名构建](#signed-builds)。
-
-> [!TIP]
-> 只改 UI？`make dev-unsigned` 是更快的 Debug 构建，会跳过签名和预检扫描。
+从「应用程序」打开 NimbusSync，它会常驻在菜单栏。
 
 ### 2. 添加 Cloudreve 服务器
 
@@ -83,6 +77,30 @@ make dev
 新的 Domain 会出现在 Finder 侧边栏的 **位置** 下。之后可以在
 **Settings → Domains** 中管理：重命名、重新授权、运行全量检查、编辑排除项或移除。
 移除 Domain 永远不会删除服务器上的任何内容。
+
+> [!TIP]
+> 如果菜单栏提示 **Finder integration is off**，说明 NimbusSync 在 macOS 中被关闭，
+> 此时不会同步任何内容。请在系统设置 › 通用 › 登录项与扩展 › 文件提供程序
+> （macOS 15 及以上）或 隐私与安全性 › 扩展 › 文件提供程序（macOS 13、14）中打开它。
+> NimbusSync 会弹出引导窗口带你过去。
+
+### 3. 保持更新
+
+NimbusSync 通过 [Sparkle](https://sparkle-project.org) 自动更新：每天检查一次，
+有新版本时在菜单栏图标上提示，也可以跳过某个版本。相关开关在
+Settings › General › **Updates**：
+
+- **Check for updates automatically**：自动检查，默认开启。
+- **Download and install automatically**：自动下载并安装，默认关闭。开启后在
+  NimbusSync 退出时安装，或点 **Restart** 立即安装。
+- **Include beta versions**：接收候选版本（`-rc.N`）。当前安装的是候选版本时
+  默认开启，否则默认关闭。
+
+设置窗口和 Dock 菜单中都有 **Check for Updates…**。
+
+> [!NOTE]
+> 0.1.0-rc.1 至 0.1.0-rc.5 无法自动更新：rc.1 至 rc.3 没有内置更新器，rc.4 和
+> rc.5 启动时会退出。如果你装的是这几个版本，请下载最新发布并手动安装一次。
 
 > [!NOTE]
 > 应用界面目前仅提供英文。
@@ -112,11 +130,32 @@ flowchart LR
 
 ## 开发
 
+### 从源码构建
+
+```sh
+git clone https://github.com/jorben/NimbusSync.git
+cd NimbusSync
+cp Config/build.local.sh.example Config/build.local.sh   # 填写你的签名配置
+make dev
+```
+
+`make dev` 通过 [`Scripts/build.sh`](Scripts/build.sh) 构建，把应用放到
+`Dist/`（Debug 为 `NimbusSyncDev.app`，Release 为 `NimbusSync.app`）并重新启动。
+如果没有签名配置，得到的是未签名构建：应用能运行，但 Finder 会提示扩展不可用。
+签名细节见[签名构建](#signed-builds)。Dev 版不会自动更新，可以和已安装的正式版
+共存。
+
+> [!TIP]
+> 只改 UI？`make dev-unsigned` 是更快的 Debug 构建，会跳过签名和预检扫描。
+
+### 常用命令
+
 | 命令 | 作用 |
 | --- | --- |
 | `make dev` | 构建（如已配置则签名）并重新启动应用 |
 | `make dev-unsigned` | 用于 UI 开发的快速未签名 Debug 构建 |
 | `make build` | 完整构建：密钥/entitlement 扫描，产出 `Dist/` 下的 zip 和校验和 |
+| `make dmg` | 把构建好的应用打包成带安装布局的 DMG（需先 `pip install dmgbuild`） |
 | `make test` | 运行 Swift Package 测试（`swift test --disable-sandbox`） |
 | `make lint` | `git diff --check` |
 | `make clean` | 删除 `.build/` 和 `Dist/` |
@@ -186,7 +225,8 @@ Packages/                 共享 Swift 模块
   NimbusSyncDesignSystem/   菜单栏面板、设置界面与设计 token
   NimbusSyncObservability/  共享活动日志与脱敏诊断
 Tests/                    Swift 单元测试与 SQLite schema 基准快照
-Scripts/                  构建、发布清单与图标脚本
+Scripts/                  构建、DMG、appcast、发布清单与图标脚本
+.github/workflows/        CI、发布构建与 appcast 发布
 docs/                     产品需求、技术架构、阶段计划
 ```
 
