@@ -238,7 +238,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     func openSettingsWindow() {
         guard isPrimaryInstance else { return }
         NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        focusWindow(titled: ["NimbusSync Settings", "NimbusSync", "Settings"], delay: .milliseconds(180), remainingAttempts: 4)
+        focusWindow(titled: ["\(AppIdentity.displayName) Settings", AppIdentity.displayName, "NimbusSync Settings", "NimbusSync", "Settings"], delay: .milliseconds(180), remainingAttempts: 4)
     }
 
     func openOnboardingWindow() {
@@ -2147,7 +2147,7 @@ private struct SettingsView: View {
                         AppIconView(size: 64)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 10) {
-                                Text("NimbusSync")
+                                Text(AppIdentity.displayName)
                                     .font(.system(size: 20, weight: .semibold))
                                     .accessibilityAddTraits(.isHeader)
                                 SettingsTagBadge(SettingsAboutText.version(
@@ -2320,7 +2320,7 @@ private struct SettingsSidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 AppIconView(size: 36)
-                Text("NimbusSync")
+                Text(AppIdentity.displayName)
                     .font(.system(size: 18, weight: .semibold))
                     .lineLimit(1)
             }

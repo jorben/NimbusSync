@@ -68,7 +68,7 @@ make dev
 ```
 
 `make dev` 通过 [`Scripts/build.sh`](Scripts/build.sh) 构建，把应用放到
-`Dist/NimbusSync.app` 并重新启动。如果没有签名配置，得到的是未签名构建：应用能
+`Dist/`（Debug 为 `NimbusSyncDev.app`，Release 为 `NimbusSync.app`）并重新启动。如果没有签名配置，得到的是未签名构建：应用能
 运行，但 Finder 会提示扩展不可用。签名细节见[签名构建](#signed-builds)。
 
 > [!TIP]
@@ -149,11 +149,12 @@ Debug 与 Release 使用两套独立身份，可以同时装在一台 Mac 上：
 | 扩展 | `….nimbussync.fileprovider` / `.fileproviderui` | `….nimbussync.dev.fileprovider` / `.fileproviderui` |
 | App Group | `group.io.github.jorben.nimbussync` | `group.io.github.jorben.nimbussync.dev` |
 | Keychain 组 | `TEAMID.io.github.jorben.nimbussync` | `TEAMID.io.github.jorben.nimbussync.dev` |
+| 应用包 | `NimbusSync.app` | `NimbusSyncDev.app` |
 | 名称 / 深链 | NimbusSync / `nimbussync://` | NimbusSyncDev / `nimbussync-dev://` |
 
 两套身份各自需要 App ID、App Group 和描述文件（Dev 的 File Provider 还需要
-File Provider Testing Mode）。两个构建产物都叫 `NimbusSync.app`，Dev 版请直接从
-`Dist/` 运行，不要放进 `/Applications`。两者都注册了服务端规定的 `cloudreve://`
+File Provider Testing Mode）。Dev 版产物是 `NimbusSyncDev.app`，登录项和系统设置的
+文件提供程序列表里会与正式版分开显示。两者都注册了服务端规定的 `cloudreve://`
 OAuth 回调，macOS 只会交给其中一个：登录或重新授权前请先退出另一个版本。
 
 命令行中也可以使用不带前缀的名称（`SIGNING_MODE`、`CONFIGURATION`、

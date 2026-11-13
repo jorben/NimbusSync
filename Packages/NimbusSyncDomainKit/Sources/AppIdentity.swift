@@ -13,6 +13,8 @@ public enum AppIdentity {
     public static let baseIdentifierInfoKey = "NimbusSyncBundleIdentifierBase"
     public static let appGroupInfoKey = "NimbusSyncAppGroupIdentifier"
     public static let urlSchemeInfoKey = "NimbusSyncURLScheme"
+    public static let displayNameInfoKey = "NimbusSyncDisplayName"
+    public static let releaseDisplayName = "NimbusSync"
 
     /// The main app's bundle identifier; extensions append `.fileprovider` / `.fileproviderui`.
     public static let baseIdentifier: String = infoValue(baseIdentifierInfoKey) ?? releaseBaseIdentifier
@@ -22,6 +24,11 @@ public enum AppIdentity {
     /// The scheme NimbusSync's own deep links use. The Cloudreve OAuth callback scheme is fixed by
     /// the server and is shared by every build.
     public static let urlScheme: String = infoValue(urlSchemeInfoKey) ?? releaseURLScheme
+
+    /// The name the build shows itself under: "NimbusSync", or "NimbusSyncDev" for the Dev build,
+    /// so the two can be told apart in the menu bar, Settings and the guide that points at System
+    /// Settings (where macOS lists each build by its bundle name).
+    public static let displayName: String = infoValue(displayNameInfoKey) ?? releaseDisplayName
 
     /// The extension role of `bundleIdentifier` within the identity rooted at `baseIdentifier`.
     public static func role(of bundleIdentifier: String?, baseIdentifier: String = baseIdentifier) -> Role? {

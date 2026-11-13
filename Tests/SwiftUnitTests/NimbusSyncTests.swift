@@ -604,6 +604,7 @@ final class NimbusSyncTests: XCTestCase {
         XCTAssertEqual(AppIdentity.baseIdentifier, AppIdentity.releaseBaseIdentifier, "processes without the Info.plist keys use the Release identity")
         XCTAssertEqual(AppIdentity.appGroupIdentifier, "group.io.github.jorben.nimbussync")
         XCTAssertEqual(AppIdentity.urlScheme, "nimbussync")
+        XCTAssertEqual(AppIdentity.displayName, "NimbusSync", "the Dev build gets NimbusSyncDev from its Info.plist")
         XCTAssertEqual(AppGroupPaths.identifier, AppIdentity.appGroupIdentifier)
         let release = "io.github.jorben.nimbussync", dev = "io.github.jorben.nimbussync.dev"
         XCTAssertEqual(AppIdentity.role(of: "\(dev).fileprovider", baseIdentifier: dev), .fileProvider)

@@ -28,10 +28,10 @@ public enum MenuBarIconState: Equatable, Sendable {
 
     public var accessibilityLabel: String {
         switch self {
-        case .upToDate: "NimbusSync – Up to date"
-        case .syncing: "NimbusSync – Syncing"
-        case .paused: "NimbusSync – Paused"
-        case .attention: "NimbusSync – Needs attention"
+        case .upToDate: "\(AppIdentity.displayName) – Up to date"
+        case .syncing: "\(AppIdentity.displayName) – Syncing"
+        case .paused: "\(AppIdentity.displayName) – Paused"
+        case .attention: "\(AppIdentity.displayName) – Needs attention"
         }
     }
 }
@@ -92,7 +92,7 @@ public enum MenuBarIcon {
             image = NSImage(systemSymbolName: fallback, accessibilityDescription: nil) ?? NSImage(size: canvas)
         }
         image.isTemplate = true
-        image.accessibilityDescription = state?.accessibilityLabel ?? "NimbusSync"
+        image.accessibilityDescription = state?.accessibilityLabel ?? AppIdentity.displayName
         return image
     }
 
@@ -172,9 +172,9 @@ public final class MenuBarIconAnimator: ObservableObject {
     @Published public private(set) var state: MenuBarIconState?
     @Published public private(set) var isSyncing = false
     /// The status item's VoiceOver label.
-    @Published public private(set) var accessibilityLabel = "NimbusSync"
+    @Published public private(set) var accessibilityLabel = AppIdentity.displayName
     /// The status item's hover text (see `MenuBarStatusSummary.tooltip`).
-    @Published public private(set) var tooltip = "NimbusSync"
+    @Published public private(set) var tooltip = AppIdentity.displayName
     private var timer: Timer?
     private var frame = 0
 

@@ -77,7 +77,8 @@ make dev
 ```
 
 `make dev` builds through [`Scripts/build.sh`](Scripts/build.sh), places the app
-in `Dist/NimbusSync.app` and relaunches it. Without signing settings you get
+in `Dist/` (`NimbusSyncDev.app` for Debug, `NimbusSync.app` for Release) and
+relaunches it. Without signing settings you get
 an unsigned build. The app runs, but Finder reports the extension as
 unavailable. For signing details, see [Signed builds](#signed-builds).
 
@@ -162,12 +163,13 @@ Debug and Release use separate identities so both can be installed on one Mac:
 | Extensions | `….nimbussync.fileprovider` / `.fileproviderui` | `….nimbussync.dev.fileprovider` / `.fileproviderui` |
 | App Group | `group.io.github.jorben.nimbussync` | `group.io.github.jorben.nimbussync.dev` |
 | Keychain group | `TEAMID.io.github.jorben.nimbussync` | `TEAMID.io.github.jorben.nimbussync.dev` |
+| Bundle | `NimbusSync.app` | `NimbusSyncDev.app` |
 | Name / deep link | NimbusSync / `nimbussync://` | NimbusSyncDev / `nimbussync-dev://` |
 
 Each column needs its own App IDs, App Group and provisioning profiles (Dev's
-File Provider also needs File Provider Testing Mode). Both builds are named
-`NimbusSync.app`, so run the Dev build from `Dist/` rather than `/Applications`.
-Both register the server-defined `cloudreve://` OAuth callback, and macOS hands
+File Provider also needs File Provider Testing Mode). The Dev build is
+`NimbusSyncDev.app`, so Login Items and the File Providers list in System
+Settings show it apart from the Release app. Both register the server-defined `cloudreve://` OAuth callback, and macOS hands
 it to only one of them: quit the other build before signing in or reauthorizing.
 
 The unprefixed names (`SIGNING_MODE`, `CONFIGURATION`, `DEVELOPMENT_TEAM`, …)

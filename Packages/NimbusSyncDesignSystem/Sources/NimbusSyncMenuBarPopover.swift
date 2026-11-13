@@ -130,7 +130,7 @@ public struct MenuBarPopoverView: View {
             AppIconView(size: 44)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("NimbusSync")
+                Text(AppIdentity.displayName)
                     .font(.title3.weight(.semibold))
                 Text(summary.subtitle)
                     .font(.subheadline)
@@ -538,8 +538,8 @@ public struct MenuBarPopoverView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .keyboardShortcut("q", modifiers: .command)
-                    .accessibilityLabel(Text("Quit NimbusSync"))
-                    .help("Quit NimbusSync")
+                    .accessibilityLabel(Text("Quit \(AppIdentity.displayName)"))
+                    .help("Quit \(AppIdentity.displayName)")
             }
         }
         .font(.callout)
