@@ -46,11 +46,6 @@ on:
 permissions:
   contents: write
 
-# One writer for gh-pages at a time; a queued publish runs after the current one.
-concurrency:
-  group: publish-appcast
-  cancel-in-progress: false
-
 env:
   BUNDLE_IDENTIFIER: io.github.jorben.nimbussync
   APPCAST_URL: https://jorben.github.io/NimbusSync/appcast.xml
@@ -62,6 +57,13 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release')
+    # One writer for gh-pages at a time. Set on the job, not the workflow, so only runs whose job
+    # actually runs join the group (skipped build completions never do). GitHub keeps at most one
+    # pending job per group: if three publishes overlap, the middle pending one is cancelled and
+    # must be re-run by hand (Publish Appcast > Run workflow).
+    concurrency:
+      group: publish-appcast
+      cancel-in-progress: false
     runs-on: macos-26
     timeout-minutes: 90
 

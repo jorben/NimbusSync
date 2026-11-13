@@ -48,6 +48,10 @@ without `SUPublicEDKey` keeps the updater off, and the release workflow refuses 
    timeout. After a timeout, run *Actions › Publish Appcast* by hand (tag, channel `beta`) once
    `xcrun notarytool history` shows **Accepted**. Publishes run one at a time, so a stable
    publish queued behind a beta one that is still waiting starts when that one finishes.
+   Only publishes that actually run take part (the skipped run after a manual or failed build
+   never does), but GitHub keeps just one waiting publish: if a third starts while one is
+   waiting, the waiting one is cancelled. Run it again by hand
+   (*Actions › Publish Appcast › Run workflow*).
 3. **Stable:** promote the prerelease to a full release on GitHub. Its `released` event runs
    *Publish Appcast* for the `stable` channel. Nothing is rebuilt: the prerelease's notarized
    ZIP is republished without a channel, replacing its beta entry. Only tags without a suffix
