@@ -1,0 +1,259 @@
+# Publishes a built release to the Sparkle appcast on GitHub Pages
+# (https://jorben.github.io/NimbusSync/appcast.xml), which installed copies check once a day.
+#
+#   beta    Run by hand (Actions > Publish Appcast) once the prerelease's notarization was
+#           accepted. Only users who turned on "Include beta versions" are offered it.
+#   stable  Runs by itself when a prerelease is promoted to a full release (`released`), and can
+#           be run by hand. It republishes the same build without a channel, so beta testers
+#           who already have it are not offered it again.
+#
+# Nothing is rebuilt: the ZIP attached to the release by build-and-upload-macos.yml is checked
+# (checksum, bundle identity, Developer ID signature, accepted notarization, EdDSA key match),
+# signed with the Sparkle EdDSA key and added to appcast.xml on the gh-pages branch, and the
+# feed itself is signed (SURequireSignedFeed).
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   SPARKLE_PRIVATE_KEY           the EdDSA private key exported with `generate_keys -x`
+#   APPLE_TEAM_ID                 Developer ID team the app must be signed by
+#   APPLE_ID                      Apple ID used for notarization (to read the notary history)
+#   APPLE_APP_SPECIFIC_PASSWORD   app-specific password of that Apple ID
+#
+# GitHub Pages must serve the gh-pages branch (Settings > Pages > Deploy from a branch).
+name: Publish Appcast
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. 0.2.0-rc.1)"
+        required: true
+      channel:
+        description: "Appcast channel"
+        type: choice
+        options: [beta, stable]
+        default: beta
+
+permissions:
+  contents: write
+
+# One writer for gh-pages at a time; a queued publish runs after the current one.
+concurrency:
+  group: publish-appcast
+  cancel-in-progress: false
+
+env:
+  BUNDLE_IDENTIFIER: io.github.jorben.nimbussync
+  APPCAST_URL: https://jorben.github.io/NimbusSync/appcast.xml
+
+jobs:
+  publish:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = release ]; then
+            TAG="$EVENT_TAG"; CHANNEL=stable
+          else
+            TAG="$INPUT_TAG"; CHANNEL="$INPUT_CHANNEL"
+          fi
+          if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not X.Y.Z or vX.Y.Z (optionally with a -suffix)"; exit 1
+          fi
+          VERSION="${TAG#v}"
+          IS_PRERELEASE=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease -q .isPrerelease)
+          case "$CHANNEL" in
+            stable)
+              [ "$IS_PRERELEASE" = false ] || { echo "::error::$TAG is still a prerelease; promote it to a full release first"; exit 1; }
+              [[ "$VERSION" != *-* ]] || { echo "::error::$VERSION has a prerelease suffix and cannot be published as stable"; exit 1; }
+              ;;
+            beta) ;;
+            *) echo "::error::unknown channel '$CHANNEL'"; exit 1 ;;
+          esac
+          {
+            echo "TAG=$TAG"
+            echo "VERSION=$VERSION"
+            echo "CHANNEL=$CHANNEL"
+            echo "WORK=$RUNNER_TEMP/appcast"
+          } >> "$GITHUB_ENV"
+          echo "Publishing $TAG to the $CHANNEL channel"
+
+      - name: Download and check the update archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$APPLE_TEAM_ID" ] || { echo "::error::APPLE_TEAM_ID is not set"; exit 1; }
+          mkdir -p "$WORK/assets" "$WORK/app"
+          ZIP="NimbusSync-$VERSION.zip"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$WORK/assets" \
+            --pattern "$ZIP" --pattern "$ZIP.sha256" \
+            || { echo "::error::$TAG has no $ZIP; was it built by build-and-upload-macos.yml?"; exit 1; }
+          (cd "$WORK/assets" && shasum -a 256 -c "$ZIP.sha256")
+          ditto -x -k "$WORK/assets/$ZIP" "$WORK/app"
+          APP="$WORK/app/NimbusSync.app"
+          [ -d "$APP" ] || { echo "::error::$ZIP does not contain NimbusSync.app"; exit 1; }
+
+          info="$APP/Contents/Info.plist"
+          value() { plutil -extract "$1" raw -o - "$info"; }
+          [ "$(value CFBundleIdentifier)" = "$BUNDLE_IDENTIFIER" ] || { echo "::error::unexpected bundle identifier $(value CFBundleIdentifier)"; exit 1; }
+          [ "$(value NimbusSyncVersion)" = "$VERSION" ] || { echo "::error::the app says $(value NimbusSyncVersion), the tag $VERSION"; exit 1; }
+          [ "$(value NimbusSyncUpdatesEnabled)" = YES ] || { echo "::error::the build has updates turned off"; exit 1; }
+          [ "$(value SUFeedURL)" = "$APPCAST_URL" ] || { echo "::error::the build's feed is $(value SUFeedURL), not $APPCAST_URL"; exit 1; }
+          PUBLIC_KEY=$(value SUPublicEDKey)
+          [ -n "$PUBLIC_KEY" ] || { echo "::error::the build has no SUPublicEDKey"; exit 1; }
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          details=$(codesign -dvv "$APP" 2>&1)
+          grep -q "^TeamIdentifier=$APPLE_TEAM_ID$" <<<"$details" || { echo "::error::the app is not signed by the expected team"; exit 1; }
+
+          {
+            echo "ZIP_PATH=$WORK/assets/$ZIP"
+            echo "ZIP_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ZIP"
+            echo "BUILD=$(value CFBundleVersion)"
+            echo "MINIMUM_SYSTEM_VERSION=$(value LSMinimumSystemVersion)"
+            echo "PUBLIC_KEY=$PUBLIC_KEY"
+          } >> "$GITHUB_ENV"
+
+      # The build only submits the DMG for notarization; an update must not go out before Apple
+      # has accepted it, or Gatekeeper would reject the installed app.
+      - name: Require accepted notarization
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          DMG="NimbusSync-$VERSION.dmg"
+          history=$(xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --output-format json)
+          # The newest submission of this DMG name is the one attached to the release (a re-run
+          # rebuilds and resubmits it).
+          status=$(DMG="$DMG" python3 -c '
+          import json, os, sys
+          history = json.load(sys.stdin).get("history", [])
+          matches = [entry for entry in history if entry.get("name") == os.environ["DMG"]]
+          matches.sort(key=lambda entry: entry.get("createdDate", ""), reverse=True)
+          print(matches[0]["status"] if matches else "missing")
+          ' <<<"$history")
+          echo "Notarization of $DMG: $status"
+          [ "$status" = Accepted ] || { echo "::error::notarization of $DMG is '$status'; publish once it is Accepted"; exit 1; }
+          # Informational: Gatekeeper's own (online) view of the app in the ZIP.
+          spctl --assess --type execute --verbose=2 "$WORK/app/NimbusSync.app" 2>&1 || true
+
+      - name: Resolve Sparkle tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The Sparkle version pinned in the project (Package.resolved), so the tools match the
+          # framework the app ships with.
+          xcodebuild -project NimbusSync.xcodeproj -scheme NimbusSync -resolvePackageDependencies \
+            -clonedSourcePackagesDirPath "$WORK/spm" >/dev/null
+          BIN=$(find "$WORK/spm/artifacts" -type d -path '*/Sparkle/bin' | head -1)
+          [ -x "$BIN/sign_update" ] || { echo "::error::Sparkle's sign_update was not found"; exit 1; }
+          echo "SPARKLE_BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Sign the update archive
+        shell: bash
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PRIVATE_KEY is not set"; exit 1; }
+          # The private key must belong to the public key inside the app, or every client would
+          # reject the update. A 32-byte seed's public key is derived with OpenSSL; Sparkle's
+          # older 96-byte export ends with the public key.
+          KEY_FILE="$RUNNER_TEMP/sparkle-key.bin"
+          trap 'rm -f "$KEY_FILE" "$RUNNER_TEMP/sparkle-key.der"' EXIT
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | tr -d ' \n\r' | base64 --decode > "$KEY_FILE"
+          case $(wc -c < "$KEY_FILE" | tr -d ' ') in
+            32)
+              OPENSSL=/opt/homebrew/opt/openssl@3/bin/openssl
+              [ -x "$OPENSSL" ] || OPENSSL=$(brew --prefix openssl@3)/bin/openssl
+              { printf '302e020100300506032b657004220420' | xxd -r -p; cat "$KEY_FILE"; } > "$RUNNER_TEMP/sparkle-key.der"
+              DERIVED=$("$OPENSSL" pkey -inform DER -in "$RUNNER_TEMP/sparkle-key.der" -pubout -outform DER | tail -c 32 | base64)
+              ;;
+            96)
+              DERIVED=$(tail -c 32 "$KEY_FILE" | base64)
+              ;;
+            *)
+              echo "::error::SPARKLE_PRIVATE_KEY is not a Sparkle EdDSA private key"; exit 1
+              ;;
+          esac
+          [ "$DERIVED" = "$PUBLIC_KEY" ] || { echo "::error::SPARKLE_PRIVATE_KEY does not match the app's SUPublicEDKey"; exit 1; }
+
+          SIGNATURE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - -p "$ZIP_PATH")
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --verify --ed-key-file - "$ZIP_PATH" "$SIGNATURE"
+          {
+            echo "ED_SIGNATURE=$SIGNATURE"
+            echo "ZIP_LENGTH=$(stat -f%z "$ZIP_PATH")"
+          } >> "$GITHUB_ENV"
+
+      - name: Check out gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch --depth=1 origin gh-pages:gh-pages
+            git worktree add "$WORK/pages" gh-pages
+          else
+            git worktree add --detach "$WORK/pages"
+            git -C "$WORK/pages" checkout --orphan gh-pages
+            git -C "$WORK/pages" rm -rf --quiet .
+          fi
+
+      - name: Update and sign appcast.xml
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$WORK/notes.md"
+          python3 Scripts/update-appcast.py \
+            --appcast "$WORK/pages/appcast.xml" \
+            --channel "$CHANNEL" \
+            --version "$VERSION" \
+            --build "$BUILD" \
+            --url "$ZIP_URL" \
+            --length "$ZIP_LENGTH" \
+            --ed-signature "$ED_SIGNATURE" \
+            --minimum-system-version "$MINIMUM_SYSTEM_VERSION" \
+            --release-notes "$WORK/notes.md" \
+            --release-page "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --ed-key-file - "$WORK/pages/appcast.xml"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SPARKLE_BIN/sign_update" --verify --ed-key-file - "$WORK/pages/appcast.xml"
+          # Serve the files as they are, without Jekyll.
+          touch "$WORK/pages/.nojekyll"
+
+      - name: Push gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORK/pages"
+          git add appcast.xml .nojekyll
+          if git diff --cached --quiet; then
+            echo "appcast.xml is unchanged"; exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "chore: 🔧 Publish NimbusSync $VERSION to the $CHANNEL appcast"
+          git push origin gh-pages
+          echo "Published $VERSION (build $BUILD) to $CHANNEL: $APPCAST_URL" >> "$GITHUB_STEP_SUMMARY"

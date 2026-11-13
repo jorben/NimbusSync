@@ -1,6 +1,10 @@
 # Builds the signed, universal Release app, packages it as DMG + ZIP, submits the DMG for
 # notarization (async, not stapled) and attaches both to the GitHub release.
 #
+# Builds run for prereleases only. Promoting a prerelease to a full release ships that same,
+# already notarized build: publish-appcast.yml republishes it to the stable appcast channel
+# instead of rebuilding, so the build number beta testers have stays the stable one.
+#
 # Repository secrets (Settings > Secrets and variables > Actions):
 #   APPLE_CERTIFICATE                    base64 of the Developer ID Application .p12 (with private key)
 #   APPLE_CERTIFICATE_PASSWORD           password of that .p12
@@ -14,7 +18,7 @@ name: Build and Upload macOS App
 
 on:
   release:
-    types: [prereleased, released]
+    types: [prereleased]
   workflow_dispatch:
     inputs:
       version:
@@ -161,10 +165,21 @@ jobs:
 
       - name: Verify release signature
         shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           APP="$DIST_DIR/NimbusSync.app"
           codesign --verify --deep --strict --verbose=2 "$APP"
+          # Sparkle's nested helpers ship ad-hoc signed; Scripts/build.sh re-signs them.
+          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+          for helper in "$SPARKLE/XPCServices/Installer.xpc" "$SPARKLE/XPCServices/Downloader.xpc" "$SPARKLE/Autoupdate" "$SPARKLE/Updater.app" "$SPARKLE/Sparkle"; do
+            details=$(codesign -dvv "$helper" 2>&1)
+            grep -q "^TeamIdentifier=$APPLE_TEAM_ID$" <<<"$details" || { echo "::error::$(basename "$helper") is not signed by the release team"; exit 1; }
+            grep -q '^Timestamp=' <<<"$details" || { echo "::error::$(basename "$helper") has no secure timestamp"; exit 1; }
+            grep -q 'flags=.*(runtime)' <<<"$details" || { echo "::error::$(basename "$helper") lacks the hardened runtime"; exit 1; }
+          done
+          echo "Sparkle helpers: re-signed, hardened, timestamped"
           for bundle in "$APP" "$APP"/Contents/PlugIns/*.appex; do
             name=$(basename "$bundle")
             archs=$(lipo -archs "$bundle/Contents/MacOS/${name%.*}")
@@ -192,6 +207,12 @@ jobs:
           check_info CFBundleShortVersionString "$MARKETING_VERSION"
           check_info NimbusSyncVersion "$VERSION"
           check_info CFBundleVersion "$BUILD_NUMBER"
+          # Sparkle: only the shipping identity updates, and only with the EdDSA public key that
+          # publish-appcast.yml checks the private key against.
+          check_info NimbusSyncUpdatesEnabled YES
+          check_info SUFeedURL https://jorben.github.io/NimbusSync/appcast.xml
+          [ -n "$(plutil -extract SUPublicEDKey raw -o - "$info")" ] \
+            || { echo "::error::SUPublicEDKey is empty; this build could never install an update"; exit 1; }
           for appex in "$APP"/Contents/PlugIns/*.appex; do
             actual=$(plutil -extract CFBundleShortVersionString raw -o - "$appex/Contents/Info.plist")
             [ "$actual" = "$MARKETING_VERSION" ] \
