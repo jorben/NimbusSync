@@ -198,6 +198,7 @@ docs/                     产品需求、技术架构、阶段计划
 - [技术架构](docs/02-macos-technical-architecture.md)：进程模型、状态与不变量
 - [File Provider 对齐设计](docs/08-file-provider-nextcloud-parity-implementation.md)
 - [阶段报告](docs/archive/reports/)：目前已验证的内容
+- [发布与应用内更新](docs/releasing.md)：Sparkle 更新通道、appcast 与发布流程（英文）
 
 ## 参与贡献
 

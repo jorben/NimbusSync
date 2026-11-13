@@ -218,6 +218,8 @@ The design documents in [`docs/`](docs/) are currently written in Chinese.
   model, state and invariants
 - [File Provider parity design](docs/08-file-provider-nextcloud-parity-implementation.md)
 - [Phase reports](docs/archive/reports/): what has been verified so far
+- [Releasing and in-app updates](docs/releasing.md): Sparkle channels, the
+  appcast and the release workflow (in English)
 
 ## Contributing
 
