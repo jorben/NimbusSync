@@ -60,13 +60,15 @@ jobs:
       - name: Install build tools
         uses: ./.github/actions/setup-ripgrep
 
+      # actions/checkout checks out the shallow refs/pull/N/merge commit, so neither the base
+      # nor the PR head commit is present locally; fetch both before diffing them.
       - name: Check whitespace in pull request changes
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
           git --no-pager diff --check "$BASE_SHA" "$HEAD_SHA"
 
       - name: Build app (Debug, unsigned)
