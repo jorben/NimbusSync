@@ -93,6 +93,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     /// The guide opens by itself at most once per run (see `FinderIntegrationPromptPolicy`).
     private var finderGuidePromptedThisRun = false
     private var menuBarPanel: MenuBarPanelController?
+    private let settingsOpener = SettingsWindowOpener()
     private(set) var isPrimaryInstance: Bool
 
     override init() {
@@ -233,6 +234,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     }
 
     @objc private func openSettingsFromDockMenu(_ sender: Any?) {
+        menuBarPanel?.close()
         openSettingsWindow()
     }
 
@@ -242,10 +244,21 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         open(self)
     }
 
+    /// The app is activated before the window opens: a window opened while another app stays
+    /// active can take key focus and still be covered by that app's windows.
     func openSettingsWindow() {
         guard isPrimaryInstance else { return }
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        focusWindow(titled: ["\(AppIdentity.displayName) Settings", AppIdentity.displayName, "NimbusSync Settings", "NimbusSync", "Settings"], delay: .milliseconds(180), remainingAttempts: 4)
+        activateApplication()
+        settingsOpener.open()
+        focusSettingsWindow(delay: .milliseconds(50), remainingAttempts: 8)
+    }
+
+    private func activateApplication() {
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func openOnboardingWindow() {
@@ -409,23 +422,21 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         }
     }
 
-    private func focusWindow(titled titles: [String], delay: DispatchTimeInterval, remainingAttempts: Int) {
+    private func focusSettingsWindow(delay: DispatchTimeInterval, remainingAttempts: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let window = NSApp.windows.first(where: { titles.contains($0.title) && $0.isVisible }) else {
+            guard let self else { return }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && SettingsWindowOpener.isSettingsWindow($0) }) else {
                 if remainingAttempts > 0 {
-                    self?.focusWindow(
-                        titled: titles,
-                        delay: .milliseconds(100),
-                        remainingAttempts: remainingAttempts - 1
-                    )
+                    focusSettingsWindow(delay: .milliseconds(100), remainingAttempts: remainingAttempts - 1)
                 }
                 return
             }
-            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            NSApp.activate(ignoringOtherApps: true)
+            activateApplication()
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
+            // Activation can be refused (another app holding on to it); the window still comes
+            // forward instead of opening behind the app the user was in.
+            if !NSApp.isActive { window.orderFrontRegardless() }
         }
     }
 
@@ -457,6 +468,71 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         case nil:
             break
         }
+    }
+}
+
+/// Opens the SwiftUI Settings scene from AppKit code: the Dock menu, the menu bar panel and
+/// deep links.
+///
+/// On macOS 14 and later `showSettingsWindow:` no longer opens the scene (SwiftUI only logs
+/// "Please use SettingsLink for opening the Settings scene"), and `openSettings` is handed only to
+/// views inside a SwiftUI hierarchy. The opener keeps one such view in a window that is never
+/// shown, reads the action from its environment and calls it. macOS 13 keeps the selector.
+@MainActor
+private final class SettingsWindowOpener {
+    /// The identifier SwiftUI gives the Settings scene's window.
+    static let windowIdentifier = "com_apple_SwiftUI_Settings_window"
+    private static let windowTitles: Set<String> = [
+        "\(AppIdentity.displayName) Settings", AppIdentity.displayName, "NimbusSync Settings", "NimbusSync", "Settings",
+    ]
+
+    private var hostWindow: NSWindow?
+    /// The captured `OpenSettingsAction`, typed `Any` so the class stays available on macOS 13.
+    private var action: Any?
+
+    static func isSettingsWindow(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue == windowIdentifier || windowTitles.contains(window.title)
+    }
+
+    func open() {
+        if #available(macOS 14.0, *), let action = settingsAction() {
+            action()
+        } else {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        }
+    }
+
+    @available(macOS 14.0, *)
+    private func settingsAction() -> OpenSettingsAction? {
+        if hostWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: true
+            )
+            window.isReleasedWhenClosed = false
+            window.isExcludedFromWindowsMenu = true
+            let hostingView = NSHostingView(rootView: OpenSettingsActionReader { [weak self] action in
+                self?.action = action
+            })
+            window.contentView = hostingView
+            // Laying the view out evaluates its body, which hands over the action.
+            hostingView.layoutSubtreeIfNeeded()
+            hostWindow = window
+        }
+        return action as? OpenSettingsAction
+    }
+}
+
+@available(macOS 14.0, *)
+private struct OpenSettingsActionReader: View {
+    @Environment(\.openSettings) private var openSettings
+    let onRead: (OpenSettingsAction) -> Void
+
+    var body: some View {
+        let _ = onRead(openSettings)
+        Color.clear.frame(width: 1, height: 1)
     }
 }
 
@@ -2365,7 +2441,7 @@ private struct SettingsView: View {
 
 /// Lets the content run under a transparent title bar, so the sidebar's material reaches the top
 /// edge and the traffic lights sit on it. The window keeps its title for Window menus,
-/// accessibility and `focusWindow(titled:)`; it is only not drawn.
+/// accessibility and `SettingsWindowOpener`; it is only not drawn.
 ///
 /// SwiftUI's Settings scene shows the title again on every update that touches the window (a
 /// page switch, a refreshed snapshot), so the hidden title and transparent bar are held in place

@@ -152,9 +152,10 @@ public struct MenuBarPopoverView: View {
 
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
 
-            settingsLink(help: "Settings") {
+            Button(action: onOpenSettings) {
                 Image(systemName: "gearshape")
             }
+            .help("Settings")
             .buttonStyle(PopoverIconButtonStyle(size: 30))
             .accessibilityLabel(Text("Settings"))
         }
@@ -547,12 +548,11 @@ public struct MenuBarPopoverView: View {
 
             Spacer()
 
-            settingsLink(help: "Open Settings") {
-                Text("Settings…")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .keyboardShortcut(",", modifiers: .command)
+            Button("Settings…", action: onOpenSettings)
+                .help("Open Settings")
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .keyboardShortcut(",", modifiers: .command)
 
             if let onQuit {
                 Divider().frame(height: 14)
@@ -570,17 +570,6 @@ public struct MenuBarPopoverView: View {
     }
 
     // MARK: Shared pieces
-
-    @ViewBuilder
-    private func settingsLink<Label: View>(help: String, @ViewBuilder label: () -> Label) -> some View {
-        if #available(macOS 14.0, *) {
-            SettingsLink(label: label)
-                .help(help)
-        } else {
-            Button(action: onOpenSettings, label: label)
-                .help(help)
-        }
-    }
 
     private func sectionHeading<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack {
