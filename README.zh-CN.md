@@ -98,13 +98,6 @@ Settings › General › **Updates**：
 
 设置窗口和 Dock 菜单中都有 **Check for Updates…**。
 
-> [!NOTE]
-> 0.1.0-rc.1 至 0.1.0-rc.5 无法自动更新：rc.1 至 rc.3 没有内置更新器，rc.4 和
-> rc.5 启动时会退出。如果你装的是这几个版本，请下载最新发布并手动安装一次。
-
-> [!NOTE]
-> 应用界面目前仅提供英文。
-
 ## 工作原理
 
 ```mermaid

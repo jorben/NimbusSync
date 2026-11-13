@@ -109,11 +109,6 @@ lets you skip a version. Settings › General › **Updates** has the switches:
 
 **Check for Updates…** is in Settings and the Dock menu.
 
-> [!NOTE]
-> 0.1.0-rc.1 to 0.1.0-rc.5 can't update themselves: rc.1 to rc.3 have no
-> updater, and rc.4 and rc.5 quit at launch. If you have one of them,
-> download the latest release and install it by hand once.
-
 ## How It Works
 
 ```mermaid
