@@ -1,0 +1,117 @@
+# Creates a GitHub prerelease (with a generated changelog) whenever a version tag is pushed.
+# Publishing that prerelease fires the `release: prereleased` event, which starts
+# build-and-upload-macos.yml to build, sign and notarize the app and attach the DMG/ZIP.
+# Promote the prerelease to a full release manually once it has been verified.
+#
+# Tags: X.Y.Z or vX.Y.Z, optionally with a pre-release suffix (e.g. 1.2.0-rc.1).
+#
+# Repository secrets (Settings > Secrets and variables > Actions):
+#   PAT_TOKEN  required; a token with contents write access. Releases created with the default
+#              GITHUB_TOKEN do not start other workflows, so the build would never run.
+name: Create Prerelease
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Existing tag to create the prerelease for (e.g. 1.0.0-rc.1)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prerelease-${{ inputs.release_version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check release token
+        shell: bash
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          if [ -z "$PAT_TOKEN" ]; then
+            echo "::error::PAT_TOKEN is not set; a release created with GITHUB_TOKEN would not trigger the macOS build."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tags
+        id: tags
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_version }}
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="${INPUT_TAG:-$REF_TAG}"
+          if ! [[ "$CURRENT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '${CURRENT_TAG}' is not X.Y.Z or vX.Y.Z (optionally with a -suffix)."
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${CURRENT_TAG}" >/dev/null; then
+            echo "::error::Tag '${CURRENT_TAG}' does not exist."
+            exit 1
+          fi
+          # Previous stable tag: newest X.Y.Z / vX.Y.Z tag (excluding the current one)
+          # that is an ancestor of the current tag.
+          PREV_TAG=$(git tag -l --sort=-v:refname \
+            | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -vxF "${CURRENT_TAG}" \
+            | while read -r tag; do
+                if git merge-base --is-ancestor "$tag" "$CURRENT_TAG"; then echo "$tag"; break; fi
+              done || true)
+          {
+            echo "current_tag=${CURRENT_TAG}"
+            echo "prev_tag=${PREV_TAG}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Current tag: ${CURRENT_TAG}, previous stable tag: ${PREV_TAG:-<none>}"
+
+      - name: Generate changelog (since previous stable tag)
+        id: changelog_range
+        if: steps.tags.outputs.prev_tag != ''
+        uses: requarks/changelog-action@v1.10.3
+        with:
+          token: ${{ github.token }}
+          fromTag: ${{ steps.tags.outputs.current_tag }}
+          toTag: ${{ steps.tags.outputs.prev_tag }}
+          writeToFile: false
+
+      - name: Generate changelog (first release)
+        id: changelog_first
+        if: steps.tags.outputs.prev_tag == ''
+        uses: requarks/changelog-action@v1.10.3
+        with:
+          token: ${{ github.token }}
+          tag: ${{ steps.tags.outputs.current_tag }}
+          writeToFile: false
+
+      - name: Create prerelease
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tags.outputs.current_tag }}
+          name: NimbusSync ${{ steps.tags.outputs.current_tag }}
+          body: ${{ steps.changelog_range.outputs.changes || steps.changelog_first.outputs.changes }}
+          draft: false
+          prerelease: true
+          makeLatest: false
+          allowUpdates: true
+          # Re-running for an existing release must never demote an already promoted release.
+          omitPrereleaseDuringUpdate: true
+          # PAT so the release event starts build-and-upload-macos.yml
+          # (events from the default GITHUB_TOKEN do not start new workflow runs).
+          token: ${{ secrets.PAT_TOKEN }}
