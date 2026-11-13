@@ -150,6 +150,25 @@ require_hardened_runtime() {
     done
 }
 
+# Every @rpath library the app links (Sparkle) must be embedded in Contents/Frameworks and reachable
+# through an LC_RPATH of @executable_path/../Frameworks. Without the runpath dyld only searches
+# /usr/lib/swift and the app aborts at launch with "Library not loaded", which neither codesign
+# nor notarization notices.
+require_embedded_frameworks() {
+    executable="$1/Contents/MacOS/$APP_NAME"
+    [ -f "$executable" ] || { printf '%s\n' "missing app executable: $executable" >&2; exit 1; }
+    if ! otool -l "$executable" | grep -q 'path @executable_path/../Frameworks '; then
+        printf '%s\n' "app executable lacks the @executable_path/../Frameworks runpath" >&2
+        exit 1
+    fi
+    for library in $(otool -L "$executable" | awk '$1 ~ /^@rpath\// { sub(/^@rpath\//, "", $1); print $1 }' | sort -u); do
+        [ -e "$1/Contents/Frameworks/$library" ] || {
+            printf '%s\n' "linked library is not embedded: @rpath/$library" >&2
+            exit 1
+        }
+    done
+}
+
 # Sparkle's nested helpers (installer and downloader XPC services, Autoupdate, Updater.app) ship
 # ad-hoc signed, and Xcode re-signs only the framework around them. Notarization needs every
 # executable signed with the Developer ID, the hardened runtime and a secure timestamp, so sign
@@ -262,6 +281,7 @@ rm -rf "$app"
 "$@"
 
 [ -d "$app" ] || { printf '%s\n' "missing built app: $app" >&2; exit 1; }
+require_embedded_frameworks "$app"
 
 if [ "$SIGNING_MODE" = signed ]; then
     resign_sparkle "$app"
