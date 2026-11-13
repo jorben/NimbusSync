@@ -150,6 +150,27 @@ require_hardened_runtime() {
     done
 }
 
+# Sparkle's nested helpers (installer and downloader XPC services, Autoupdate, Updater.app) ship
+# ad-hoc signed, and Xcode re-signs only the framework around them. Notarization needs every
+# executable signed with the Developer ID, the hardened runtime and a secure timestamp, so sign
+# them inside out, then reseal the framework and the app (keeping the app's entitlements and its
+# embedded provisioning profile). `codesign --verify --deep` accepts the ad-hoc helpers, so this
+# is the only place that catches them; build-and-upload-macos.yml checks the result.
+resign_sparkle() {
+    sparkle="$1/Contents/Frameworks/Sparkle.framework"
+    [ -d "$sparkle" ] || return 0
+    helpers="$sparkle/Versions/B"
+    for helper in "$helpers/XPCServices/Installer.xpc" "$helpers/XPCServices/Downloader.xpc" "$helpers/Autoupdate" "$helpers/Updater.app"; do
+        [ -e "$helper" ] || { printf '%s\n' "missing Sparkle helper: $helper" >&2; exit 1; }
+        # The downloader keeps its own sandbox entitlements.
+        codesign --force --timestamp --options runtime --preserve-metadata=entitlements \
+            --sign "$CODE_SIGN_IDENTITY" "$helper"
+    done
+    codesign --force --timestamp --options runtime --sign "$CODE_SIGN_IDENTITY" "$sparkle"
+    codesign --force --timestamp --options runtime --preserve-metadata=entitlements,requirements,flags \
+        --sign "$CODE_SIGN_IDENTITY" "$1"
+}
+
 external_evidence_scan() {
     if [ -n "${NIMBUSSYNC_EXTERNAL_EVIDENCE:-}" ]; then
         case "${NIMBUSSYNC_REQUIRE_GO:-0}" in
@@ -243,6 +264,7 @@ rm -rf "$app"
 [ -d "$app" ] || { printf '%s\n' "missing built app: $app" >&2; exit 1; }
 
 if [ "$SIGNING_MODE" = signed ]; then
+    resign_sparkle "$app"
     codesign --verify --deep --strict --verbose=2 "$app"
     if [ "$CONFIGURATION" = Release ]; then
         require_hardened_runtime "$app"
