@@ -7,6 +7,27 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for NimbusSync</description>
     <language>en</language>
     <item>
+      <title>NimbusSync 0.1.2-rc.4</title>
+      <pubDate>Sat, 14 Nov 2026 10:00:32 GMT</pubDate>
+      <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.4</link>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>0.1.2-rc.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:channel>beta</sparkle:channel>
+      <sparkle:fullReleaseNotesLink>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.4</sparkle:fullReleaseNotesLink>
+      <description sparkle:format="markdown">### :sparkles: New Features
+- [`22641c5`](https://github.com/jorben/NimbusSync/commit/22641c5c545e9ae4958d1ca6f9d0d268b51a30a4) - **i18n**: ✨ Add English and Simplified Chinese localization *(commit by @jorben)*
+- [`d681f0c`](https://github.com/jorben/NimbusSync/commit/d681f0c357acfdde99a82ebcadaa04bac2f9e56e) - **ui**: ✨ Add Check for Updates to About page *(commit by @jorben)*
+
+### :recycle: Refactors
+- [`b96c86c`](https://github.com/jorben/NimbusSync/commit/b96c86c4c4366e5e59af93e889f8533fbe8b0d88) - **ui**: ♻️ Refine About page layout *(commit by @jorben)*
+- [`a5ec8da`](https://github.com/jorben/NimbusSync/commit/a5ec8dad14d3eb316847c6ca431b53c59c042d6b) - **ui**: ♻️ Move version badge beside app name *(commit by @jorben)*
+
+### :wrench: Chores
+- [`f9ba1b5`](https://github.com/jorben/NimbusSync/commit/f9ba1b59018ca7f312d687907373625011909c21) - **i18n**: 🔧 Add isolated localization preview tool *(commit by @jorben)*</description>
+      <enclosure url="https://github.com/jorben/NimbusSync/releases/download/0.1.2-rc.4/NimbusSync-0.1.2-rc.4.zip" length="14842104" type="application/octet-stream" sparkle:edSignature="efepwOeo5D5Q2v6hE9jX8kn1clreu2TMZ6+sjRZlTrlJesjHFowoEcBO1KjAsbTrCW7ZIalBL1tdhyPuWYMHBA=="></enclosure>
+    </item>
+    <item>
       <title>NimbusSync 0.1.2-rc.3</title>
       <pubDate>Sat, 14 Nov 2026 09:48:07 GMT</pubDate>
       <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.3</link>
@@ -377,6 +398,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: cSFaMBAQtbMOxasAcmgSqFRcI3ek1Y49JvSB1ZwfApKmHOj7PuvXZcjrlve5m20Cw9c7WYrNRFjCecigIGtVDw==
-length: 55631
+edSignature: +uAeYVrRjDVeo2dN5T9IN5NuBKxCQJDbAsUvK158s0szmKOj36YpYHoaaDalvwOQPP2xQNhuZOknaWWGcZthCA==
+length: 57492
 -->
