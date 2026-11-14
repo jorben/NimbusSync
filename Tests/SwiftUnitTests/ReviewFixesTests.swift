@@ -9,7 +9,7 @@ import CloudreveFileProviderKit
 /// Regression tests for the review findings: capability baseline, shared item
 /// mapping, metadata versions, xattr policy, replayable failures and
 /// automatic conflict copies.
-final class ReviewFixesTests: XCTestCase {
+final class ReviewFixesTests: EnglishLocalizationTestCase {
     private var cleanup: [URL] = []
 
     override func tearDown() {

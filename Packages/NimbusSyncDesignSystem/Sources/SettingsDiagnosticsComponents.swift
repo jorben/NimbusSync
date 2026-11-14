@@ -1,6 +1,12 @@
 import SwiftUI
 import CloudreveDomainKit
 
+public enum SettingsDiagnosticsText {
+    public static func logFolderAccessibilityLabel(_ path: String?) -> String {
+        L10n.tr("Log folder \(path ?? L10n.tr("unavailable"))")
+    }
+}
+
 /// A Domain's connection to its Cloudreve server, as Settings shows it. Kept free of the event
 /// module so the design system stays a leaf; the app maps its live-update state into this.
 public struct ServerConnectionDisplay: Equatable, Sendable {
@@ -17,12 +23,12 @@ public struct ServerConnectionDisplay: Equatable, Sendable {
 
         public var title: String {
             switch self {
-            case .connected: "Connected"
-            case .connecting: "Connecting…"
-            case .reconnecting: "Reconnecting"
-            case .offline: "Offline"
-            case .authorizationRequired: "Authorization required"
-            case .notConnected: "Not connected"
+            case .connected: L10n.tr("Connected")
+            case .connecting: L10n.tr("Connecting…")
+            case .reconnecting: L10n.tr("Reconnecting")
+            case .offline: L10n.tr("Offline")
+            case .authorizationRequired: L10n.tr("Authorization required")
+            case .notConnected: L10n.tr("Not connected")
             }
         }
 
@@ -64,16 +70,17 @@ public struct ServerConnectionDisplay: Equatable, Sendable {
         switch kind {
         case .connected:
             guard let since else { return nil }
-            return "Since \(CompactTimestamp.string(for: since, relativeTo: now))"
+            return L10n.tr("Since \(CompactTimestamp.string(for: since, relativeTo: now))")
         case .connecting, .reconnecting, .offline, .authorizationRequired, .notConnected:
             guard let lastConnectedAt else { return nil }
-            return "Last connected \(CompactTimestamp.string(for: lastConnectedAt, relativeTo: now))"
+            return L10n.tr("Last connected \(CompactTimestamp.string(for: lastConnectedAt, relativeTo: now))")
         }
     }
 }
 
 /// A compact colored dot plus label, for a Domain row.
 public struct ServerConnectionIndicator: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let connection: ServerConnectionDisplay
 
     public init(connection: ServerConnectionDisplay) {
@@ -97,6 +104,7 @@ public struct ServerConnectionIndicator: View {
 
 /// One Domain's server connection, for the Diagnostics page.
 public struct ServerConnectionRow: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let displayName: String
     public let origin: String
     public let connection: ServerConnectionDisplay
@@ -206,6 +214,7 @@ public struct LogTextView: View {
 
 /// A thin bar plus one caption line for a Domain's running full check.
 public struct DomainCheckProgressView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let progress: DomainCheckProgress
 
     public init(progress: DomainCheckProgress) {
@@ -237,15 +246,15 @@ public struct DomainCheckProgressView: View {
     /// when a first check has nothing to estimate against.
     public static func summary(_ progress: DomainCheckProgress) -> String {
         let phase = switch progress.phase {
-        case .scanningFiles: "Checking files"
-        case .scanningTrash: "Checking trash"
-        case .applyingDeletions: "Finishing up"
+        case .scanningFiles: L10n.tr("Checking files")
+        case .scanningTrash: L10n.tr("Checking trash")
+        case .applyingDeletions: L10n.tr("Finishing up")
         }
-        let scanned = progress.scannedItems.formatted()
-        guard let fraction = progress.estimatedFraction else { return "\(phase) · \(scanned) items" }
+        let scanned = progress.scannedItems.formatted(.number.locale(L10n.locale))
+        guard let fraction = progress.estimatedFraction else { return "\(phase) · \(L10n.tr("\(progress.scannedItems) items"))" }
         let percent = Int((fraction * 100).rounded(.down))
         if progress.phase == .applyingDeletions { return "\(phase) · \(percent)%" }
-        return "\(phase) · \(scanned) of ~\(progress.expectedItems.formatted()) · \(percent)%"
+        return L10n.tr("\(phase) · \(scanned) of ~\(progress.expectedItems.formatted(.number.locale(L10n.locale))) · \(percent)%")
     }
 }
 

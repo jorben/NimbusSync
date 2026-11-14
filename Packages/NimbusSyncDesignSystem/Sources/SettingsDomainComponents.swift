@@ -17,20 +17,21 @@ public struct SettingsDomainsSummary: Equatable, Sendable {
     }
 
     public var issuesText: String {
-        needsAttention == 0 ? "No issues" : "\(needsAttention) need\(needsAttention == 1 ? "s" : "") attention"
+        needsAttention == 0 ? L10n.tr("No issues") : L10n.tr("\(needsAttention) need attention")
     }
 
     /// The whole line as one sentence, for VoiceOver and tests.
     public var text: String {
         var parts: [String] = []
-        if syncing > 0 { parts.append("\(syncing) syncing") }
-        if upToDate > 0 { parts.append("\(upToDate) up to date") }
+        if syncing > 0 { parts.append(L10n.tr("\(syncing) syncing")) }
+        if upToDate > 0 { parts.append(L10n.tr("\(upToDate) up to date")) }
         parts.append(issuesText)
         return parts.joined(separator: " • ")
     }
 }
 
 public struct SettingsDomainsSummaryLine: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let summary: SettingsDomainsSummary
 
     public init(summary: SettingsDomainsSummary) {
@@ -40,11 +41,11 @@ public struct SettingsDomainsSummaryLine: View {
     public var body: some View {
         HStack(spacing: 10) {
             if summary.syncing > 0 {
-                item(symbol: "arrow.triangle.2.circlepath", tint: NimbusSyncDesignTokens.brandColor, text: "\(summary.syncing) syncing")
+                item(symbol: "arrow.triangle.2.circlepath", tint: NimbusSyncDesignTokens.brandColor, text: L10n.tr("\(summary.syncing) syncing"))
                 separator
             }
             if summary.upToDate > 0 {
-                item(symbol: "checkmark.circle.fill", tint: .green, text: "\(summary.upToDate) up to date")
+                item(symbol: "checkmark.circle.fill", tint: .green, text: L10n.tr("\(summary.upToDate) up to date"))
                 separator
             }
             if summary.needsAttention > 0 {
@@ -83,16 +84,16 @@ public enum SettingsDomainText {
     /// "Last synced just now", "Last synced 2 min. ago", "Last synced Today, 09:12",
     /// "Last synced Yesterday, 18:40", "Last synced Nov 3, 09:12"; "Not synced yet" without a date.
     public static func lastSynced(_ date: Date?, now: Date = Date(), calendar: Calendar = .current) -> String {
-        guard let date else { return "Not synced yet" }
+        guard let date else { return L10n.tr("Not synced yet") }
         let elapsed = now.timeIntervalSince(date)
-        if elapsed < 60 { return "Last synced just now" }
-        if elapsed < 3600 { return "Last synced \(TaskDisplay.relativeTime(date, relativeTo: now))" }
-        let time = date.formatted(date: .omitted, time: .shortened)
-        if calendar.isDate(date, inSameDayAs: now) { return "Last synced Today, \(time)" }
+        if elapsed < 60 { return L10n.tr("Last synced just now") }
+        if elapsed < 3600 { return L10n.tr("Last synced \(TaskDisplay.relativeTime(date, relativeTo: now))") }
+        let time = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale))
+        if calendar.isDate(date, inSameDayAs: now) { return L10n.tr("Last synced Today, \(time)") }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) {
-            return "Last synced Yesterday, \(time)"
+            return L10n.tr("Last synced Yesterday, \(time)")
         }
-        return "Last synced \(date.formatted(date: .abbreviated, time: .shortened))"
+        return L10n.tr("Last synced \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(L10n.locale)))")
     }
 
     /// A local path with the user's home folder written as "~".
@@ -146,6 +147,7 @@ public struct SettingsCard<Content: View>: View {
 /// One Domain on the Settings Domains page: who it is and how it is doing on top, a running
 /// check underneath when there is one, and where it lives locally along the bottom.
 public struct SettingsDomainCard<MenuItems: View>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let domain: DomainDescriptor
     public let connection: ServerConnectionDisplay
     public let progress: DomainCheckProgress?
@@ -412,7 +414,7 @@ public struct SettingsDomainCard<MenuItems: View>: View {
         DetailItem(symbol: "clock") {
             Text(SettingsDomainText.lastSynced(lastSyncedAt))
                 .lineLimit(1)
-                .help(lastSyncedAt.map { $0.formatted(date: .complete, time: .standard) } ?? "")
+                .help(lastSyncedAt.map { $0.formatted(Date.FormatStyle(date: .complete, time: .standard).locale(L10n.locale)) } ?? "")
         }
         .fixedSize()
     }
@@ -421,6 +423,7 @@ public struct SettingsDomainCard<MenuItems: View>: View {
 /// A Domain's server connection as a single coloured dot; the words appear on hover and are
 /// read by VoiceOver.
 public struct ServerConnectionDot: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let connection: ServerConnectionDisplay
 
     public init(connection: ServerConnectionDisplay) {
@@ -525,6 +528,7 @@ public struct SettingsLinkButton: View {
 
 /// The card's running full check: what it is doing and how long is left, over a bar.
 public struct SettingsCheckProgressView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let progress: DomainCheckProgress
 
     public init(progress: DomainCheckProgress) {
@@ -674,12 +678,22 @@ public enum FinderIntegrationState: Equatable, Sendable {
     /// Every registered location is switched off in System Settings.
     case off
 
-    public var title: String {
+    /// Stable English state for diagnostics; UI uses `title`.
+    public var diagnosticTitle: String {
         switch self {
         case .unknown: "Checking…"
         case .notSetUp: "Not set up"
         case .on: "On"
         case .off: "Off"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .unknown: L10n.tr("Checking…")
+        case .notSetUp: L10n.tr("Not set up")
+        case .on: L10n.tr("On")
+        case .off: L10n.tr("Off")
         }
     }
 
@@ -694,6 +708,7 @@ public enum FinderIntegrationState: Equatable, Sendable {
 
 /// The sidebar's foot: Finder's icon and whether NimbusSync appears there.
 public struct FinderIntegrationFooter: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let state: FinderIntegrationState
     public let onOpenSettings: () -> Void
 
@@ -715,7 +730,8 @@ public struct FinderIntegrationFooter: View {
                 HStack(spacing: 6) {
                     Text("Finder integration")
                         .font(.callout.weight(.medium))
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     HStack(spacing: 4) {
                         Circle().fill(state.tint).frame(width: 7, height: 7)
@@ -817,7 +833,9 @@ public enum AppAppearance: String, CaseIterable, Identifiable, Sendable {
 
     public var id: Self { self }
 
-    public var title: String {
+    public var title: String { L10n.text(sourceTitle) }
+
+    public var sourceTitle: String {
         switch self {
         case .system: "System"
         case .light: "Light"

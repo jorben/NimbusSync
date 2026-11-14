@@ -3,6 +3,7 @@ import AppKit
 import CloudreveDomainKit
 
 public struct MenuBarPopoverView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let domains: [DomainDescriptor]
     public let tasks: [TaskDisplay]
     public let recentTasks: [TaskDisplay]
@@ -223,7 +224,7 @@ public struct MenuBarPopoverView: View {
     }
 
     static func issueTitle(count: Int) -> String {
-        "\(count) file\(count == 1 ? "" : "s") couldn't sync"
+        L10n.tr("\(count) files couldn't sync")
     }
 
     /// "data@cloud · Network error" when every issue shares a Domain and a reason.
@@ -233,9 +234,9 @@ public struct MenuBarPopoverView: View {
         let domainPart: String? = switch domainNames.count {
         case 0: nil
         case 1: domainNames.first
-        default: "\(domainNames.count) domains"
+        default: L10n.tr("\(domainNames.count) domains")
         }
-        let reasonPart: String? = reasons.count == 1 ? reasons.first : (reasons.isEmpty ? nil : "Several reasons")
+        let reasonPart: String? = reasons.count == 1 ? reasons.first : (reasons.isEmpty ? nil : L10n.tr("Several reasons"))
         return [domainPart, reasonPart].compactMap { $0 }.joined(separator: " · ")
     }
 
@@ -386,8 +387,8 @@ public struct MenuBarPopoverView: View {
                 PopoverSegmentedControl(
                     selection: Binding(get: { effectiveFilter }, set: { activityFilter = $0 }),
                     segments: [
-                        (ActivityFilter.issues, issues.isEmpty ? "Issues" : "Issues \(issues.count)"),
-                        (ActivityFilter.all, "All"),
+                        (ActivityFilter.issues, issues.isEmpty ? L10n.tr("Issues") : L10n.tr("Issues \(issues.count)")),
+                        (ActivityFilter.all, L10n.tr("All")),
                     ]
                 )
             }
@@ -404,7 +405,7 @@ public struct MenuBarPopoverView: View {
                     .frame(maxWidth: .infinity)
                     .padding(NimbusSyncDesignTokens.spacing12)
                 } else {
-                    ForEach(Self.groupedByDay(visible), id: \.title) { group in
+                    ForEach(Self.groupedByDay(visible), id: \.kind) { group in
                         dayHeader(group.title)
                         ForEach(group.tasks) { task in
                             activityRow(task)
@@ -415,7 +416,7 @@ public struct MenuBarPopoverView: View {
                     }
                     if hidden > 0 || showsAllActivity && rows.count > Self.activityRowLimit {
                         Divider()
-                        Button(hidden > 0 ? "Show \(hidden) more" : "Show less") {
+                        Button(hidden > 0 ? L10n.tr("Show \(hidden) more") : L10n.tr("Show less")) {
                             showsAllActivity.toggle()
                         }
                         .buttonStyle(.plain)
@@ -486,11 +487,11 @@ public struct MenuBarPopoverView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .help(task.date.map { $0.formatted(date: .complete, time: .standard) } ?? "")
+                    .help(task.date.map { $0.formatted(Date.FormatStyle(date: .complete, time: .standard).locale(L10n.locale)) } ?? "")
                 if let progress = task.progress, task.canCancel {
                     PopoverProgressBar(fraction: progress)
                         .padding(.top, 2)
-                        .accessibilityValue(Text("\(Int(progress * 100)) percent"))
+                        .accessibilityValue(Text(progress.formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale))))
                 }
             }
 
@@ -533,28 +534,34 @@ public struct MenuBarPopoverView: View {
     }
 
     struct DayGroup {
-        let title: String
+        enum Kind { case today, yesterday, earlier }
+        let kind: Kind
         let tasks: [TaskDisplay]
+        var title: String {
+            switch kind {
+            case .today: L10n.tr("Today")
+            case .yesterday: L10n.tr("Yesterday")
+            case .earlier: L10n.tr("Earlier")
+            }
+        }
     }
 
     /// Consecutive rows grouped under Today, Yesterday or Earlier, keeping their order.
     static func groupedByDay(_ tasks: [TaskDisplay], now: Date = Date(), calendar: Calendar = .current) -> [DayGroup] {
         var groups: [DayGroup] = []
         for task in tasks {
-            let title: String
+            let kind: DayGroup.Kind
             if let date = task.date, calendar.isDate(date, inSameDayAs: now) {
-                title = "Today"
+                kind = .today
             } else if let date = task.date, calendar.isDateInYesterday(date) {
-                title = "Yesterday"
+                kind = .yesterday
             } else {
-                title = "Earlier"
+                kind = .earlier
             }
-            if let last = groups.last, last.title == title {
-                groups[groups.count - 1] = DayGroup(title: title, tasks: last.tasks + [task])
-            } else if let index = groups.firstIndex(where: { $0.title == title }) {
-                groups[index] = DayGroup(title: title, tasks: groups[index].tasks + [task])
+            if let index = groups.firstIndex(where: { $0.kind == kind }) {
+                groups[index] = DayGroup(kind: kind, tasks: groups[index].tasks + [task])
             } else {
-                groups.append(DayGroup(title: title, tasks: [task]))
+                groups.append(DayGroup(kind: kind, tasks: [task]))
             }
         }
         return groups
@@ -596,7 +603,7 @@ public struct MenuBarPopoverView: View {
 
     private func sectionHeading<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack {
-            Text(title)
+            Text(L10n.text(title))
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: NimbusSyncDesignTokens.spacing8)
@@ -613,6 +620,7 @@ public struct MenuBarPopoverView: View {
 /// The popover's version of a running full check: what it is doing on the left, how far and how
 /// long on the right, and a bar underneath.
 struct PopoverCheckProgressView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let progress: DomainCheckProgress
 
     var body: some View {
@@ -650,19 +658,19 @@ public enum PopoverCheckProgressText {
     public static func activity(_ progress: DomainCheckProgress) -> String {
         switch progress.phase {
         case .applyingDeletions:
-            return "Finishing up"
+            return L10n.tr("Finishing up")
         case .scanningFiles, .scanningTrash:
-            let phase = progress.phase == .scanningFiles ? "Checking files" : "Checking trash"
-            let scanned = progress.scannedItems.formatted()
-            guard progress.estimatedFraction != nil else { return "\(phase) — \(scanned) items" }
-            return "\(phase) — \(scanned) of about \(progress.expectedItems.formatted())"
+            let phase = progress.phase == .scanningFiles ? L10n.tr("Checking files") : L10n.tr("Checking trash")
+            let scanned = progress.scannedItems.formatted(.number.locale(L10n.locale))
+            guard progress.estimatedFraction != nil else { return "\(phase) — \(L10n.tr("\(progress.scannedItems) items"))" }
+            return L10n.tr("\(phase) — \(scanned) of about \(progress.expectedItems.formatted(.number.locale(L10n.locale)))")
         }
     }
 
     /// "40% · about 3 min left", "40%" until a time estimate means something, nil without a total.
     public static func estimate(_ progress: DomainCheckProgress, now: Date = Date()) -> String? {
         guard let fraction = progress.estimatedFraction else { return nil }
-        let percent = "\(Int((fraction * 100).rounded(.down)))%"
+        let percent = fraction.formatted(.percent.precision(.fractionLength(0)).rounded(rule: .down).locale(L10n.locale))
         guard let remaining = remainingTime(progress, now: now) else { return percent }
         return "\(percent) · \(remaining)"
     }
@@ -672,11 +680,11 @@ public enum PopoverCheckProgressText {
         let elapsed = now.timeIntervalSince(progress.startedAt)
         guard elapsed >= 10 else { return nil }
         let seconds = elapsed * (1 - fraction) / fraction
-        if seconds < 60 { return "less than a minute left" }
+        if seconds < 60 { return L10n.tr("less than a minute left") }
         let minutes = Int((seconds / 60).rounded(.up))
-        if minutes < 90 { return "about \(minutes) min left" }
+        if minutes < 90 { return L10n.tr("about \(minutes) min left") }
         let hours = Int((seconds / 3600).rounded())
-        return "about \(hours) hr left"
+        return L10n.tr("about \(hours) hr left")
     }
 }
 
@@ -781,6 +789,7 @@ struct PopoverCard<Content: View>: View {
 
 /// A tinted callout with one action on the right.
 struct PopoverBanner: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let symbol: String
     let title: String
     let detail: String
@@ -798,15 +807,15 @@ struct PopoverBanner: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(L10n.text(title))
                     .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
                 if !detail.isEmpty {
-                    Text(detail)
+                    Text(L10n.text(detail))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .accessibilityElement(children: .combine)
@@ -819,7 +828,7 @@ struct PopoverBanner: View {
                         Image(systemName: actionSymbol)
                             .foregroundStyle(tint)
                             .accessibilityHidden(true)
-                        Text(actionTitle)
+                        Text(L10n.text(actionTitle))
                     }
                 }
                 .buttonStyle(PopoverBannerButtonStyle())

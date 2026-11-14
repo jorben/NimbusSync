@@ -96,16 +96,16 @@ public enum AppUpdateStatus: Equatable, Sendable {
     public var bannerTitle: String? {
         switch self {
         case .none: nil
-        case .available(let version): "\(AppIdentity.displayName) \(version) is available"
-        case .readyToInstall(let version): "\(AppIdentity.displayName) \(version) is ready"
+        case .available(let version): L10n.tr("\(AppIdentity.displayName) \(version) is available")
+        case .readyToInstall(let version): L10n.tr("\(AppIdentity.displayName) \(version) is ready")
         }
     }
 
     public var bannerDetail: String {
         switch self {
         case .none: ""
-        case .available: "See what's new and install the update."
-        case .readyToInstall: "Restart to finish updating, or it installs when you quit."
+        case .available: L10n.tr("See what's new and install the update.")
+        case .readyToInstall: L10n.tr("Restart to finish updating, or it installs when you quit.")
         }
     }
 
@@ -119,8 +119,8 @@ public enum AppUpdateStatus: Equatable, Sendable {
     public var bannerActionTitle: String? {
         switch self {
         case .none: nil
-        case .available: "View"
-        case .readyToInstall: "Restart"
+        case .available: L10n.tr("View")
+        case .readyToInstall: L10n.tr("Restart")
         }
     }
 
@@ -128,28 +128,28 @@ public enum AppUpdateStatus: Equatable, Sendable {
     public var accessibilitySuffix: String? {
         switch self {
         case .none: nil
-        case .available: "Update available"
-        case .readyToInstall: "Update ready to install"
+        case .available: L10n.tr("Update available")
+        case .readyToInstall: L10n.tr("Update ready to install")
         }
     }
 }
 
 /// The text Settings › General shows under Check for Updates….
 public enum AppUpdateSettingsText {
-    public static func lastChecked(_ date: Date?, now: Date = Date(), locale: Locale = .current) -> String {
-        guard let date else { return "Never checked" }
+    public static func lastChecked(_ date: Date?, now: Date = Date(), locale: Locale = L10n.locale) -> String {
+        guard let date else { return L10n.tr("Never checked") }
         let formatter = RelativeDateTimeFormatter()
         formatter.locale = locale
         formatter.unitsStyle = .full
-        if now.timeIntervalSince(date) < 60 { return "Last checked just now" }
-        return "Last checked \(formatter.localizedString(for: date, relativeTo: now))"
+        if now.timeIntervalSince(date) < 60 { return L10n.tr("Last checked just now") }
+        return L10n.tr("Last checked \(formatter.localizedString(for: date, relativeTo: now))")
     }
 
     public static func unavailableReason(_ reason: AppUpdateConfiguration.Unavailability) -> String {
         switch reason {
-        case .disabledForBuild: "\(AppIdentity.displayName) development builds don't update themselves."
-        case .missingFeed: "This build has no update feed."
-        case .missingPublicKey: "This build has no update signing key."
+        case .disabledForBuild: L10n.tr("\(AppIdentity.displayName) development builds don't update themselves.")
+        case .missingFeed: L10n.tr("This build has no update feed.")
+        case .missingPublicKey: L10n.tr("This build has no update signing key.")
         }
     }
 }

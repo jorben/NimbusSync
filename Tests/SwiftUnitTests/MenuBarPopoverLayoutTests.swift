@@ -59,19 +59,19 @@ final class DomainIconTests: XCTestCase {
     }
 }
 
-final class TaskDisplayCaptionTests: XCTestCase {
+final class TaskDisplayCaptionTests: EnglishLocalizationTestCase {
     func testCaptionShowsTimeTodayAndDateOtherwise() {
         let now = Date()
         let today = TaskDisplay(id: UUID(), title: "a.txt", progress: nil, detail: "succeeded", state: "succeeded", date: now)
-        XCTAssertEqual(today.caption(relativeTo: now), "\(now.formatted(date: .omitted, time: .shortened)) · succeeded")
+        XCTAssertEqual(today.caption(relativeTo: now), "\(now.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale))) · succeeded")
         let earlier = now.addingTimeInterval(-3 * 24 * 3600)
-        XCTAssertEqual(TaskDisplay.caption(detail: "failed", date: earlier, relativeTo: now), "\(earlier.formatted(date: .abbreviated, time: .shortened)) · failed")
+        XCTAssertEqual(TaskDisplay.caption(detail: "failed", date: earlier, relativeTo: now), "\(earlier.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(L10n.locale))) · failed")
         XCTAssertEqual(TaskDisplay.caption(detail: "queued", date: nil, relativeTo: now), "queued")
     }
 }
 
 /// The popover's header line, issue rows and check progress read these, so their words stay stable.
-final class MenuBarPopoverTextTests: XCTestCase {
+final class MenuBarPopoverTextTests: EnglishLocalizationTestCase {
     private func domain(_ index: Int, status: DomainStatus) throws -> DomainDescriptor {
         let scope = try RemoteScope(origin: "https://cloud.example.com", accountID: "account", rootURI: "cloudreve://my/")
         var domain = DomainDescriptor(identifier: "crd-7777777\(index)-7777-4777-8777-777777777777", displayName: "Domain \(index)", scope: scope, rootRemoteID: "root\(index)", accountID: "account", secretReference: "ref")
@@ -85,7 +85,7 @@ final class MenuBarPopoverTextTests: XCTestCase {
         let healthy = MenuBarStatusSummary(domains: [try domain(0, status: .healthy), try domain(1, status: .healthy)], activeTaskCount: 0, hasActionableConflicts: false)
         XCTAssertEqual(healthy.subtitle, "All 2 domains up to date")
         let attention = MenuBarStatusSummary(domains: [try domain(0, status: .authExpired), try domain(1, status: .syncing)], activeTaskCount: 3, hasActionableConflicts: false)
-        XCTAssertEqual(attention.subtitle, "1 of 2 domains need attention")
+        XCTAssertEqual(attention.subtitle, "1 of 2 domains needs attention")
         XCTAssertEqual(MenuBarStatusSummary(domains: [], activeTaskCount: 0, hasActionableConflicts: false).subtitle, "No domains connected")
     }
 

@@ -7,7 +7,7 @@ import CloudreveStoreBridge
 
 /// The popover lists failures as issues with a retry button. A failure that later went through,
 /// or one the app cannot start again, must not sit there with a button that does nothing.
-final class TaskIssueTests: XCTestCase {
+final class TaskIssueTests: EnglishLocalizationTestCase {
     private let base = Date(timeIntervalSince1970: 1_800_000_000)
 
     func testDownloadFailureDisappearsOnceTheSameFileDownloads() {

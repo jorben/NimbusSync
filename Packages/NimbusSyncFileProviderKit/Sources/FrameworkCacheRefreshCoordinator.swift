@@ -3,10 +3,11 @@ import FileProvider
 import CloudreveDomainKit
 import CloudreveStoreBridge
 
-/// Refreshes Finder metadata only when the provider projection contract
+/// Refreshes Finder metadata when the projection contract or UI language
 /// changes. Content versions are left untouched, so a projection upgrade
 /// cannot cause an otherwise unchanged file to download again.
 public final class FrameworkCacheRefreshCoordinator: @unchecked Sendable {
+    public static let languagePreferenceKey = "projection.localization.language"
     private let store: SQLiteStateStore
     private let manager: NSFileProviderManager?
     private let domainIdentifier: String
@@ -22,15 +23,17 @@ public final class FrameworkCacheRefreshCoordinator: @unchecked Sendable {
     }
 
     @discardableResult
-    public func refreshIfNeeded() async throws -> Bool {
+    public func refreshIfNeeded(language: AppLanguage = L10n.language) async throws -> Bool {
         let revisions = try store.projectionRevisionState()
-        guard revisions.lastApplied < max(revisions.current, ProjectionSchema.currentRevision) else { return true }
+        let previousLanguage = try store.preference(key: Self.languagePreferenceKey)
+        let pendingJob = try store.activeProjectionRefreshJob(domainIdentifier: domainIdentifier)
+        guard revisions.lastApplied < max(revisions.current, ProjectionSchema.currentRevision) || previousLanguage != language.rawValue || pendingJob != nil else { return true }
         let targetRevision = max(revisions.current, ProjectionSchema.currentRevision)
         // Advance the codec revision before emitting refresh rows so anchors
         // from the previous projection cannot be mistaken for an empty delta
         // while this bounded job is in progress.
         try store.setProjectionSchemaRevision(targetRevision)
-        let job = try store.activeProjectionRefreshJob(domainIdentifier: domainIdentifier) ?? store.beginProjectionRefresh(domainIdentifier: domainIdentifier, targetRevision: targetRevision, scope: "working_set", fallbackEnabled: false)
+        let job = try pendingJob ?? store.beginProjectionRefresh(domainIdentifier: domainIdentifier, targetRevision: targetRevision, scope: "working_set", fallbackEnabled: false)
         var cursor = job.cursor
         do {
             for _ in 0..<maximumPagesPerRun {
@@ -43,6 +46,7 @@ public final class FrameworkCacheRefreshCoordinator: @unchecked Sendable {
                     // old applied revision forces the next worker to drain
                     // the pending outbox again.
                     try store.completeProjectionRefresh(jobID: job.jobID)
+                    try store.setPreference(key: Self.languagePreferenceKey, value: language.rawValue)
                     return true
                 }
                 let nextCursor = items.last?.itemIdentifier
@@ -51,6 +55,7 @@ public final class FrameworkCacheRefreshCoordinator: @unchecked Sendable {
                 if items.count < pageSize {
                     try await signal()
                     try store.completeProjectionRefresh(jobID: job.jobID)
+                    try store.setPreference(key: Self.languagePreferenceKey, value: language.rawValue)
                     return true
                 }
             }

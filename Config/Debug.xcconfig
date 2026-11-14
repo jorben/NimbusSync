@@ -11,6 +11,7 @@ NIMBUSSYNC_APP_NAME = NimbusSyncDev
 // System Settings show at a glance which build is which.
 NIMBUSSYNC_APP_ICON_NAME = AppIconDev
 SWIFT_VERSION = 6.0
+SWIFT_EMIT_LOC_STRINGS = YES
 MACOSX_DEPLOYMENT_TARGET = 13.0
 // CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
 MARKETING_VERSION = 0.1.0

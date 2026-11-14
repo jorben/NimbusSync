@@ -36,7 +36,7 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
     public let isSharedByCurrentUser: Bool
     public let decorations: [NSFileProviderItemDecorationIdentifier]?
 
-    public init(model: RemoteItem, isDownloaded: Bool = false, hasConflict: Bool = false, projection: ItemProjection? = nil, authenticated: Bool? = nil) {
+    public init(model: RemoteItem, isDownloaded: Bool = false, hasConflict: Bool = false, projection: ItemProjection? = nil, authenticated: Bool? = nil, language: AppLanguage = L10n.language) {
         self.model = model
         self.itemIdentifier = NSFileProviderItemIdentifier(model.itemIdentifier == NSFileProviderItemIdentifier.rootContainer.rawValue ? model.itemIdentifier : model.itemIdentifier)
         self.parentItemIdentifier = NSFileProviderItemIdentifier(model.parentIdentifier ?? NSFileProviderItemIdentifier.rootContainer.rawValue)
@@ -95,6 +95,7 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
         // turned every completed download into a journaled metadata change.
         let projectionBoundary = VersionHasher.digest([
             Data(String(ProjectionSchema.currentRevision).utf8),
+            Data(language.rawValue.utf8),
             Data(explicitKeepPolicy.rawValue.utf8),
             Data(effectiveKeepPolicy.rawValue.utf8),
             Data((metadataMoveAllowed ? "metadata-move" : "metadata-fixed").utf8),
@@ -103,6 +104,10 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
         ])
         self.itemVersion = NSFileProviderItemVersion(contentVersion: model.version.content, metadataVersion: VersionHasher.digest([model.version.metadata, projectionBoundary]))
         self.userInfo = [
+            FinderLocalization.languageUserInfoKey: language.rawValue,
+            "localizedConflictLabel": L10n.tr("Conflict", language: language),
+            "localizedSyncErrorLabel": L10n.tr("Sync Error", language: language),
+            "localizedKeepDownloadedLabel": L10n.tr("Keep Downloaded", language: language),
             "authenticated": projectedAuthenticated,
             "trashed": model.trashed,
             "tombstone": model.tombstone,
@@ -156,7 +161,7 @@ public final class NimbusSyncFileProviderItem: NSObject, NSFileProviderItem, NSF
 
     private static func error(for message: String?) -> Error? {
         guard let message, !message.isEmpty else { return nil }
-        return NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.cannotSynchronize.rawValue, userInfo: [NSLocalizedDescriptionKey: message])
+        return NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.cannotSynchronize.rawValue, userInfo: [NSLocalizedDescriptionKey: SyncErrorText.title(for: message) ?? message])
     }
 }
 
@@ -1361,7 +1366,8 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
             "io.github.jorben.nimbussync.allow-automatic-freeing",
             "io.github.jorben.nimbussync.remove-download"
         ]
-        guard supportedActions.contains(actionIdentifier.rawValue) else { completion.call(FileProviderErrorMapper.map(CoreFailure(code: .unsupportedMetadata, retryable: false))); return progress }
+        guard let canonicalAction = FinderLocalization.canonicalActionIdentifier(actionIdentifier.rawValue),
+              supportedActions.contains(canonicalAction) else { completion.call(FileProviderErrorMapper.map(CoreFailure(code: .unsupportedMetadata, retryable: false))); return progress }
         let task = Task { [weak self] in
             guard let self, !progress.isCancelled else { completion.call(FileProviderErrorMapper.map(CoreFailure(code: .cancelled, retryable: false))); return }
             do {
@@ -1370,10 +1376,10 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 completion.call(FileProviderErrorMapper.map(error))
                 return
             }
-            if actionIdentifier.rawValue == "io.github.jorben.nimbussync.keep-downloaded" || actionIdentifier.rawValue == "io.github.jorben.nimbussync.allow-automatic-freeing" {
+            if canonicalAction == "io.github.jorben.nimbussync.keep-downloaded" || canonicalAction == "io.github.jorben.nimbussync.allow-automatic-freeing" {
                 do {
                     guard let store = self.store else { throw CoreFailure(code: .database, retryable: false, userActionRequired: true) }
-                    let policy: KeepDownloadedPolicy = actionIdentifier.rawValue == "io.github.jorben.nimbussync.keep-downloaded" ? .keepDownloaded : .automatic
+                    let policy: KeepDownloadedPolicy = canonicalAction == "io.github.jorben.nimbussync.keep-downloaded" ? .keepDownloaded : .automatic
                     for identifier in itemIdentifiers {
                         guard !progress.isCancelled, !Task.isCancelled else {
                             throw CoreFailure(code: .cancelled, retryable: false)
@@ -1400,7 +1406,7 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
                 } catch { completion.call(FileProviderErrorMapper.map(error)) }
                 return
             }
-            if actionIdentifier.rawValue == "io.github.jorben.nimbussync.remove-download" {
+            if canonicalAction == "io.github.jorben.nimbussync.remove-download" {
                 do {
                     guard let manager = NSFileProviderManager(for: self.domain) else { throw CoreFailure(code: .database, retryable: true) }
                     for identifier in itemIdentifiers {

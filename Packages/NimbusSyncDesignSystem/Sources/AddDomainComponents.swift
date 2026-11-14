@@ -26,9 +26,9 @@ public enum AddDomainStep: Int, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .server: "Server"
-        case .signIn: "Sign in"
-        case .review: "Add to Finder"
+        case .server: L10n.tr("Server")
+        case .signIn: L10n.tr("Sign in")
+        case .review: L10n.tr("Add to Finder")
         }
     }
 }
@@ -47,7 +47,7 @@ public struct AddDomainReview: Equatable, Sendable {
 }
 
 public enum AddDomainText {
-    public static let windowTitle = "Add Domain"
+    public static var windowTitle: String { L10n.tr("Add Domain") }
 
     /// The typed address ready to check: trimmed, with "https://" added when no scheme was typed.
     public static func submittableOrigin(_ input: String) -> String {
@@ -60,13 +60,13 @@ public enum AddDomainText {
     public static func message(for code: CoreErrorCode) -> String? {
         switch code {
         case .unsupportedServer:
-            "NimbusSync couldn't find a Cloudreve 4.12 or later server at this address. Check the address, and that the server uses HTTPS."
+            L10n.tr("NimbusSync couldn't find a Cloudreve 4.12 or later server at this address. Check the address, and that the server uses HTTPS.")
         case .network:
-            "NimbusSync couldn't reach the server. Check the address and your internet connection."
+            L10n.tr("NimbusSync couldn't reach the server. Check the address and your internet connection.")
         case .authentication:
-            "Sign-in didn't finish. Try again, and allow NimbusSync access when your browser asks."
+            L10n.tr("Sign-in didn't finish. Try again, and allow NimbusSync access when your browser asks.")
         case .permissionDenied:
-            "Your account doesn't have access to this folder on the server."
+            L10n.tr("Your account doesn't have access to this folder on the server.")
         default:
             nil
         }
@@ -75,14 +75,14 @@ public enum AddDomainText {
     public static func message(forURLError code: URLError.Code) -> String? {
         switch code {
         case .notConnectedToInternet:
-            "Your Mac is offline. Connect to the internet and try again."
+            L10n.tr("Your Mac is offline. Connect to the internet and try again.")
         case .cannotFindHost, .dnsLookupFailed:
-            "NimbusSync couldn't find this server. Check the address."
+            L10n.tr("NimbusSync couldn't find this server. Check the address.")
         case .cannotConnectToHost, .timedOut, .networkConnectionLost:
-            "The server didn't respond. Check the address, or try again later."
+            L10n.tr("The server didn't respond. Check the address, or try again later.")
         case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
              .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot:
-            "NimbusSync couldn't connect securely. The server's HTTPS certificate may not be valid."
+            L10n.tr("NimbusSync couldn't connect securely. The server's HTTPS certificate may not be valid.")
         default:
             nil
         }
@@ -94,6 +94,7 @@ public enum AddDomainText {
 /// The whole Add Domain window. The step follows from what the app knows: a review when sign-in
 /// finished, signing in while authorization runs, otherwise the address.
 public struct AddDomainView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @Binding public var origin: String
     @Binding public var displayName: String
     public let authorizationPhase: AddDomainAuthorizationPhase?
@@ -200,9 +201,9 @@ public struct AddDomainView: View {
 
     private var subtitle: String {
         switch step {
-        case .server: "Its files will appear in your Finder sidebar."
-        case .signIn: "NimbusSync never sees your password."
-        case .review: "Signed in. Check how it will appear on your Mac."
+        case .server: L10n.tr("Its files will appear in your Finder sidebar.")
+        case .signIn: L10n.tr("NimbusSync never sees your password.")
+        case .review: L10n.tr("Signed in. Check how it will appear on your Mac.")
         }
     }
 
@@ -219,7 +220,7 @@ public struct AddDomainView: View {
                         .autocorrectionDisabled()
                         .focused($focusedField, equals: .origin)
                         .onSubmit(submitOrigin)
-                        .accessibilityHint(Text(errorMessage ?? "The address of your Cloudreve server"))
+                        .accessibilityHint(Text(errorMessage ?? L10n.tr("The address of your Cloudreve server")))
                 }
                 .padding(.horizontal, NimbusSyncDesignTokens.spacing16)
                 .padding(.vertical, NimbusSyncDesignTokens.spacing12)
@@ -266,17 +267,17 @@ public struct AddDomainView: View {
 
     private func signInTitle(host: String) -> String {
         switch authorizationPhase {
-        case .checkingServer, nil: "Checking \(host)…"
-        case .waitingForBrowser: "Continue in your browser"
-        case .finishingSignIn: "Finishing sign-in…"
+        case .checkingServer, nil: L10n.tr("Checking \(host)…")
+        case .waitingForBrowser: L10n.tr("Continue in your browser")
+        case .finishingSignIn: L10n.tr("Finishing sign-in…")
         }
     }
 
     private func signInDetail(host: String) -> String {
         switch authorizationPhase {
-        case .checkingServer, nil: "Making sure it's a Cloudreve server NimbusSync can sync with."
-        case .waitingForBrowser: "Sign in to \(host) in the page that opened, and allow NimbusSync access. This window moves on by itself when you're done."
-        case .finishingSignIn: "Getting your account details from \(host)."
+        case .checkingServer, nil: L10n.tr("Making sure it's a Cloudreve server NimbusSync can sync with.")
+        case .waitingForBrowser: L10n.tr("Sign in to \(host) in the page that opened, and allow NimbusSync access. This window moves on by itself when you're done.")
+        case .finishingSignIn: L10n.tr("Getting your account details from \(host).")
         }
     }
 
@@ -375,7 +376,7 @@ public struct AddDomainView: View {
                             if isAdding {
                                 ProgressView().controlSize(.small)
                             }
-                            Text(isAdding ? "Adding…" : "Add to Finder")
+                            Text(isAdding ? L10n.tr("Adding…") : L10n.tr("Add to Finder"))
                         }
                         .frame(minWidth: 96)
                     }
@@ -426,6 +427,7 @@ public struct AddDomainView: View {
 
 /// Three numbered steps joined by lines; finished steps show a check.
 public struct AddDomainStepper: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let current: AddDomainStep
     @Environment(\.colorScheme) private var colorScheme
 

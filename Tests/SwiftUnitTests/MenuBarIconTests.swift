@@ -5,7 +5,7 @@ import CloudreveDomainKit
 import CloudreveProductKit
 
 @MainActor
-final class MenuBarIconTests: XCTestCase {
+final class MenuBarIconTests: EnglishLocalizationTestCase {
     /// Renders an image into a fixed @2x bitmap so frames can be compared pixel for pixel.
     private func pixels(_ image: NSImage) -> [UInt8] {
         let side = 36
@@ -131,7 +131,7 @@ final class MenuBarIconTests: XCTestCase {
 
         let attention = MenuBarStatusSummary(domains: [domain("a", .healthy), domain("b", .authExpired)], activeTaskCount: 1, hasActionableConflicts: false)
         XCTAssertEqual(attention.headline, "Needs your attention", "a problem outranks an active transfer")
-        XCTAssertEqual(attention.detail, "1 domain need a review.")
+        XCTAssertEqual(attention.detail, "1 domain needs a review.")
         XCTAssertTrue(attention.tooltip.contains("b: Authorization required"))
 
         let many = MenuBarStatusSummary(domains: (1...7).map { domain("d\($0)", .healthy) }, activeTaskCount: 0, hasActionableConflicts: false)

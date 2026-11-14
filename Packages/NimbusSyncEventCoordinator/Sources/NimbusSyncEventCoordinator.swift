@@ -588,7 +588,9 @@ public enum FullCheckInterval: Int, CaseIterable, Identifiable, Sendable {
     public var id: Int { rawValue }
     public var seconds: TimeInterval { TimeInterval(rawValue) * 24 * 60 * 60 }
 
-    public var title: String {
+    public var title: String { L10n.text(sourceTitle) }
+
+    public var sourceTitle: String {
         switch self {
         case .daily: "Every day"
         case .weekly: "Every 7 days"

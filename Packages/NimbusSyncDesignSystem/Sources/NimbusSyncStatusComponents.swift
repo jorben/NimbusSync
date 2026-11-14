@@ -41,29 +41,15 @@ public struct TaskDisplay: Identifiable, Sendable {
     public var reason: String { Self.reason(for: detail) }
 
     public static func reason(for code: String) -> String {
-        switch code.lowercased() {
+        if let title = SyncErrorText.title(for: code) { return title }
+        return switch code.lowercased() {
         case "": ""
-        case "network": "Network error"
-        case "authentication", "authentication_required": "Sign-in required"
-        case "permission_denied": "Permission denied"
-        case "not_found": "Not found on server"
-        case "quota_exceeded": "Storage full"
-        case "version_conflict": "Changed on both sides"
-        case "name_collision": "Name already in use"
-        case "invalid_name": "Name not allowed"
-        case "integrity_failure": "Integrity check failed"
-        case "unknown_outcome": "Outcome unknown"
-        case "unsupported_server": "Server not supported"
-        case "root_unavailable": "Remote root unavailable"
-        case "excluded_from_sync": "Excluded from sync"
-        case "directory_not_empty": "Folder not empty"
-        case "cannot_synchronize": "Can't sync right now"
-        case "queued": "Queued"
-        case "running": "Syncing"
-        case "retrying": "Retrying"
-        case "succeeded": "Synced"
-        case "failed": "Failed"
-        case "cancelled": "Cancelled"
+        case "queued": L10n.tr("Queued")
+        case "running": L10n.tr("Syncing")
+        case "retrying": L10n.tr("Retrying")
+        case "succeeded": L10n.tr("Synced")
+        case "failed": L10n.tr("Failed")
+        case "cancelled": L10n.tr("Cancelled")
         default: {
             let words = code.replacingOccurrences(of: "_", with: " ")
             return words.prefix(1).uppercased() + words.dropFirst()
@@ -79,11 +65,11 @@ public struct TaskDisplay: Identifiable, Sendable {
     }
 
     public static func relativeTime(_ date: Date, relativeTo now: Date = Date()) -> String {
-        if now.timeIntervalSince(date) < 60 { return "Just now" }
+        if now.timeIntervalSince(date) < 60 { return L10n.tr("Just now") }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         // Match the app's own language rather than mixing in the system's.
-        formatter.locale = Locale(identifier: Bundle.main.preferredLocalizations.first ?? "en")
+        formatter.locale = L10n.locale
         return formatter.localizedString(for: date, relativeTo: now)
     }
 
@@ -103,8 +89,8 @@ public struct TaskDisplay: Identifiable, Sendable {
 public enum CompactTimestamp {
     public static func string(for date: Date, relativeTo now: Date = Date()) -> String {
         Calendar.current.isDate(date, inSameDayAs: now)
-            ? date.formatted(date: .omitted, time: .shortened)
-            : date.formatted(date: .abbreviated, time: .shortened)
+            ? date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale))
+            : date.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(L10n.locale))
     }
 }
 
@@ -171,6 +157,7 @@ public struct AppIconView: View {
 }
 
 public struct StatusBadge: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let status: DomainStatus
     public let compact: Bool
 
@@ -196,6 +183,7 @@ public struct StatusBadge: View {
 }
 
 public struct TaskProgressRow: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let title: String
     public let progress: Double?
     public let detail: String
@@ -242,7 +230,7 @@ public struct TaskProgressRow: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .help(date.map { $0.formatted(date: .complete, time: .standard) } ?? "")
+                            .help(date.map { $0.formatted(Date.FormatStyle(date: .complete, time: .standard).locale(L10n.locale)) } ?? "")
                     }
                 }
 
@@ -254,16 +242,16 @@ public struct TaskProgressRow: View {
                             .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
                     }
                     .buttonStyle(.borderless)
-                    .help("Retry")
-                    .accessibilityLabel(Text("Retry \(title)"))
+                    .help(L10n.tr("Retry"))
+                    .accessibilityLabel(Text(L10n.tr("Retry \(title)")))
                 } else if let state, state.canCancel {
                     Button(action: { onCancel?() }) {
                         Image(systemName: "xmark.circle")
                             .frame(width: NimbusSyncDesignTokens.controlSize, height: NimbusSyncDesignTokens.controlSize)
                     }
                     .buttonStyle(.borderless)
-                    .help("Cancel")
-                    .accessibilityLabel(Text("Cancel \(title)"))
+                    .help(L10n.tr("Cancel"))
+                    .accessibilityLabel(Text(L10n.tr("Cancel \(title)")))
                 } else if let state {
                     Text(state.title)
                         .font(.caption.weight(.medium))
@@ -274,12 +262,12 @@ public struct TaskProgressRow: View {
             if let progress {
                 ProgressView(value: progress)
                     .tint(NimbusSyncDesignTokens.brandColor)
-                    .accessibilityValue(Text("\(Int(progress * 100)) percent"))
+                    .accessibilityValue(Text(progress.formatted(.percent.precision(.fractionLength(0)).locale(L10n.locale))))
             } else if state?.isInFlight == true {
                 ProgressView()
                     .progressViewStyle(.linear)
                     .tint(NimbusSyncDesignTokens.brandColor)
-                    .accessibilityLabel(Text("Working"))
+                    .accessibilityLabel(Text(L10n.tr("Working")))
             }
         }
         .padding(.vertical, NimbusSyncDesignTokens.spacing4)
@@ -289,35 +277,35 @@ public struct TaskProgressRow: View {
 extension DomainStatus {
     var title: String {
         switch self {
-        case .healthy: "Up to date"
-        case .syncing: "Syncing"
-        case .reconciling: "Checking for updates"
-        case .offline: "Offline"
-        case .eventDegraded: "Live updates unavailable"
-        case .appNotRunning: "Live updates paused"
-        case .authExpired: "Authorization required"
-        case .rootUnavailable: "Remote root unavailable"
-        case .scopeConflict: "Domain scope conflict"
-        case .conflict: "Conflicts need attention"
-        case .permanentError: "Action required"
-        case .removalPreflight: "Removing"
-        case .repairRequired: "Repair required"
-        case .preservedRemoval: "Finish removal"
-        default: "Preparing"
+        case .healthy: L10n.tr("Up to date")
+        case .syncing: L10n.tr("Syncing")
+        case .reconciling: L10n.tr("Checking for updates")
+        case .offline: L10n.tr("Offline")
+        case .eventDegraded: L10n.tr("Live updates unavailable")
+        case .appNotRunning: L10n.tr("Live updates paused")
+        case .authExpired: L10n.tr("Authorization required")
+        case .rootUnavailable: L10n.tr("Remote root unavailable")
+        case .scopeConflict: L10n.tr("Domain scope conflict")
+        case .conflict: L10n.tr("Conflicts need attention")
+        case .permanentError: L10n.tr("Action required")
+        case .removalPreflight: L10n.tr("Removing")
+        case .repairRequired: L10n.tr("Repair required")
+        case .preservedRemoval: L10n.tr("Finish removal")
+        default: L10n.tr("Preparing")
         }
     }
 
     /// For tight rows such as the popover's, where the Domain name must keep its room.
     var shortTitle: String {
         switch self {
-        case .reconciling: "Checking"
-        case .eventDegraded: "Live updates off"
-        case .appNotRunning: "Paused"
-        case .authExpired: "Sign in"
-        case .rootUnavailable: "Root missing"
-        case .scopeConflict: "Scope conflict"
-        case .conflict: "Conflicts"
-        case .repairRequired: "Repair"
+        case .reconciling: L10n.tr("Checking")
+        case .eventDegraded: L10n.tr("Live updates off")
+        case .appNotRunning: L10n.tr("Paused")
+        case .authExpired: L10n.tr("Sign in")
+        case .rootUnavailable: L10n.tr("Root missing")
+        case .scopeConflict: L10n.tr("Scope conflict")
+        case .conflict: L10n.tr("Conflicts")
+        case .repairRequired: L10n.tr("Repair")
         default: title
         }
     }
@@ -440,12 +428,12 @@ private extension String {
 
     var title: String {
         switch lowercased() {
-        case "queued": "Queued"
-        case "running": "Syncing"
-        case "retrying": "Retrying"
-        case "succeeded": "Completed"
-        case "failed", "action_required": "Needs attention"
-        case "cancelled": "Cancelled"
+        case "queued": L10n.tr("Queued")
+        case "running": L10n.tr("Syncing")
+        case "retrying": L10n.tr("Retrying")
+        case "succeeded": L10n.tr("Completed")
+        case "failed", "action_required": L10n.tr("Needs attention")
+        case "cancelled": L10n.tr("Cancelled")
         default: capitalized
         }
     }

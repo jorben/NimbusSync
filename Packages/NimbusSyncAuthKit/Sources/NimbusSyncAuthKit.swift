@@ -262,9 +262,9 @@ public enum OAuthAuthorizationSessionError: Error, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .authorizationInProgress: "An authorization request is already in progress."
-        case .browserOpenFailed: "The default browser could not be opened."
-        case .cancelled: "Authorization was cancelled."
+        case .authorizationInProgress: L10n.tr("An authorization request is already in progress.")
+        case .browserOpenFailed: L10n.tr("The default browser could not be opened.")
+        case .cancelled: L10n.tr("Authorization was cancelled.")
         }
     }
 }

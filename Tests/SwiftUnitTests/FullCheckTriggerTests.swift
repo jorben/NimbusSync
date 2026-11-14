@@ -9,7 +9,7 @@ import CloudreveStoreBridge
 /// A full check lists every folder on the server, so it runs only when nothing cheaper can be
 /// trusted. Cloudreve keeps a disconnected client's events for its client ID (14 days by
 /// default) and replays them on `resumed`; reconnecting is therefore not a reason to check.
-final class FullCheckTriggerTests: XCTestCase {
+final class FullCheckTriggerTests: EnglishLocalizationTestCase {
     private var cleanup: [URL] = []
 
     override func tearDown() {

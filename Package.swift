@@ -20,7 +20,8 @@ let package = Package(
     targets: [
         .target(
             name: "CloudreveDomainKit",
-            path: "Packages/NimbusSyncDomainKit/Sources"
+            path: "Packages/NimbusSyncDomainKit/Sources",
+            resources: [.process("Resources")]
         ),
         .systemLibrary(
             name: "CSQLite",
@@ -65,8 +66,7 @@ let package = Package(
         .target(
             name: "CloudreveProductKit",
             dependencies: ["CloudreveDomainKit", "CloudreveStoreBridge", "CloudreveObservability", "CloudreveAuthKit", "CloudreveEventCoordinator"],
-            path: "Packages/NimbusSyncProductKit/Sources",
-            resources: [.process("Resources")]
+            path: "Packages/NimbusSyncProductKit/Sources"
         ),
         .executableTarget(
             name: "NimbusSyncBenchmarks",

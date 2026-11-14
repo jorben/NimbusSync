@@ -18,6 +18,7 @@ import UserNotifications
 struct NimbusSyncApp: App {
     @NSApplicationDelegateAdaptor(NimbusSyncAppDelegate.self) private var appDelegate
     @StateObject private var runtime: NimbusSyncAppState
+    @ObservedObject private var localization = AppLocalization.shared
 
     init() {
         let runtime = NimbusSyncAppState()
@@ -31,6 +32,14 @@ struct NimbusSyncApp: App {
 
         Settings {
             settingsView(runtime: runtime, appDelegate: appDelegate)
+                .environment(\.locale, localization.locale)
+        }
+        .environment(\.locale, localization.locale)
+        .commands {
+            LocalizedAppCommands(
+                onOpenSettings: appDelegate.openSettingsWindow,
+                onQuit: runtime.quitApplication
+            )
         }
     }
 
@@ -39,14 +48,14 @@ struct NimbusSyncApp: App {
             domains: runtime.snapshot.domains,
             exclusionRules: runtime.snapshot.exclusionRules,
             notificationPreferences: runtime.snapshot.notificationPreferences,
-            finderError: Binding<String?>(get: { runtime.finderError }, set: { runtime.finderError = $0 }),
+            finderError: Binding<String?>(get: { runtime.finderError?.text }, set: { _ in runtime.finderError = nil }),
             finderSettingsActionAvailable: Binding(get: { runtime.finderSettingsActionAvailable }, set: { runtime.finderSettingsActionAvailable = $0 }),
-            domainRemovalError: Binding<String?>(get: { runtime.domainRemovalError }, set: { runtime.domainRemovalError = $0 }),
-            exclusionError: Binding<String?>(get: { runtime.exclusionError }, set: { runtime.exclusionError = $0 }),
+            domainRemovalError: Binding<String?>(get: { runtime.domainRemovalError?.text }, set: { _ in runtime.domainRemovalError = nil }),
+            exclusionError: Binding<String?>(get: { runtime.exclusionError?.text }, set: { _ in runtime.exclusionError = nil }),
             removingDomainIdentifier: runtime.removingDomainIdentifier,
             renamingDomainIdentifier: runtime.renamingDomainIdentifier,
-            domainRenameError: Binding<String?>(get: { runtime.domainRenameError }, set: { runtime.domainRenameError = $0 }),
-            reauthorizationError: Binding<String?>(get: { runtime.reauthorizationError }, set: { runtime.reauthorizationError = $0 }),
+            domainRenameError: Binding<String?>(get: { runtime.domainRenameError?.text }, set: { _ in runtime.domainRenameError = nil }),
+            reauthorizationError: Binding<String?>(get: { runtime.reauthorizationError?.text }, set: { _ in runtime.reauthorizationError = nil }),
             onRename: runtime.renameDomain,
             onOpenFinder: runtime.openFinder,
             onOpenFileProviderSettings: runtime.openFileProviderSettings,
@@ -75,6 +84,38 @@ struct NimbusSyncApp: App {
 
 }
 
+/// Commands supply their own resolved text: AppKit's standard SwiftUI commands retain the
+/// launch language in their accessibility representation even after NSMenuItem.title changes.
+private struct LocalizedAppCommands: Commands {
+    @ObservedObject private var localization = AppLocalization.shared
+    let onOpenSettings: () -> Void
+    let onQuit: () -> Void
+
+    var body: some Commands {
+        let _ = localization.language
+        CommandGroup(replacing: .appInfo) {
+            Button { NSApp.orderFrontStandardAboutPanel(nil) } label: {
+                Text(verbatim: L10n.tr("About \(AppIdentity.displayName)"))
+            }
+        }
+        CommandGroup(replacing: .appSettings) {
+            Button(action: onOpenSettings) { Text(verbatim: L10n.tr("Settings…")) }
+                .keyboardShortcut(",", modifiers: .command)
+        }
+        CommandGroup(replacing: .appVisibility) {
+            Button { NSApp.hide(nil) } label: { Text(verbatim: L10n.tr("Hide \(AppIdentity.displayName)")) }
+                .keyboardShortcut("h", modifiers: .command)
+            Button { NSApp.hideOtherApplications(nil) } label: { Text(verbatim: L10n.tr("Hide Others")) }
+                .keyboardShortcut("h", modifiers: [.command, .option])
+            Button { NSApp.unhideAllApplications(nil) } label: { Text(verbatim: L10n.tr("Show All")) }
+        }
+        CommandGroup(replacing: .appTermination) {
+            Button(action: onQuit) { Text(verbatim: L10n.tr("Quit \(AppIdentity.displayName)")) }
+                .keyboardShortcut("q", modifiers: .command)
+        }
+    }
+}
+
 @MainActor
 private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcurrency UNUserNotificationCenterDelegate {
     private static let forwardedURLNotification = Notification.Name("\(AppIdentity.baseIdentifier).forwarded-external-urls")
@@ -88,6 +129,8 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     private weak var runtime: NimbusSyncAppState?
     private var pendingExternalURLs: [URL] = []
     private var didFinishLaunching = false
+    private var menuRefreshScheduled = false
+    private var isRefreshingMenus = false
     private var onboardingWindowController: NSWindowController?
     private var conflictsWindowController: NSWindowController?
     private var finderGuideWindowController: NSWindowController?
@@ -120,6 +163,10 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
                 .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier })
         }
         if isPrimaryInstance {
+            NotificationCenter.default.addObserver(self, selector: #selector(languageChanged), name: AppLocalization.didChangeNotification, object: nil)
+            for name in [NSMenu.didAddItemNotification, NSMenu.didChangeItemNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(scheduleMenuLocalization), name: name, object: nil)
+            }
             DistributedNotificationCenter.default().addObserver(self, selector: #selector(handleForwardedURLs(_:)), name: Self.forwardedURLNotification, object: nil)
         }
     }
@@ -179,6 +226,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
         installMenuBarPanelIfNeeded()
         startRuntimeIfNeeded()
         drainPendingExternalURLs()
+        scheduleMenuLocalization()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -193,8 +241,35 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard !isPrimaryInstance else { return }
-        closeSecondaryWindows()
+        if isPrimaryInstance {
+            AppLocalization.shared.refresh()
+        } else {
+            closeSecondaryWindows()
+        }
+    }
+
+    @objc private func scheduleMenuLocalization() {
+        guard !isRefreshingMenus, !menuRefreshScheduled else { return }
+        menuRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            menuRefreshScheduled = false
+            isRefreshingMenus = true
+            AppMenuLocalization.apply()
+            isRefreshingMenus = false
+        }
+    }
+
+    @objc private func languageChanged() {
+        runtime?.localizationDidChange()
+        // SwiftUI may rebuild command menus later in this run-loop turn.
+        scheduleMenuLocalization()
+        onboardingWindowController?.window?.title = AddDomainText.windowTitle
+        conflictsWindowController?.window?.title = L10n.tr("Conflicts")
+        finderGuideWindowController?.window?.title = FinderIntegrationGuideText.guideTitle
+        for window in NSApp.windows where SettingsWindowOpener.isSettingsWindow(window) {
+            window.title = L10n.tr("Settings")
+        }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
@@ -235,11 +310,11 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         guard isPrimaryInstance else { return nil }
         let menu = NSMenu()
-        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettingsFromDockMenu(_:)), keyEquivalent: "")
+        let settings = NSMenuItem(title: L10n.tr("Settings…"), action: #selector(openSettingsFromDockMenu(_:)), keyEquivalent: "")
         settings.target = self
         menu.addItem(settings)
         if runtime?.appUpdater.isAvailable == true {
-            let update = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesFromDockMenu(_:)), keyEquivalent: "")
+            let update = NSMenuItem(title: L10n.tr("Check for Updates…"), action: #selector(checkForUpdatesFromDockMenu(_:)), keyEquivalent: "")
             update.target = self
             menu.addItem(update)
         }
@@ -334,7 +409,7 @@ private final class NimbusSyncAppDelegate: NSObject, NSApplicationDelegate, NSWi
             hostingView.frame = NSRect(origin: .zero, size: contentSize)
             hostingView.autoresizingMask = [.width, .height]
             window.contentView = hostingView
-            window.title = "Conflicts"
+            window.title = L10n.tr("Conflicts")
             window.isReleasedWhenClosed = false
             window.center()
             conflictsWindowController = NSWindowController(window: window)
@@ -555,6 +630,7 @@ private struct OpenSettingsActionReader: View {
 }
 
 private struct OnboardingWindowContent: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var runtime: NimbusSyncAppState
     let onClose: () -> Void
 
@@ -577,7 +653,7 @@ private struct OnboardingWindowContent: View {
                 AddDomainReview(origin: $0.origin.absoluteString, serverVersion: $0.serverVersion, remotePath: $0.remotePath)
             },
             isAdding: runtime.isProvisioningDomain,
-            errorMessage: runtime.onboardingError,
+            errorMessage: runtime.onboardingError?.text,
             onContinue: runtime.addDomain,
             onCancelSignIn: runtime.cancelAuthorization,
             onBack: runtime.cancelDomainSetup,
@@ -585,10 +661,12 @@ private struct OnboardingWindowContent: View {
             onClose: onClose,
             onOpenFileProviderSettings: runtime.openFileProviderSettings
         )
+        .environment(\.locale, localization.locale)
     }
 }
 
 private struct ConflictWindowContent: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var runtime: NimbusSyncAppState
 
     var body: some View {
@@ -603,16 +681,18 @@ private struct ConflictWindowContent: View {
             onKeepBoth: runtime.prepareKeepBoth,
             onExportLocalCopy: runtime.exportConflictLocalCopy
         )
+        .environment(\.locale, localization.locale)
         .tint(NimbusSyncDesignTokens.brandColor)
         .alert("Unable to resolve conflict", isPresented: Binding(get: { runtime.conflictActionError != nil }, set: { if !$0 { runtime.conflictActionError = nil } })) {
             Button("OK", role: .cancel) { runtime.conflictActionError = nil }
         } message: {
-            Text(runtime.conflictActionError ?? "The conflict could not be resolved.")
+            Text(runtime.conflictActionError?.text ?? L10n.tr("The conflict could not be resolved."))
         }
     }
 }
 
 private struct StatusPopoverContent: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @ObservedObject var runtime: NimbusSyncAppState
     @ObservedObject var updater: AppUpdater
     let onOpenSettings: () -> Void
@@ -649,6 +729,7 @@ private struct StatusPopoverContent: View {
             )
         }
         .frame(width: NimbusSyncDesignTokens.popoverWidth)
+        .environment(\.locale, localization.locale)
     }
 }
 
@@ -670,7 +751,9 @@ private enum FinderOpenError: LocalizedError {
     case visibleURLUnavailable
     case workspaceRejected
 
-    var errorDescription: String? {
+    var errorDescription: String? { L10n.tr(message) }
+
+    private var message: String.LocalizationValue {
         switch self {
         case let .provider(stage, domain, code):
             if isDomainDisabledError(domain: domain, code: code) {
@@ -701,26 +784,54 @@ private func isDomainDisabledError(domain: String, code: Int) -> Bool {
         (domain == "NSFileProviderInternalErrorDomain" && code == 12)
 }
 
-private func userFacingError(_ error: Error) -> String {
+private struct UserFacingError {
+    enum Kind {
+        case generic(Error)
+        case onboarding(Error)
+        case finder(String, FinderOpenError?)
+        case preservedCopy(String)
+    }
+    let kind: Kind
+
+    var text: String {
+        switch kind {
+        case .generic(let error): formatUserFacingError(error)
+        case .onboarding(let error): formatOnboardingError(error)
+        case .finder(let name, let failure):
+            if let failure {
+                L10n.tr("Unable to open \(name) in Finder. \(failure.errorDescription ?? L10n.tr("The File Provider location is unavailable."))")
+            } else {
+                L10n.tr("Unable to open \(name) in Finder. Please try again after reopening NimbusSync.")
+            }
+        case .preservedCopy(let path):
+            L10n.tr("Finder removed this location, but local changes were preserved at:\n\(path)\n\nSave that copy, then choose Finish removal from the domain menu.")
+        }
+    }
+}
+
+private func userFacingError(_ error: Error) -> UserFacingError { UserFacingError(kind: .generic(error)) }
+private func onboardingErrorMessage(_ error: Error) -> UserFacingError { UserFacingError(kind: .onboarding(error)) }
+
+private func formatUserFacingError(_ error: Error) -> String {
     if let localized = error as? LocalizedError, let description = localized.errorDescription {
         return SecretRedactor.redact(description)
     }
     if let failure = error as? CoreFailure {
-        return "NimbusSync could not complete the operation (\(failure.code.rawValue))."
+        return L10n.tr("NimbusSync could not complete the operation (\(failure.code.rawValue)).")
     }
     let nsError = error as NSError
-    return "NimbusSync could not complete the operation (\(nsError.domain):\(nsError.code))."
+    return L10n.tr("NimbusSync could not complete the operation (\(nsError.domain):\(nsError.code)).")
 }
 
 /// Plain words for what usually goes wrong while adding a Domain, falling back to the generic text.
-private func onboardingErrorMessage(_ error: Error) -> String {
+private func formatOnboardingError(_ error: Error) -> String {
     if let failure = error as? CoreFailure, let message = AddDomainText.message(for: failure.code) {
         return message
     }
     if let urlError = error as? URLError, let message = AddDomainText.message(forURLError: urlError.code) {
         return message
     }
-    return userFacingError(error)
+    return formatUserFacingError(error)
 }
 
 /// A Domain's event supervisor taken out of service, with the runtime it drove.
@@ -776,19 +887,19 @@ private final class NimbusSyncAppState: ObservableObject {
     private var addDomainAttempt: UUID?
     private var liveUpdateSkipReasons: [String: String] = [:]
     @Published var isProvisioningDomain = false
-    @Published var onboardingError: String?
-    @Published var finderError: String?
+    @Published var onboardingError: UserFacingError?
+    @Published var finderError: UserFacingError?
     @Published var finderSettingsActionAvailable = false
-    @Published var domainRemovalError: String?
-    @Published var exclusionError: String?
+    @Published var domainRemovalError: UserFacingError?
+    @Published var exclusionError: UserFacingError?
     @Published private(set) var removingDomainIdentifier: String?
     @Published private(set) var renamingDomainIdentifier: String?
-    @Published var domainRenameError: String?
+    @Published var domainRenameError: UserFacingError?
     /// Reauthorize runs from Settings or a `nimbussync://reauthorize` link; its failures are shown
     /// in Settings, not in the Add Domain window.
-    @Published var reauthorizationError: String?
+    @Published var reauthorizationError: UserFacingError?
     /// Failures of Conflict Center actions, shown in the conflict window.
-    @Published var conflictActionError: String?
+    @Published var conflictActionError: UserFacingError?
     @Published fileprivate var pendingDomainSetup: PendingDomainSetup?
     @Published var selectedConflictItemIdentifier: String?
     var onDomainProvisioned: ((DomainDescriptor) -> Void)?
@@ -807,9 +918,9 @@ private final class NimbusSyncAppState: ObservableObject {
     @Published private(set) var finderIntegration: FinderIntegrationState = .unknown {
         didSet {
             guard finderIntegration != oldValue else { return }
-            lifecycleLogger.info("finder.integration state=\(self.finderIntegration.title, privacy: .public)")
+            lifecycleLogger.info("finder.integration state=\(self.finderIntegration.diagnosticTitle, privacy: .public)")
             if finderIntegration == .off || oldValue == .off {
-                ActivityLog.shared.info("lifecycle", "Finder integration \(finderIntegration.title.lowercased())")
+                ActivityLog.shared.info("lifecycle", "Finder integration \(finderIntegration.diagnosticTitle.lowercased())")
             }
             updateMenuBarStatus()
             onFinderIntegrationChanged?(finderIntegration)
@@ -844,6 +955,7 @@ private final class NimbusSyncAppState: ObservableObject {
     private var finderIntegrationObservers: [NSObjectProtocol] = []
     /// Orders overlapping Finder integration reads so a slow, older one cannot overwrite a newer one.
     private var finderIntegrationGeneration = 0
+    private var localizationRefreshTask: Task<Void, Never>?
 
     init() {
         registry = try? factory.registryStore()
@@ -1349,7 +1461,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 panel.canChooseFiles = true
                 panel.canChooseDirectories = false
                 panel.allowsMultipleSelection = false
-                panel.prompt = "Use Exported Copy"
+                panel.prompt = L10n.tr("Use Exported Copy")
                 guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
                 let startedAccess = sourceURL.startAccessingSecurityScopedResource()
                 defer { if startedAccess { sourceURL.stopAccessingSecurityScopedResource() } }
@@ -1613,12 +1725,12 @@ private final class NimbusSyncAppState: ObservableObject {
             case .workspaceRejected:
                 lifecycleLogger.error("finder.open_failed stage=workspace_select")
             }
-            finderError = "Unable to open \(displayName) in Finder. \(failure.errorDescription ?? "The File Provider location is unavailable.")"
+            finderError = UserFacingError(kind: .finder(displayName, failure))
             return
         }
         let nsError = error as NSError
         lifecycleLogger.error("finder.open_failed stage=unknown error_domain=\(nsError.domain, privacy: .public) error_code=\(nsError.code, privacy: .public)")
-        finderError = "Unable to open \(displayName) in Finder. Please try again after reopening NimbusSync."
+        finderError = UserFacingError(kind: .finder(displayName, nil))
     }
 
     func openFileProviderSettings() {
@@ -1700,7 +1812,7 @@ private final class NimbusSyncAppState: ObservableObject {
                 guard let registry else { throw StoreBridgeError.openFailed("App Group is unavailable") }
                 let service = SafeDomainRemovalService(store: registry, vault: KeychainCredentialVault(accessGroup: KeychainAccessGroup.current()), storeFactory: factory)
                 if let preserved = try await service.remove(descriptor: domain) {
-                    domainRemovalError = "Finder removed this location, but local changes were preserved at:\n\(preserved.path)\n\nSave that copy, then choose Finish removal from the domain menu."
+                    domainRemovalError = UserFacingError(kind: .preservedCopy(preserved.path))
                 }
                 reload()
             } catch {
@@ -1854,6 +1966,32 @@ private final class NimbusSyncAppState: ObservableObject {
         }
     }
 
+    func localizationDidChange() {
+        objectWillChange.send()
+        updateMenuBarStatus()
+        localizationRefreshTask?.cancel()
+        let language = L10n.language
+        // Publish the metadata change even when macOS keeps the extension process alive.
+        // The same persisted job is resumed by the extension on its independent startup.
+        localizationRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            for domain in snapshot.domains {
+                guard !Task.isCancelled else { return }
+                guard let store = try? factory.domainStore(identifier: domain.identifier),
+                      let manager = NSFileProviderManager(for: configuredSystemDomain(for: domain)) else { continue }
+                let coordinator = FrameworkCacheRefreshCoordinator(store: store, manager: manager, domainIdentifier: domain.identifier)
+                do {
+                    while !Task.isCancelled {
+                        if try await coordinator.refreshIfNeeded(language: language) { break }
+                        await Task.yield()
+                    }
+                } catch {
+                    ActivityLog.shared.warning("localization", "Finder metadata refresh remains pending for the next extension startup")
+                }
+            }
+        }
+    }
+
     func taskDisplay(_ task: ProductTask) -> TaskDisplay {
         let state = task.errorCode == nil ? task.state.rawValue : (task.errorCode == "unknown_outcome" || task.errorCode == "version_conflict" || task.errorCode == "authentication_required" ? "action_required" : task.state.rawValue)
         let domainName = snapshot.domains.first { $0.identifier == task.domainIdentifier }?.displayName
@@ -1904,19 +2042,19 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .domains: "Domains"
-        case .general: "General"
-        case .diagnostics: "Diagnostics"
-        case .about: "About"
+        case .domains: L10n.tr("Domains")
+        case .general: L10n.tr("General")
+        case .diagnostics: L10n.tr("Diagnostics")
+        case .about: L10n.tr("About")
         }
     }
 
     var subtitle: String {
         switch self {
-        case .domains: "Cloudreve servers synced to your Finder sidebar"
-        case .general: "Startup, updates, background checks and notifications"
-        case .diagnostics: "Recent activity from NimbusSync and its Finder extension"
-        case .about: "NimbusSync keeps your Cloudreve files available in Finder"
+        case .domains: L10n.tr("Cloudreve servers synced to your Finder sidebar")
+        case .general: L10n.tr("Startup, updates, background checks and notifications")
+        case .diagnostics: L10n.tr("Recent activity from NimbusSync and its Finder extension")
+        case .about: L10n.tr("NimbusSync keeps your Cloudreve files available in Finder")
         }
     }
 
@@ -1952,6 +2090,7 @@ private enum SettingsLinks {
 }
 
 private struct SettingsView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let domains: [DomainDescriptor]
     let exclusionRules: [String: String]
     let persistedNotificationPreferences: NotificationPreferences
@@ -2044,7 +2183,7 @@ private struct SettingsView: View {
         .onChange(of: persistedNotificationPreferences) { value in
             notificationPreferences = value
         }
-        .confirmationDialog(pendingRemoval?.status == .preservedRemoval ? "Finish removing \(pendingRemoval?.displayName ?? "domain")?" : "Remove \(pendingRemoval?.displayName ?? "domain")?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), presenting: pendingRemoval) { domain in
+        .confirmationDialog(pendingRemoval?.status == .preservedRemoval ? L10n.tr("Finish removing \(pendingRemoval?.displayName ?? L10n.tr("domain"))?") : L10n.tr("Remove \(pendingRemoval?.displayName ?? L10n.tr("domain"))?"), isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), presenting: pendingRemoval) { domain in
             if domain.status == .preservedRemoval {
                 Button("I Saved the Local Copy", role: .destructive) { onFinalizeRemoval(domain); pendingRemoval = nil }
             } else {
@@ -2081,27 +2220,27 @@ private struct SettingsView: View {
             }
             Button("OK", role: .cancel) { finderError = nil }
         } message: {
-            Text(finderError ?? "The File Provider location is unavailable.")
+            Text(finderError ?? L10n.tr("The File Provider location is unavailable."))
         }
         .alert("Domain removal", isPresented: Binding(get: { domainRemovalError != nil }, set: { if !$0 { domainRemovalError = nil } })) {
             Button("OK", role: .cancel) { domainRemovalError = nil }
         } message: {
-            Text(domainRemovalError ?? "The domain could not be removed.")
+            Text(domainRemovalError ?? L10n.tr("The domain could not be removed."))
         }
         .alert("Unable to rename domain", isPresented: Binding(get: { domainRenameError != nil }, set: { if !$0 { domainRenameError = nil } })) {
             Button("OK", role: .cancel) { domainRenameError = nil }
         } message: {
-            Text(domainRenameError ?? "The domain could not be renamed.")
+            Text(domainRenameError ?? L10n.tr("The domain could not be renamed."))
         }
         .alert("Unable to reauthorize", isPresented: Binding(get: { reauthorizationError != nil }, set: { if !$0 { reauthorizationError = nil } })) {
             Button("OK", role: .cancel) { reauthorizationError = nil }
         } message: {
-            Text(reauthorizationError ?? "The domain could not be reauthorized.")
+            Text(reauthorizationError ?? L10n.tr("The domain could not be reauthorized."))
         }
         .alert("Unable to update exclusions", isPresented: Binding(get: { exclusionError != nil }, set: { if !$0 { exclusionError = nil } })) {
             Button("OK", role: .cancel) { exclusionError = nil }
         } message: {
-            Text(exclusionError ?? "The exclusion rules could not be applied.")
+            Text(exclusionError ?? L10n.tr("The exclusion rules could not be applied."))
         }
     }
 
@@ -2162,13 +2301,32 @@ private struct SettingsView: View {
                         }
                     )) {
                         ForEach(AppAppearance.allCases) { choice in
-                            Text(choice.title).tag(choice)
+                            Text(LocalizedStringKey(choice.sourceTitle)).tag(choice)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
                 }
+            }
+
+            SettingsGroup(L10n.tr("Language")) {
+                SettingsRow(symbol: "globe", title: L10n.tr("Language"), subtitle: L10n.tr("Choose the language used by NimbusSync.")) {
+                    Picker(L10n.tr("Language"), selection: Binding(
+                        get: { localization.choice },
+                        set: { localization.select($0) }
+                    )) {
+                        ForEach(AppLanguageChoice.allCases) { choice in
+                            Text(LocalizedStringKey(choice.sourceTitle)).tag(choice)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityIdentifier("settings.language")
+                }
+            } footer: {
+                Text(L10n.tr("Changes apply immediately. Finder extensions use this language after they reload."))
             }
 
             SettingsGroup("Startup") {
@@ -2197,7 +2355,7 @@ private struct SettingsView: View {
                         set: { fullCheckIntervalDays = $0.rawValue }
                     )) {
                         ForEach(FullCheckInterval.allCases) { interval in
-                            Text(interval.title).tag(interval)
+                            Text(LocalizedStringKey(interval.sourceTitle)).tag(interval)
                         }
                     }
                     .pickerStyle(.menu)
@@ -2319,17 +2477,17 @@ private struct SettingsView: View {
                     Text("Logs")
                         .font(.system(size: 15, weight: .semibold))
                     if !recentLogLines.isEmpty {
-                        SettingsTagBadge("Latest \(recentLogLines.count) lines")
+                        SettingsTagBadge(L10n.tr("Latest \(recentLogLines.count) lines"))
                     }
                 }
-                Text(logsDirectoryPath.map { SettingsDomainText.displayPath($0, home: UserHomeDirectory.path) } ?? "Log folder unavailable")
+                Text(logsDirectoryPath.map { SettingsDomainText.displayPath($0, home: UserHomeDirectory.path) } ?? L10n.tr("Log folder unavailable"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                     .help(logsDirectoryPath ?? "")
-                    .accessibilityLabel(Text("Log folder \(logsDirectoryPath ?? "unavailable")"))
+                    .accessibilityLabel(Text(SettingsDiagnosticsText.logFolderAccessibilityLabel(logsDirectoryPath)))
             }
 
             Spacer(minLength: NimbusSyncDesignTokens.spacing12)
@@ -2343,7 +2501,7 @@ private struct SettingsView: View {
                     }
                 )) {
                     ForEach(ActivityLevel.allCases) { level in
-                        Text(level.title).tag(level)
+                        Text(LocalizedStringKey(level.title)).tag(level)
                     }
                 }
                 .pickerStyle(.menu)
@@ -2356,8 +2514,8 @@ private struct SettingsView: View {
                     Image(systemName: copiedLogs ? "checkmark" : "doc.on.doc")
                 }
                 .buttonStyle(SettingsIconButtonStyle())
-                .help(copiedLogs ? "Copied" : "Copy these lines")
-                .accessibilityLabel(Text(copiedLogs ? "Log lines copied" : "Copy log lines"))
+                .help(copiedLogs ? L10n.tr("Copied") : L10n.tr("Copy these lines"))
+                .accessibilityLabel(Text(copiedLogs ? L10n.tr("Log lines copied") : L10n.tr("Copy log lines")))
                 .disabled(recentLogLines.isEmpty)
 
                 Button(action: onOpenLogs) {
@@ -2503,7 +2661,7 @@ private struct SettingsView: View {
             }
             Divider()
             Button(role: .destructive) { pendingRemoval = domain } label: {
-                Label(domain.status == .preservedRemoval ? "Finish Removal…" : "Remove Domain…", systemImage: "trash")
+                Label(domain.status == .preservedRemoval ? L10n.tr("Finish Removal…") : L10n.tr("Remove Domain…"), systemImage: "trash")
             }
         }
     }
@@ -2532,8 +2690,11 @@ private struct SettingsView: View {
 /// by observing them. The reset happens inside the same change, before anything is drawn, so
 /// the title never flashes. `toolbar(removing: .title)` would say this directly but needs macOS 15.
 private struct SettingsWindowChrome: NSViewRepresentable {
+    @ObservedObject private var localization = AppLocalization.shared
     func makeNSView(context: Context) -> NSView { WindowObserver() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.window?.title = L10n.tr("Settings")
+    }
 
     private final class WindowObserver: NSView {
         private var observations: [NSKeyValueObservation] = []
@@ -2547,7 +2708,12 @@ private struct SettingsWindowChrome: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarSeparatorStyle = .none
             window.toolbar = nil
+            window.title = L10n.tr("Settings")
             observations = [
+                window.observe(\.title) { window, _ in
+                    let title = L10n.tr("Settings")
+                    if window.title != title { window.title = title }
+                },
                 window.observe(\.titleVisibility) { window, _ in
                     if window.titleVisibility != .hidden { window.titleVisibility = .hidden }
                 },
@@ -2560,6 +2726,7 @@ private struct SettingsWindowChrome: NSViewRepresentable {
 }
 
 private struct SettingsSidebar: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @Binding var selectedSection: SettingsSection
     let domainCount: Int
     let finderIntegration: FinderIntegrationState
@@ -2607,6 +2774,7 @@ private struct SettingsSidebar: View {
 }
 
 private struct SettingsSidebarItem: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let section: SettingsSection
     let isSelected: Bool
     let badge: Int?
@@ -2654,6 +2822,7 @@ private struct SettingsSidebarItem: View {
 /// A page's large title and one-line description, with an optional action on the right and
 /// optional content underneath. Every Settings page uses it, so they share one rhythm.
 private struct SettingsPageHeader<Trailing: View, Below: View>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     let section: SettingsSection
     @ViewBuilder let trailing: () -> Trailing
     @ViewBuilder let below: () -> Below

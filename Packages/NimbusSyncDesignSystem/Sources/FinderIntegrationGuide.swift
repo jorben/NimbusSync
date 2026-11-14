@@ -9,37 +9,37 @@ import CloudreveDomainKit
 /// Settings lists it, so the Dev build points at "NimbusSyncDev", not the Release app.
 public enum FinderIntegrationGuideText {
     private static let app = AppIdentity.displayName
-    public static let offHeadline = "Finder integration is off"
-    public static let offDetail = "Syncing is paused until \(app) is turned on in System Settings."
-    public static let offSubtitle = "Paused · Finder integration is off"
-    public static let bannerDetail = "Syncing is paused until you turn it on."
-    public static let guideTitle = "Turn on \(app) in Finder"
-    public static let guideMessage = "macOS lets you choose which apps add locations to Finder. \(app) is switched off there, so your domains are hidden from Finder and nothing syncs until you turn it back on."
-    public static let openSettingsTitle = "Open System Settings"
-    public static let laterTitle = "Later"
-    public static let checkAgainTitle = "Check Again"
-    public static let privacyNote = "Only you can turn it on — apps are not allowed to change this setting themselves."
+    public static var offHeadline: String { L10n.tr("Finder integration is off") }
+    public static var offDetail: String { L10n.tr("Syncing is paused until \(app) is turned on in System Settings.") }
+    public static var offSubtitle: String { L10n.tr("Paused · Finder integration is off") }
+    public static var bannerDetail: String { L10n.tr("Syncing is paused until you turn it on.") }
+    public static var guideTitle: String { L10n.tr("Turn on \(app) in Finder") }
+    public static var guideMessage: String { L10n.tr("macOS lets you choose which apps add locations to Finder. \(app) is switched off there, so your domains are hidden from Finder and nothing syncs until you turn it back on.") }
+    public static var openSettingsTitle: String { L10n.tr("Open System Settings") }
+    public static var laterTitle: String { L10n.tr("Later") }
+    public static var checkAgainTitle: String { L10n.tr("Check Again") }
+    public static var privacyNote: String { L10n.tr("Only you can turn it on — apps are not allowed to change this setting themselves.") }
 
     /// Where the switch lives, which moved in macOS 15.
     public static func settingsPath(majorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> String {
         majorVersion >= 15
-            ? "General › Login Items & Extensions › File Providers"
-            : "Privacy & Security › Extensions › File Providers"
+            ? L10n.tr("General › Login Items & Extensions › File Providers")
+            : L10n.tr("Privacy & Security › Extensions › File Providers")
     }
 
     /// The numbered steps under the guide's illustration.
     public static func steps(majorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> [String] {
         if majorVersion >= 15 {
             return [
-                "Click Open System Settings.",
-                "In Login Items & Extensions, find File Providers and click ⓘ.",
-                "Switch on \(app), then return here.",
+                L10n.tr("Click Open System Settings."),
+                L10n.tr("In Login Items & Extensions, find File Providers and click ⓘ."),
+                L10n.tr("Switch on \(app), then return here."),
             ]
         }
         return [
-            "Click Open System Settings.",
-            "In Extensions, choose File Providers.",
-            "Tick \(app), then return here.",
+            L10n.tr("Click Open System Settings."),
+            L10n.tr("In Extensions, choose File Providers."),
+            L10n.tr("Tick \(app), then return here."),
         ]
     }
 }
@@ -128,6 +128,7 @@ struct FinderIntegrationSteps: View {
 
 /// "General › Login Items & Extensions › File Providers" in a quiet capsule.
 struct FinderIntegrationPathLabel: View {
+    @ObservedObject private var localization = AppLocalization.shared
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "gearshape")
@@ -150,6 +151,7 @@ struct FinderIntegrationPathLabel: View {
 /// The Domains page's call to action while Finder integration is off: the illustration, why it
 /// matters, where the switch is and a button that goes there.
 public struct FinderIntegrationGuideCard: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let onOpenSettings: () -> Void
     public let onCheckAgain: () -> Void
 
@@ -206,6 +208,7 @@ public struct FinderIntegrationGuideCard: View {
 /// The window NimbusSync opens by itself when it finds Finder integration off. It closes on its
 /// own once the switch is turned on (see the app delegate).
 public struct FinderIntegrationGuideView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let onOpenSettings: () -> Void
     public let onLater: () -> Void
 
@@ -264,6 +267,7 @@ public struct FinderIntegrationGuideView: View {
         }
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
+        .environment(\.locale, localization.locale)
         .tint(NimbusSyncDesignTokens.brandColor)
     }
 }

@@ -7,7 +7,7 @@ import CloudreveProductKit
 
 /// The Settings Domains page reads these for its summary line and each card's details, so their
 /// words and rules stay stable.
-final class SettingsDomainsPageTests: XCTestCase {
+final class SettingsDomainsPageTests: EnglishLocalizationTestCase {
     private func domain(_ index: Int, status: DomainStatus) throws -> DomainDescriptor {
         let scope = try RemoteScope(origin: "https://cloud.example.com", accountID: "account", rootURI: "cloudreve://my/")
         var domain = DomainDescriptor(identifier: "crd-8888888\(index)-8888-4888-8888-888888888888", displayName: "Domain \(index)", scope: scope, rootRemoteID: "root\(index)", accountID: "account", secretReference: "ref")
@@ -37,11 +37,11 @@ final class SettingsDomainsPageTests: XCTestCase {
         XCTAssertTrue(SettingsDomainText.lastSynced(now.addingTimeInterval(-120), now: now, calendar: calendar).hasPrefix("Last synced 2 min"))
 
         let morning = now.addingTimeInterval(-6 * 3600)
-        XCTAssertEqual(SettingsDomainText.lastSynced(morning, now: now, calendar: calendar), "Last synced Today, \(morning.formatted(date: .omitted, time: .shortened))")
+        XCTAssertEqual(SettingsDomainText.lastSynced(morning, now: now, calendar: calendar), "Last synced Today, \(morning.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale)))")
         let yesterday = now.addingTimeInterval(-20 * 3600)
-        XCTAssertEqual(SettingsDomainText.lastSynced(yesterday, now: now, calendar: calendar), "Last synced Yesterday, \(yesterday.formatted(date: .omitted, time: .shortened))")
+        XCTAssertEqual(SettingsDomainText.lastSynced(yesterday, now: now, calendar: calendar), "Last synced Yesterday, \(yesterday.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale)))")
         let older = now.addingTimeInterval(-5 * 24 * 3600)
-        XCTAssertEqual(SettingsDomainText.lastSynced(older, now: now, calendar: calendar), "Last synced \(older.formatted(date: .abbreviated, time: .shortened))")
+        XCTAssertEqual(SettingsDomainText.lastSynced(older, now: now, calendar: calendar), "Last synced \(older.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(L10n.locale)))")
     }
 
     func testDisplayPathShortensOnlyTheHomeFolder() {
@@ -77,7 +77,7 @@ final class SettingsDomainsPageTests: XCTestCase {
     func testConnectionDotHoverTextAddsTheTimeWhenKnown() {
         let since = Date(timeIntervalSince1970: 1_800_000_000)
         let connected = ServerConnectionDisplay(kind: .connected, since: since)
-        XCTAssertEqual(ServerConnectionDot.helpText(connected, now: since), "Connected · Since \(since.formatted(date: .omitted, time: .shortened))")
+        XCTAssertEqual(ServerConnectionDot.helpText(connected, now: since), "Connected · Since \(since.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(L10n.locale)))")
         XCTAssertEqual(ServerConnectionDot.helpText(.notConnected), "Not connected")
     }
 

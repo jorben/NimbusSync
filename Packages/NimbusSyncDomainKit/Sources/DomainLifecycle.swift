@@ -8,7 +8,9 @@ public enum DomainLifecycleError: Error, Equatable, LocalizedError, Sendable {
     case dirtyData
     case system(ErrorDescription)
 
-    public var errorDescription: String? {
+    public var errorDescription: String? { L10n.text(userMessage) }
+
+    private var userMessage: String {
         switch self {
         case .invalidIdentifier:
             "The File Provider domain identifier is invalid."
@@ -107,7 +109,9 @@ public struct ErrorDescription: Equatable, Sendable, CustomStringConvertible {
         return "file_provider_error:\(domain)"
     }
 
-    public var userMessage: String {
+    public var userMessage: String { L10n.text(sourceUserMessage) }
+
+    private var sourceUserMessage: String {
         guard let domain, let code else {
             return "The File Provider service could not complete this request."
         }

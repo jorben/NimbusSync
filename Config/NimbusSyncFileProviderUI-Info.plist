@@ -27,26 +27,42 @@
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.fileprovider-actions-ui</string>
+        <string>com.apple.fileprovider-actionsui</string>
         <key>NSExtensionPrincipalClass</key>
         <string>$(PRODUCT_MODULE_NAME).ActionViewController</string>
         <key>NSExtensionFileProviderActions</key>
         <array>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.open-in-nimbussync</string>
-                <key>Title</key>
-                <string>Open in NimbusSync</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.open-in-nimbussync</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
             </dict>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.open-in-nimbussync.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.open-in-nimbussync</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.resolve-conflict</string>
-                <key>Title</key>
-                <string>Resolve Conflict</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.hasConflict == TRUE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.resolve-conflict</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.hasConflict == TRUE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.resolve-conflict.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.resolve-conflict</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.hasConflict == TRUE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
             </dict>
         </array>
     </dict>

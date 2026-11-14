@@ -41,36 +41,68 @@
         <key>NSExtensionFileProviderActions</key>
         <array>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.check-for-updates</string>
-                <key>Title</key>
-                <string>Check for Updates</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.check-for-updates</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
             </dict>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.check-for-updates.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.check-for-updates</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.keep-downloaded</string>
-                <key>Title</key>
-                <string>Keep Downloaded</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == FALSE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.keep-downloaded</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == FALSE AND $fileproviderItem.userInfo.isUploading == FALSE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
             </dict>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.keep-downloaded.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.keep-downloaded</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == FALSE AND $fileproviderItem.userInfo.isUploading == FALSE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.allow-automatic-freeing</string>
-                <key>Title</key>
-                <string>Allow Automatic Freeing</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.allow-automatic-freeing</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
             </dict>
             <dict>
-                <key>Identifier</key>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.allow-automatic-freeing.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.allow-automatic-freeing</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canManageDownloadPolicy == TRUE AND $fileproviderItem.userInfo.keepDownloaded == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
                 <string>io.github.jorben.nimbussync.remove-download</string>
-                <key>Title</key>
-                <string>Remove Download</string>
-                <key>Predicate</key>
-                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canEvict == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE ).@count &gt; 0</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.en.remove-download</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canEvict == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE AND ($fileproviderItem.userInfo.nimbussyncLanguage == 'en' OR $fileproviderItem.userInfo.nimbussyncLanguage == nil) ).@count &gt; 0</string>
+            </dict>
+            <dict>
+                <key>NSExtensionFileProviderActionIdentifier</key>
+                <string>io.github.jorben.nimbussync.remove-download.zh-Hans</string>
+                <key>NSExtensionFileProviderActionName</key>
+                <string>finder.action.zh-Hans.remove-download</string>
+                <key>NSExtensionFileProviderActionActivationRule</key>
+                <string>SUBQUERY ( fileproviderItems, $fileproviderItem, $fileproviderItem.userInfo.authenticated == TRUE AND $fileproviderItem.userInfo.canEvict == TRUE AND $fileproviderItem.userInfo.isUploading == FALSE AND $fileproviderItem.userInfo.nimbussyncLanguage == 'zh-Hans' ).@count &gt; 0</string>
             </dict>
         </array>
         <key>NSFileProviderDecorations</key>
@@ -81,7 +113,7 @@
                 <key>BadgeImageType</key>
                 <string>com.apple.icon-decoration.badge.exclamationmark</string>
                 <key>Label</key>
-                <string>Conflict</string>
+                <dict><key>NSStringFormat</key><string>%@</string><key>NSStringFormatValues</key><array><string>item.userInfo.localizedConflictLabel</string></array></dict>
                 <key>Category</key>
                 <string>Badge</string>
             </dict>
@@ -91,7 +123,7 @@
                 <key>BadgeImageType</key>
                 <string>com.apple.icon-decoration.badge.exclamationmark</string>
                 <key>Label</key>
-                <string>Sync Error</string>
+                <dict><key>NSStringFormat</key><string>%@</string><key>NSStringFormatValues</key><array><string>item.userInfo.localizedSyncErrorLabel</string></array></dict>
                 <key>Category</key>
                 <string>Badge</string>
             </dict>
@@ -101,7 +133,7 @@
                 <key>BadgeImageType</key>
                 <string>com.apple.icon-decoration.badge.lock</string>
                 <key>Label</key>
-                <string>Keep Downloaded</string>
+                <dict><key>NSStringFormat</key><string>%@</string><key>NSStringFormatValues</key><array><string>item.userInfo.localizedKeepDownloadedLabel</string></array></dict>
                 <key>Category</key>
                 <string>Badge</string>
             </dict>

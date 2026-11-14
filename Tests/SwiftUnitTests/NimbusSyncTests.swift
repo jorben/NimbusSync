@@ -12,7 +12,7 @@ import CloudreveObservability
 import CloudreveDomainService
 import CloudreveProductKit
 
-final class NimbusSyncTests: XCTestCase {
+final class NimbusSyncTests: EnglishLocalizationTestCase {
     func testOpaqueIdentifiersAndScopeOverlap() throws {
         let domainID = CloudreveIdentifier.domain()
         XCTAssertTrue(CloudreveIdentifier.validate(domainID, prefix: CloudreveIdentifier.domainPrefix))

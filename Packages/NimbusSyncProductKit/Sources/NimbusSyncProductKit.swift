@@ -152,7 +152,7 @@ public struct NotificationPreferences: Codable, Equatable, Sendable {
 }
 
 public enum ProductCopy {
-    public static func text(_ key: String) -> String { String(localized: String.LocalizationValue(key), bundle: .module) }
+    public static func text(_ key: String) -> String { L10n.text(key) }
 }
 
 public actor ProductStore {
@@ -375,7 +375,7 @@ public actor NotificationCoordinator {
         var sent = userDefaults.stringArray(forKey: dedupeKey) ?? []
         let key = "\(kind):\(opaqueID)"
         guard !sent.contains(key) else { return }
-        let content = UNMutableNotificationContent(); content.title = title; content.body = body; content.categoryIdentifier = kind; content.sound = .default
+        let content = UNMutableNotificationContent(); content.title = L10n.text(title); content.body = body; content.categoryIdentifier = kind; content.sound = .default
         let action = kind == "auth" ? "reauthorize" : (kind == "failure" ? "task" : kind)
         content.userInfo = ["deepLink": "\(AppIdentity.urlScheme)://\(action)/\(opaqueID)"]
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)

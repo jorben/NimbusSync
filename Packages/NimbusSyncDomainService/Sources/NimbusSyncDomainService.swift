@@ -15,7 +15,9 @@ public enum DomainProvisioningError: Error, Equatable, LocalizedError, Sendable 
     case system(String)
     case rollbackRequired(String)
 
-    public var errorDescription: String? {
+    public var errorDescription: String? { L10n.text(userMessage) }
+
+    private var userMessage: String {
         switch self {
         case .overlappingScope:
             "This Cloudreve location overlaps an existing NimbusSync location."

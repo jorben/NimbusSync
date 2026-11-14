@@ -66,7 +66,7 @@ final class BetaUpdatesPreferenceTests: XCTestCase {
     }
 }
 
-final class AppUpdateStatusTests: XCTestCase {
+final class AppUpdateStatusTests: EnglishLocalizationTestCase {
     func testBannerCopy() {
         XCTAssertNil(AppUpdateStatus.none.bannerTitle)
         XCTAssertFalse(AppUpdateStatus.none.showsBadge)
@@ -92,7 +92,7 @@ final class AppUpdateStatusTests: XCTestCase {
 }
 
 @MainActor
-final class MenuBarUpdateBadgeTests: XCTestCase {
+final class MenuBarUpdateBadgeTests: EnglishLocalizationTestCase {
     private func pixels(_ image: NSImage) -> [UInt8] {
         let side = 44
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: side * 4, bitsPerPixel: 32)!

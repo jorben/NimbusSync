@@ -10,6 +10,7 @@ NIMBUSSYNC_APP_ICON_NAME = AppIcon
 // The Dev icon is part of the target for Debug only; keep it out of the shipping bundle.
 EXCLUDED_SOURCE_FILE_NAMES = AppIconDev.icon
 SWIFT_VERSION = 6.0
+SWIFT_EMIT_LOC_STRINGS = YES
 MACOSX_DEPLOYMENT_TARGET = 13.0
 // CFBundleShortVersionString. CI overrides it (and the build number) via Scripts/build.sh.
 MARKETING_VERSION = 0.1.0

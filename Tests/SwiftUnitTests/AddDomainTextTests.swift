@@ -4,7 +4,7 @@ import CloudreveDesignSystem
 import CloudreveDomainKit
 
 /// The Add Domain window turns what was typed into an address to check, and failures into words.
-final class AddDomainTextTests: XCTestCase {
+final class AddDomainTextTests: EnglishLocalizationTestCase {
     func testSubmittableOriginAddsHTTPSOnlyWhenNoSchemeWasTyped() {
         XCTAssertEqual(AddDomainText.submittableOrigin("cloud.example.com"), "https://cloud.example.com")
         XCTAssertEqual(AddDomainText.submittableOrigin("  nas.example.org:5212/cloud \n"), "https://nas.example.org:5212/cloud")

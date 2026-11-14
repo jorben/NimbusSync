@@ -6,7 +6,7 @@ import CloudreveDomainKit
 import CloudreveEventCoordinator
 import CloudreveStoreBridge
 
-final class ServerConnectionStatusTests: XCTestCase {
+final class ServerConnectionStatusTests: EnglishLocalizationTestCase {
     func testStatusKeepsTheOriginalTimeForRepeatedReports() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let connecting = DomainConnectionStatus().applying(.connecting, at: start)

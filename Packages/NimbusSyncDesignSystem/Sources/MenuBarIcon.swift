@@ -31,10 +31,10 @@ public enum MenuBarIconState: Equatable, Sendable {
 
     public var accessibilityLabel: String {
         switch self {
-        case .upToDate: "\(AppIdentity.displayName) – Up to date"
-        case .syncing: "\(AppIdentity.displayName) – Syncing"
-        case .paused: "\(AppIdentity.displayName) – Paused"
-        case .attention: "\(AppIdentity.displayName) – Needs attention"
+        case .upToDate: L10n.tr("\(AppIdentity.displayName) – Up to date")
+        case .syncing: L10n.tr("\(AppIdentity.displayName) – Syncing")
+        case .paused: L10n.tr("\(AppIdentity.displayName) – Paused")
+        case .attention: L10n.tr("\(AppIdentity.displayName) – Needs attention")
         }
     }
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CloudreveDomainKit
 
 // The building blocks of the General, Diagnostics and About pages. They speak the Domains page's
 // language — outlined cards, tinted icon tiles, the same type scale and insets — so every
@@ -9,6 +10,7 @@ import AppKit
 
 /// A titled card of rows with an optional explanation underneath, like a System Settings group.
 public struct SettingsGroup<Content: View, Footer: View>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let title: String?
     @ViewBuilder let content: () -> Content
     @ViewBuilder let footer: () -> Footer
@@ -22,7 +24,7 @@ public struct SettingsGroup<Content: View, Footer: View>: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing8) {
             if let title {
-                Text(title)
+                Text(L10n.text(title))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.leading, 2)
@@ -52,6 +54,7 @@ public extension SettingsGroup where Footer == EmptyView {
 /// One setting: a tinted icon tile, a title with an optional line of explanation, and the
 /// control on the right. A nested row drops the tile and lines up under its parent's title.
 public struct SettingsRow<Trailing: View>: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let symbol: String?
     public let tint: Color
     public let title: String
@@ -87,11 +90,11 @@ public struct SettingsRow<Trailing: View>: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(L10n.text(title))
                     .font(.system(size: isNested ? 13 : 14, weight: isNested ? .regular : .medium))
                     .foregroundStyle(isEnabled ? .primary : .secondary)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(L10n.text(subtitle))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -115,6 +118,7 @@ public extension SettingsRow where Trailing == EmptyView {
 
 /// A Settings switch with its row's title as the accessible label, drawn at System Settings' size.
 public struct SettingsSwitch: View {
+    @ObservedObject private var localization = AppLocalization.shared
     public let title: String
     @Binding public var isOn: Bool
 
@@ -124,7 +128,7 @@ public struct SettingsSwitch: View {
     }
 
     public var body: some View {
-        Toggle(title, isOn: $isOn)
+        Toggle(L10n.text(title), isOn: $isOn)
             .toggleStyle(.switch)
             .controlSize(.small)
             .labelsHidden()
@@ -240,10 +244,10 @@ public enum SettingsAboutText {
         let short = short?.trimmingCharacters(in: .whitespaces)
         let build = build?.trimmingCharacters(in: .whitespaces)
         guard let short, !short.isEmpty else {
-            if let build, !build.isEmpty { return "Build \(build)" }
-            return "Version unknown"
+            if let build, !build.isEmpty { return L10n.tr("Build \(build)") }
+            return L10n.tr("Version unknown")
         }
-        guard let build, !build.isEmpty, build != short else { return "Version \(short)" }
-        return "Version \(short) (\(build))"
+        guard let build, !build.isEmpty, build != short else { return L10n.tr("Version \(short)") }
+        return L10n.tr("Version \(short) (\(build))")
     }
 }

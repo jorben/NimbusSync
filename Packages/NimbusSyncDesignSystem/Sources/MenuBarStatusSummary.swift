@@ -22,24 +22,24 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
             headline = FinderIntegrationGuideText.offHeadline
             detail = FinderIntegrationGuideText.offDetail
         } else if domains.isEmpty {
-            headline = "Ready to connect"
-            detail = "Connect a Cloudreve domain to get started."
+            headline = L10n.tr("Ready to connect")
+            detail = L10n.tr("Connect a Cloudreve domain to get started.")
         } else if attentionCount > 0 {
-            headline = "Needs your attention"
-            detail = "\(attentionCount) domain\(attentionCount == 1 ? "" : "s") need a review."
+            headline = L10n.tr("Needs your attention")
+            detail = L10n.tr("\(attentionCount) domains need a review.")
         } else if activeTaskCount > 0 {
-            headline = "Syncing your files"
-            detail = "Changes are being processed in the background."
+            headline = L10n.tr("Syncing your files")
+            detail = L10n.tr("Changes are being processed in the background.")
         } else {
             headline = overall.title
             detail = switch overall {
-            case .healthy: "Your connected domains are ready in Finder."
-            case .eventDegraded: "Live updates are unavailable; NimbusSync will reconcile when possible."
-            case .appNotRunning: "NimbusSync is not running; launch it to resume live updates."
-            case .syncing: "NimbusSync is processing changes in the background."
-            case .reconciling, .initializing: "NimbusSync is checking your connected domains."
-            case .removalPreflight: "A domain is being removed."
-            default: "Your connected domains are being prepared."
+            case .healthy: L10n.tr("Your connected domains are ready in Finder.")
+            case .eventDegraded: L10n.tr("Live updates are unavailable; NimbusSync will reconcile when possible.")
+            case .appNotRunning: L10n.tr("NimbusSync is not running; launch it to resume live updates.")
+            case .syncing: L10n.tr("NimbusSync is processing changes in the background.")
+            case .reconciling, .initializing: L10n.tr("NimbusSync is checking your connected domains.")
+            case .removalPreflight: L10n.tr("A domain is being removed.")
+            default: L10n.tr("Your connected domains are being prepared.")
             }
         }
 
@@ -57,14 +57,14 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
                 lines.append("\(domain.displayName): \(domain.status.title)")
             }
             if domains.count > Self.maximumDomainLines {
-                lines.append("and \(domains.count - Self.maximumDomainLines) more")
+                lines.append(L10n.tr("and \(domains.count - Self.maximumDomainLines) more"))
             }
         }
         if activeTaskCount > 0 {
-            lines.append("\(activeTaskCount) transfer\(activeTaskCount == 1 ? "" : "s") in progress")
+            lines.append(L10n.tr("\(activeTaskCount) transfers in progress"))
         }
         if hasActionableConflicts {
-            lines.append("Conflicts need review")
+            lines.append(L10n.tr("Conflicts need review"))
         }
         tooltip = lines.joined(separator: "\n")
     }
@@ -72,18 +72,18 @@ public struct MenuBarStatusSummary: Sendable, Equatable {
     private static func subtitle(domains: [DomainDescriptor], attentionCount: Int, activeTaskCount: Int, overall: DomainStatus) -> String {
         let total = domains.count
         let busy = domains.filter { $0.status == .syncing || $0.status == .reconciling }.count
-        if total == 0 { return "No domains connected" }
+        if total == 0 { return L10n.tr("No domains connected") }
         if attentionCount > 0 {
-            return total == 1 ? "Needs your attention" : "\(attentionCount) of \(total) domains need attention"
+            return total == 1 ? L10n.tr("Needs your attention") : L10n.tr("\(attentionCount) of \(total) domains need attention")
         }
         if busy > 0 {
-            return total == 1 ? "Syncing" : "Syncing \(busy) of \(total) domains"
+            return total == 1 ? L10n.tr("Syncing") : L10n.tr("Syncing \(busy) of \(total) domains")
         }
         if activeTaskCount > 0 {
-            return "Syncing \(activeTaskCount) file\(activeTaskCount == 1 ? "" : "s")"
+            return L10n.tr("Syncing \(activeTaskCount) files")
         }
         if domains.allSatisfy({ $0.status == .healthy }) {
-            return total == 1 ? "Up to date" : "All \(total) domains up to date"
+            return total == 1 ? L10n.tr("Up to date") : L10n.tr("All \(total) domains up to date")
         }
         return overall.title
     }

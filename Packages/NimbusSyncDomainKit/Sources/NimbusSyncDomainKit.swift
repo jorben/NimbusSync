@@ -420,7 +420,8 @@ public enum ProjectionSchema {
     // capabilities come from the shared Cloudreve item mapper.
     // 4: items publish real POSIX file-system flags; earlier projections
     // exposed folders as mode 0100, so cached items must be re-emitted.
-    public static let currentRevision: UInt64 = 4
+    // 5: items publish language-aware Finder action and decoration metadata.
+    public static let currentRevision: UInt64 = 5
     public static let itemPayloadVersion: UInt8 = 1
 }
 
@@ -926,7 +927,7 @@ public struct DomainDescriptor: Codable, Equatable, Sendable {
     }
 }
 
-public enum CoreErrorCode: String, Codable, Sendable {
+public enum CoreErrorCode: String, Codable, CaseIterable, Sendable {
     case authentication, network, permissionDenied = "permission_denied", notFound = "not_found", quotaExceeded = "quota_exceeded", versionConflict = "version_conflict", nameCollision = "name_collision", invalidName = "invalid_name", integrityFailure = "integrity_failure", cancelled, unsupportedServer = "unsupported_server", database, unsupportedMetadata = "unsupported_metadata", rootUnavailable = "root_unavailable", scopeConflict = "scope_conflict", unknownOutcome = "unknown_outcome", awaitingSourceReplay = "awaiting_source_replay", excludedFromSync = "excluded_from_sync", directoryNotEmpty = "directory_not_empty", cannotSynchronize = "cannot_synchronize"
 }
 

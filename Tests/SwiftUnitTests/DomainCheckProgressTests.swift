@@ -4,7 +4,7 @@ import CloudreveDesignSystem
 import CloudreveDomainKit
 import CloudreveStoreBridge
 
-final class DomainCheckProgressTests: XCTestCase {
+final class DomainCheckProgressTests: EnglishLocalizationTestCase {
     private let start = Date(timeIntervalSince1970: 1_800_000_000)
 
     func testEstimateUsesThePreviousItemCountAndNeverClaimsCompletion() {

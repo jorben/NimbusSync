@@ -158,8 +158,8 @@ final class AppUpdater: NSObject, ObservableObject {
             let status = await center.notificationSettings().authorizationStatus
             guard status == .authorized || status == .provisional else { return }
             let content = UNMutableNotificationContent()
-            content.title = "\(AppIdentity.displayName) \(version) is available"
-            content.body = "Click to see what's new."
+            content.title = L10n.tr("\(AppIdentity.displayName) \(version) is available")
+            content.body = L10n.tr("Click to see what's new.")
             content.userInfo = [Self.notificationActionKey: Self.notificationShowUpdateAction]
             try? await center.add(UNNotificationRequest(identifier: Self.notificationIdentifier, content: content, trigger: nil))
         }

@@ -3,7 +3,29 @@ import Combine
 import AppKit
 import CloudreveDomainKit
 
+/// Translate the presentation of persisted conflict codes without changing their stored values.
+public enum ProductConflictText {
+    public static func kind(_ code: String) -> String {
+        switch code {
+        case "version_conflict": L10n.tr("Changed on both sides")
+        case "name_collision": L10n.tr("Name already in use")
+        default: code
+        }
+    }
+
+    public static func summary(_ value: String) -> String {
+        if value == "metadata" { return L10n.tr("Metadata changed") }
+        if value == "remote_version_unknown" { return L10n.tr("Remote version unknown") }
+        if value.hasPrefix("version:") { return L10n.tr("Version \(String(value.dropFirst(8)))") }
+        if value.hasPrefix("bytes:"), let size = Int64(value.dropFirst(6)) {
+            return CloudreveLocalization.format(bytes: size)
+        }
+        return value
+    }
+}
+
 public struct ConflictCenterView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @Binding public var conflicts: [ProductConflict]
     public let onKeepRemote: (ProductConflict) -> Void
     public let onOverwriteRemote: (ProductConflict) -> Void
@@ -15,7 +37,7 @@ public struct ConflictCenterView: View {
     public var body: some View {
         NavigationSplitView {
             List(conflicts.filter { $0.state == "pending" }, selection: $selectedID) { conflict in
-                VStack(alignment: .leading) { Text(conflict.filename); Text(conflict.kind).font(.caption).foregroundStyle(.secondary) }
+                VStack(alignment: .leading) { Text(conflict.filename); Text(ProductConflictText.kind(conflict.kind)).font(.caption).foregroundStyle(.secondary) }
                     .tag(conflict.id)
             }
             .navigationTitle("Conflicts")
@@ -23,9 +45,9 @@ public struct ConflictCenterView: View {
             if let first = conflicts.first(where: { $0.id == selectedID }) ?? conflicts.first(where: { $0.state == "pending" }) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(first.filename).font(.title2)
-                    Text("Base: \(first.baseSummary)").font(.caption).foregroundStyle(.secondary)
-                    Text("Local: \(first.localSummary)")
-                    Text("Remote: \(first.remoteSummary)")
+                    Text("Base: \(ProductConflictText.summary(first.baseSummary))").font(.caption).foregroundStyle(.secondary)
+                    Text("Local: \(ProductConflictText.summary(first.localSummary))")
+                    Text("Remote: \(ProductConflictText.summary(first.remoteSummary))")
                     HStack {
                         Button("Keep Remote") { onKeepRemote(first) }.buttonStyle(.bordered)
                         Button("Overwrite Remote") { onOverwriteRemote(first) }.buttonStyle(.bordered).disabled(!first.sourceAvailable)
@@ -46,6 +68,7 @@ public struct ConflictCenterView: View {
 }
 
 public struct ExclusionRulesView: View {
+    @ObservedObject private var localization = AppLocalization.shared
     @State private var text: String
     public let onApply: (String) -> Void
     public init(initialText: String = "", onApply: @escaping (String) -> Void) { _text = State(initialValue: initialText); self.onApply = onApply }

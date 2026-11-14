@@ -7,7 +7,7 @@ import CloudreveDomainKit
 /// Finder integration switched off in System Settings stops every sync, so the app must say so
 /// on its own: a paused menu bar glyph, a banner, a Settings card and a guide that offers itself.
 @MainActor
-final class FinderIntegrationGuideTests: XCTestCase {
+final class FinderIntegrationGuideTests: EnglishLocalizationTestCase {
     private func domain(_ status: DomainStatus) throws -> DomainDescriptor {
         let scope = try RemoteScope(origin: "https://cloudreve.example", accountID: "account", rootURI: CloudreveRemoteURI.canonical("/", accountID: "account"))
         var descriptor = DomainDescriptor(displayName: "data@cloud", scope: scope, rootRemoteID: "root", accountID: "account", secretReference: "s")

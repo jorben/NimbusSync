@@ -23,6 +23,9 @@
 		A1000000000000000000000A /* NimbusSyncFileProviderUI.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* NimbusSyncFileProviderUI.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A1000000000000000000000F /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A50000000000000000000006 /* Sparkle */; };
 		A10000000000000000000010 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* AppUpdater.swift */; };
+		AB1000000000000000000001 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = AB2000000000000000000001; };
+		AB1000000000000000000002 /* Localizable.stringsdict in Resources */ = {isa = PBXBuildFile; fileRef = AB2000000000000000000002; };
+		AB1000000000000000000003 /* CloudreveDomainKit in UI Frameworks */ = {isa = PBXBuildFile; productRef = A50000000000000000000002; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,17 +51,26 @@
 		A20000000000000000000010 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		A20000000000000000000011 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
 		A20000000000000000000017 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
+		AB2000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		AB2000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		AB2000000000000000000021 = {isa = PBXFileReference; lastKnownFileType = text.plist.stringsdict; name = en; path = en.lproj/Localizable.stringsdict; sourceTree = "<group>"; };
+		AB2000000000000000000022 = {isa = PBXFileReference; lastKnownFileType = text.plist.stringsdict; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.stringsdict"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXVariantGroup section */
+		AB2000000000000000000001 = {isa = PBXVariantGroup; children = (AB2000000000000000000011, AB2000000000000000000012, ); name = Localizable.strings; sourceTree = "<group>"; };
+		AB2000000000000000000002 = {isa = PBXVariantGroup; children = (AB2000000000000000000021, AB2000000000000000000022, ); name = Localizable.stringsdict; sourceTree = "<group>"; };
+/* End PBXVariantGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A30000000000000000000001 /* NimbusSync Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000008, A1000000000000000000000B, A1000000000000000000000F, ); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000002 /* NimbusSyncFileProvider Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006, ); runOnlyForDeploymentPostprocessing = 0; };
-		A30000000000000000000003 /* NimbusSyncFileProviderUI Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000003 /* NimbusSyncFileProviderUI Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (AB1000000000000000000003, ); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000004 /* NimbusSyncTests Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006, A40000000000000000000007, ); sourceTree = "<group>"; };
+		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006, A40000000000000000000007, AB4000000000000000000001, ); sourceTree = "<group>"; };
 		A40000000000000000000002 /* Apps */ = {isa = PBXGroup; children = (A40000000000000000000008, ); path = Apps; sourceTree = "<group>"; };
 		A40000000000000000000003 /* Extensions */ = {isa = PBXGroup; children = (A40000000000000000000009, A4000000000000000000000A, ); path = Extensions; sourceTree = "<group>"; };
 		A40000000000000000000004 /* Config */ = {isa = PBXGroup; children = (A20000000000000000000009, A2000000000000000000000A, A2000000000000000000000B, A2000000000000000000000C, A2000000000000000000000E, A2000000000000000000000F, A20000000000000000000010, A20000000000000000000011, A20000000000000000000012, A20000000000000000000013, ); path = Config; sourceTree = "<group>"; };
@@ -68,12 +80,13 @@
 		A40000000000000000000009 /* NimbusSyncFileProvider */ = {isa = PBXGroup; children = (A20000000000000000000002, ); path = NimbusSyncFileProvider; sourceTree = "<group>"; };
 		A4000000000000000000000A /* NimbusSyncFileProviderUI */ = {isa = PBXGroup; children = (A20000000000000000000003, ); path = NimbusSyncFileProviderUI; sourceTree = "<group>"; };
 		A4000000000000000000000B /* SwiftUnitTests */ = {isa = PBXGroup; children = (A20000000000000000000004, ); path = SwiftUnitTests; sourceTree = "<group>"; };
+		AB4000000000000000000001 /* Shared localizations */ = {isa = PBXGroup; children = (AB2000000000000000000001, AB2000000000000000000002, ); name = "Shared localizations"; path = Packages/NimbusSyncDomainKit/Sources/Resources; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
 		A60000000000000000000001 /* NimbusSync */ = {isa = PBXNativeTarget; buildConfigurationList = A70000000000000000000001; buildPhases = (A3000000000000000000000D, A30000000000000000000001, A30000000000000000000006, A3000000000000000E, ); buildRules = (); dependencies = (A80000000000000000000001, A80000000000000000000002, ); name = NimbusSync; packageProductDependencies = (A50000000000000000000001, A50000000000000000000002, A50000000000000000000003, A50000000000000000000004, A50000000000000000000005, A50000000000000000000006, ); productName = NimbusSync; productReference = A20000000000000000000005; productType = "com.apple.product-type.application"; };
 		A60000000000000000000002 /* NimbusSyncFileProvider */ = {isa = PBXNativeTarget; buildConfigurationList = A70000000000000000000002; buildPhases = (A30000000000000000000007, A30000000000000000000002, A30000000000000000000008, ); buildRules = (); dependencies = (); name = NimbusSyncFileProvider; packageProductDependencies = (A50000000000000000000003, ); productName = NimbusSyncFileProvider; productReference = A20000000000000000000006; productType = "com.apple.product-type.app-extension"; };
-		A60000000000000000000003 /* NimbusSyncFileProviderUI */ = {isa = PBXNativeTarget; buildConfigurationList = A70000000000000000000003; buildPhases = (A30000000000000000000009, A30000000000000000000003, A3000000000000000000000A, ); buildRules = (); dependencies = (); name = NimbusSyncFileProviderUI; packageProductDependencies = (); productName = NimbusSyncFileProviderUI; productReference = A20000000000000000000007; productType = "com.apple.product-type.app-extension"; };
+		A60000000000000000000003 /* NimbusSyncFileProviderUI */ = {isa = PBXNativeTarget; buildConfigurationList = A70000000000000000000003; buildPhases = (A30000000000000000000009, A30000000000000000000003, A3000000000000000000000A, ); buildRules = (); dependencies = (); name = NimbusSyncFileProviderUI; packageProductDependencies = (A50000000000000000000002, ); productName = NimbusSyncFileProviderUI; productReference = A20000000000000000000007; productType = "com.apple.product-type.app-extension"; };
 		A60000000000000000000004 /* NimbusSyncTests */ = {isa = PBXNativeTarget; buildConfigurationList = A70000000000000000000004; buildPhases = (A3000000000000000000000B, A30000000000000000000004, A3000000000000000000000C, ); buildRules = (); dependencies = (A80000000000000000000003, ); name = NimbusSyncTests; packageProductDependencies = (A50000000000000000000001, A50000000000000000000002, A50000000000000000000003, A50000000000000000000004, ); productName = NimbusSyncTests; productReference = A20000000000000000000008; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
 
@@ -82,9 +95,9 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A30000000000000000000006 /* NimbusSync Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, A1000000000000000000000E, ); runOnlyForDeploymentPostprocessing = 0; };
-		A30000000000000000000008 /* NimbusSyncFileProvider Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		A3000000000000000000000A /* NimbusSyncFileProviderUI Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000006 /* NimbusSync Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, A1000000000000000000000E, AB1000000000000000000001, AB1000000000000000000002, ); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000008 /* NimbusSyncFileProvider Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (AB1000000000000000000001, AB1000000000000000000002, ); runOnlyForDeploymentPostprocessing = 0; };
+		A3000000000000000000000A /* NimbusSyncFileProviderUI Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (AB1000000000000000000001, AB1000000000000000000002, ); runOnlyForDeploymentPostprocessing = 0; };
 		A3000000000000000000000C /* NimbusSyncTests Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
