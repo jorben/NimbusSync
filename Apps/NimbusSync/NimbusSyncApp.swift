@@ -2560,6 +2560,8 @@ private struct SettingsView: View {
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
+                        Spacer(minLength: NimbusSyncDesignTokens.spacing12)
+                        aboutUpdateControls
                     }
                     Divider()
                     Text("A native File Provider client for self-hosted Cloudreve instances. Your domains appear in the Finder sidebar, and files download only when you open them.")
@@ -2579,6 +2581,25 @@ private struct SettingsView: View {
                 SettingsRow(symbol: "chevron.left.forwardslash.chevron.right", tint: .gray, title: "Source code") {
                     SettingsLinkButton(title: "github.com/jorben/NimbusSync") { openURL(SettingsLinks.repository) }
                         .help(SettingsLinks.repository.absoluteString)
+                }
+            }
+        }
+    }
+
+    /// The About page's Check for Updates… entry; hidden when this build has no updater
+    /// (the Updates group on General explains why).
+    @ViewBuilder
+    private var aboutUpdateControls: some View {
+        if updater.configuration.unavailability == nil {
+            VStack(alignment: .trailing, spacing: 4) {
+                // Not gated on canCheckForUpdates, like the menus: with a gentle reminder
+                // pending, this brings that update's window forward.
+                Button("Check for Updates…", action: updater.checkForUpdates)
+                    .controlSize(.regular)
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(AppUpdateSettingsText.lastChecked(updater.lastUpdateCheckDate, now: context.date))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
