@@ -8,6 +8,8 @@
 
 > Parity implementation update：projection-schema refresh、item action projection、special-file policy 和 release static gates 已实现；signed Finder、Cloudreve matrix、性能、长稳和 notarization 仍是 1.0 No-Go 条件，见 [parity report](./archive/reports/phase-5-nextcloud-parity-implementation.md)。
 
+> 2026-11-14 本地化增量：English / 简体中文共享资源、应用内语言选择及实时刷新已实现，验证记录见[双语本地化报告](./reports/english-simplified-chinese-localization.md)。此增量不代表本阶段全部 11 种语言和发布矩阵完成。
+
 ## 1. 需求背景
 
 阶段 0 至 3 建立了协议、File Provider、持久化、读写路径和最终一致性。1.0 仍不能只以“同步核心可运行”为发布标准：用户需要可理解的菜单栏状态、设置、冲突处理、通知、Finder 操作、本机排除、诊断、多语言和安全卸载；工程还必须通过签名、公证、升级、兼容性、性能、可访问性和长稳验证。

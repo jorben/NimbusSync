@@ -1,0 +1,1 @@
+PASS: Follow System resolves host Chinese language; original effective preference restored

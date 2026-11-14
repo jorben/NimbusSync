@@ -1,0 +1,24 @@
+{
+  "en": {
+    "observed_item_language": "en",
+    "visible_actions": [
+      "Check for Updates",
+      "Keep Downloaded",
+      "Open in NimbusSync"
+    ],
+    "unresolved_keys": [],
+    "method": "System-managed signed Debug File Provider, fileproviderctl evaluate and Finder Quick Actions accessibility inspection",
+    "integration_final_state": "enabled"
+  },
+  "zh-Hans": {
+    "observed_item_language": "zh-Hans",
+    "visible_actions": [
+      "保留下载",
+      "在 NimbusSync 中打开",
+      "检查文件更新"
+    ],
+    "unresolved_keys": [],
+    "method": "System-managed signed Debug File Provider, fileproviderctl evaluate and Finder Quick Actions accessibility inspection",
+    "integration_final_state": "enabled"
+  }
+}

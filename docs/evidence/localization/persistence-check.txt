@@ -1,0 +1,1 @@
+PASS: Simplified Chinese preference persisted after app relaunch

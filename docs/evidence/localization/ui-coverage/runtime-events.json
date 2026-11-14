@@ -1,0 +1,158 @@
+[
+  {
+    "event" : "ready",
+    "language" : "en"
+  },
+  {
+    "event" : "snapshot",
+    "language" : "en",
+    "windows" : [
+      {
+        "height" : 560,
+        "name" : "authorization-browser",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6825
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-checking",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6824
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-finishing",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6826
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-review",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6827
+      },
+      {
+        "height" : 550,
+        "name" : "conflicts",
+        "visible" : true,
+        "width" : 800,
+        "window" : 6828
+      },
+      {
+        "height" : 700,
+        "name" : "domains-narrow",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6823
+      },
+      {
+        "height" : 700,
+        "name" : "domains-wide",
+        "visible" : true,
+        "width" : 820,
+        "window" : 6822
+      },
+      {
+        "height" : 579,
+        "name" : "finder-guide",
+        "visible" : true,
+        "width" : 520,
+        "window" : 6829
+      }
+    ]
+  },
+  {
+    "event" : "live-panel-switch",
+    "language" : "en",
+    "panel_still_open" : true,
+    "panel_was_open" : true,
+    "same_panel_window" : true
+  },
+  {
+    "event" : "live-panel-switch",
+    "language" : "zh-Hans",
+    "panel_still_open" : true,
+    "panel_was_open" : true,
+    "same_panel_window" : true
+  },
+  {
+    "event" : "live-panel-switch",
+    "language" : "en",
+    "panel_still_open" : true,
+    "panel_was_open" : true,
+    "same_panel_window" : true
+  },
+  {
+    "event" : "language",
+    "language" : "zh-Hans",
+    "panel_still_open" : true,
+    "panel_was_open" : true,
+    "same_panel_window" : true
+  },
+  {
+    "event" : "snapshot",
+    "language" : "zh-Hans",
+    "windows" : [
+      {
+        "height" : 560,
+        "name" : "authorization-browser",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6825
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-checking",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6824
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-finishing",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6826
+      },
+      {
+        "height" : 560,
+        "name" : "authorization-review",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6827
+      },
+      {
+        "height" : 550,
+        "name" : "conflicts",
+        "visible" : true,
+        "width" : 800,
+        "window" : 6828
+      },
+      {
+        "height" : 700,
+        "name" : "domains-narrow",
+        "visible" : true,
+        "width" : 580,
+        "window" : 6823
+      },
+      {
+        "height" : 700,
+        "name" : "domains-wide",
+        "visible" : true,
+        "width" : 820,
+        "window" : 6822
+      },
+      {
+        "height" : 564,
+        "name" : "finder-guide",
+        "visible" : true,
+        "width" : 520,
+        "window" : 6829
+      }
+    ]
+  }
+]
