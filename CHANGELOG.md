@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-11-14
+### :sparkles: New Features
+- [`22641c5`](https://github.com/jorben/NimbusSync/commit/22641c5c545e9ae4958d1ca6f9d0d268b51a30a4) - **i18n**: ✨ Add English and Simplified Chinese localization *(commit by [@jorben](https://github.com/jorben))*
+- [`d681f0c`](https://github.com/jorben/NimbusSync/commit/d681f0c357acfdde99a82ebcadaa04bac2f9e56e) - **ui**: ✨ Add Check for Updates to About page *(commit by [@jorben](https://github.com/jorben))*
+
+### :recycle: Refactors
+- [`b96c86c`](https://github.com/jorben/NimbusSync/commit/b96c86c4c4366e5e59af93e889f8533fbe8b0d88) - **ui**: ♻️ Refine About page layout *(commit by [@jorben](https://github.com/jorben))*
+- [`a5ec8da`](https://github.com/jorben/NimbusSync/commit/a5ec8dad14d3eb316847c6ca431b53c59c042d6b) - **ui**: ♻️ Move version badge beside app name *(commit by [@jorben](https://github.com/jorben))*
+
+### :wrench: Chores
+- [`f9ba1b5`](https://github.com/jorben/NimbusSync/commit/f9ba1b59018ca7f312d687907373625011909c21) - **i18n**: 🔧 Add isolated localization preview tool *(commit by [@jorben](https://github.com/jorben))*
+
+
 ## [0.1.1] - 2026-11-13
 ### :sparkles: New Features
 - [`15a9e0f`](https://github.com/jorben/NimbusSync/commit/15a9e0f8e158f606acd67120ed8a0f79ec2dba37) - **macos**: ✨ Complete Phase 0-4 review hardening *(commit by [@jorben](https://github.com/jorben))*
@@ -102,3 +115,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [`9d52f9c`](https://github.com/jorben/NimbusSync/commit/9d52f9ccb3879ca215cd3437b3b01482d7f08f95) - 🔧 Point repository links to jorben/NimbusSync *(commit by [@jorben](https://github.com/jorben))*
 
 [0.1.1]: https://github.com/jorben/NimbusSync/compare/0.0.1...0.1.1
+[0.1.2]: https://github.com/jorben/NimbusSync/compare/0.1.1...0.1.2
