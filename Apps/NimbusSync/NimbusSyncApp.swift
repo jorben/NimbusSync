@@ -2543,25 +2543,25 @@ private struct SettingsView: View {
     private var aboutPage: some View {
         SettingsPage(section: .about) {
             SettingsCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .center, spacing: 14) {
+                VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing16) {
+                    HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing16) {
                         AppIconView(size: 64)
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 10) {
-                                Text(AppIdentity.displayName)
-                                    .font(.system(size: 20, weight: .semibold))
-                                    .accessibilityAddTraits(.isHeader)
-                                SettingsTagBadge(SettingsAboutText.version(
-                                    short: AppIdentity.version,
-                                    build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
-                                ), tint: NimbusSyncDesignTokens.brandTextColor)
-                            }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(AppIdentity.displayName)
+                                .font(.system(size: 20, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .accessibilityAddTraits(.isHeader)
                             Text("Cloudreve for macOS")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
+                            SettingsTagBadge(SettingsAboutText.version(
+                                short: AppIdentity.version,
+                                build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+                            ), tint: NimbusSyncDesignTokens.brandTextColor)
+                            .textSelection(.enabled)
                         }
-                        Spacer(minLength: NimbusSyncDesignTokens.spacing12)
-                        aboutUpdateControls
+                        Spacer(minLength: 0)
                     }
                     Divider()
                     Text("A native File Provider client for self-hosted Cloudreve instances. Your domains appear in the Finder sidebar, and files download only when you open them.")
@@ -2571,6 +2571,8 @@ private struct SettingsView: View {
                 }
                 .padding(NimbusSyncDesignTokens.spacing16)
             }
+
+            aboutUpdatesGroup
 
             SettingsGroup("Resources") {
                 SettingsRow(symbol: "checkmark.seal", tint: .green, title: "License") {
@@ -2586,20 +2588,25 @@ private struct SettingsView: View {
         }
     }
 
-    /// The About page's Check for Updates… entry; hidden when this build has no updater
-    /// (the Updates group on General explains why).
+    /// The About page's manual update entry, laid out like General's Updates group. Builds
+    /// without an updater show why instead of a button.
     @ViewBuilder
-    private var aboutUpdateControls: some View {
-        if updater.configuration.unavailability == nil {
-            VStack(alignment: .trailing, spacing: 4) {
-                // Not gated on canCheckForUpdates, like the menus: with a gentle reminder
-                // pending, this brings that update's window forward.
-                Button("Check for Updates…", action: updater.checkForUpdates)
-                    .controlSize(.regular)
+    private var aboutUpdatesGroup: some View {
+        SettingsGroup("Updates") {
+            if let reason = updater.configuration.unavailability {
+                SettingsRow(symbol: "arrow.down.circle", tint: .blue, title: "Software updates", subtitle: AppUpdateSettingsText.unavailableReason(reason))
+            } else {
                 TimelineView(.periodic(from: .now, by: 60)) { context in
-                    Text(AppUpdateSettingsText.lastChecked(updater.lastUpdateCheckDate, now: context.date))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    SettingsRow(
+                        symbol: "arrow.down.circle",
+                        tint: .blue,
+                        title: "Software updates",
+                        subtitle: AppUpdateSettingsText.lastChecked(updater.lastUpdateCheckDate, now: context.date)
+                    ) {
+                        // Not gated on canCheckForUpdates, like the menus: with a gentle reminder
+                        // pending, this brings that update's window forward.
+                        Button("Check for Updates…", action: updater.checkForUpdates)
+                    }
                 }
             }
         }
