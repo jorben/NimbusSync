@@ -8,12 +8,11 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <language>en</language>
     <item>
       <title>NimbusSync 0.1.2</title>
-      <pubDate>Sat, 14 Nov 2026 10:08:15 GMT</pubDate>
+      <pubDate>Sat, 14 Nov 2026 14:43:56 GMT</pubDate>
       <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2</link>
       <sparkle:version>13</sparkle:version>
       <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-      <sparkle:channel>beta</sparkle:channel>
       <sparkle:fullReleaseNotesLink>https://github.com/jorben/NimbusSync/releases/tag/0.1.2</sparkle:fullReleaseNotesLink>
       <description sparkle:format="markdown">### :sparkles: New Features
 - [`22641c5`](https://github.com/jorben/NimbusSync/commit/22641c5c545e9ae4958d1ca6f9d0d268b51a30a4) - **i18n**: ✨ Add English and Simplified Chinese localization *(commit by @jorben)*
@@ -419,6 +418,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: 8sNjUA2qxEqZ7llqffTY/NcQYaZ4PYt/wtREd1MvBpLxf4Y+AmtRHo+Z1U90jfYBj/qHy9BTcv3Jgsf5n/TGCg==
-length: 59323
+edSignature: TfKddoiLatn0nwou9VcoC0AdsauftXWT9mJueWFPPb7gVeK0Cwlvr7W91DXb3NZYGXtqbKIa/xy7gHgFFbQqDQ==
+length: 59277
 -->
