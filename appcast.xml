@@ -7,6 +7,23 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for NimbusSync</description>
     <language>en</language>
     <item>
+      <title>NimbusSync 0.1.2-rc.2</title>
+      <pubDate>Sat, 14 Nov 2026 09:19:27 GMT</pubDate>
+      <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.2</link>
+      <sparkle:version>10</sparkle:version>
+      <sparkle:shortVersionString>0.1.2-rc.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:channel>beta</sparkle:channel>
+      <sparkle:fullReleaseNotesLink>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.2</sparkle:fullReleaseNotesLink>
+      <description sparkle:format="markdown">### :sparkles: New Features
+- [`22641c5`](https://github.com/jorben/NimbusSync/commit/22641c5c545e9ae4958d1ca6f9d0d268b51a30a4) - **i18n**: ✨ Add English and Simplified Chinese localization *(commit by @jorben)*
+- [`d681f0c`](https://github.com/jorben/NimbusSync/commit/d681f0c357acfdde99a82ebcadaa04bac2f9e56e) - **ui**: ✨ Add Check for Updates to About page *(commit by @jorben)*
+
+### :wrench: Chores
+- [`f9ba1b5`](https://github.com/jorben/NimbusSync/commit/f9ba1b59018ca7f312d687907373625011909c21) - **i18n**: 🔧 Add isolated localization preview tool *(commit by @jorben)*</description>
+      <enclosure url="https://github.com/jorben/NimbusSync/releases/download/0.1.2-rc.2/NimbusSync-0.1.2-rc.2.zip" length="14834550" type="application/octet-stream" sparkle:edSignature="FvfVl1Nxtu6cNg94ZZN2Bk2HmLDgZjAYSW+jsz88Aoj0nHCXNOZLGXvyHp3+h6M7XLkn4d990to+OQ/cNRC6DA=="></enclosure>
+    </item>
+    <item>
       <title>NimbusSync 0.1.2-rc.1</title>
       <pubDate>Sat, 14 Nov 2026 06:32:42 GMT</pubDate>
       <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.1</link>
@@ -340,6 +357,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: Wk9YuxcImGz9yNilVG/8NscGaEwEIDr27UPh3lZAzdKTJ+phL/kE/PZ6vPp/kFEPCOWJEfCtw/yyKZOJnoxnDw==
-length: 52446
+edSignature: 8BmlqD0LA0s0pp+fxbUbVWjadVfB+WNocvhyy3+EOHx9u02+AxY2+8lwfZ7Z4g8lhgtLsFkphmHmxExUOBuQDA==
+length: 53944
 -->
