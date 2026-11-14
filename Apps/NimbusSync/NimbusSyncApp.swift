@@ -2547,19 +2547,22 @@ private struct SettingsView: View {
                     HStack(alignment: .center, spacing: NimbusSyncDesignTokens.spacing16) {
                         AppIconView(size: 64)
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(AppIdentity.displayName)
-                                .font(.system(size: 20, weight: .semibold))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .accessibilityAddTraits(.isHeader)
+                            HStack(alignment: .center, spacing: 10) {
+                                Text(AppIdentity.displayName)
+                                    .font(.system(size: 20, weight: .semibold))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .accessibilityAddTraits(.isHeader)
+                                SettingsTagBadge(SettingsAboutText.version(
+                                    short: AppIdentity.version,
+                                    build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+                                ), tint: NimbusSyncDesignTokens.brandTextColor)
+                                .fixedSize()
+                                .textSelection(.enabled)
+                            }
                             Text("Cloudreve for macOS")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
-                            SettingsTagBadge(SettingsAboutText.version(
-                                short: AppIdentity.version,
-                                build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
-                            ), tint: NimbusSyncDesignTokens.brandTextColor)
-                            .textSelection(.enabled)
                         }
                         Spacer(minLength: 0)
                     }
