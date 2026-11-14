@@ -7,6 +7,22 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for NimbusSync</description>
     <language>en</language>
     <item>
+      <title>NimbusSync 0.1.2-rc.1</title>
+      <pubDate>Sat, 14 Nov 2026 06:32:42 GMT</pubDate>
+      <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.1</link>
+      <sparkle:version>9</sparkle:version>
+      <sparkle:shortVersionString>0.1.2-rc.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:channel>beta</sparkle:channel>
+      <sparkle:fullReleaseNotesLink>https://github.com/jorben/NimbusSync/releases/tag/0.1.2-rc.1</sparkle:fullReleaseNotesLink>
+      <description sparkle:format="markdown">### :sparkles: New Features
+- [`22641c5`](https://github.com/jorben/NimbusSync/commit/22641c5c545e9ae4958d1ca6f9d0d268b51a30a4) - **i18n**: ✨ Add English and Simplified Chinese localization *(commit by @jorben)*
+
+### :wrench: Chores
+- [`f9ba1b5`](https://github.com/jorben/NimbusSync/commit/f9ba1b59018ca7f312d687907373625011909c21) - **i18n**: 🔧 Add isolated localization preview tool *(commit by @jorben)*</description>
+      <enclosure url="https://github.com/jorben/NimbusSync/releases/download/0.1.2-rc.1/NimbusSync-0.1.2-rc.1.zip" length="14822065" type="application/octet-stream" sparkle:edSignature="XUTN2uvB7cXduSewt6gVtSEFqyYkTr+m5tkQarcQWwaW8I5pOykE3aXyWXEDzyoZdaFO2PBniQt5zpIlJhCTBQ=="></enclosure>
+    </item>
+    <item>
       <title>NimbusSync 0.1.1</title>
       <pubDate>Fri, 13 Nov 2026 18:51:14 GMT</pubDate>
       <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.1</link>
@@ -324,6 +340,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: oeJzBcdh7qSr9SPUqaS+DVLlZDIBFeok6VxwYucupXVh3VsoR7EbaFNtvi/6mBSZeMKX3atS4OSxoV4dFqO5DA==
-length: 51121
+edSignature: Wk9YuxcImGz9yNilVG/8NscGaEwEIDr27UPh3lZAzdKTJ+phL/kE/PZ6vPp/kFEPCOWJEfCtw/yyKZOJnoxnDw==
+length: 52446
 -->
