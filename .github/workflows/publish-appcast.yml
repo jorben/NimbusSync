@@ -23,7 +23,8 @@
 #   APPLE_ID                      Apple ID used for notarization (to read the notary history)
 #   APPLE_APP_SPECIFIC_PASSWORD   app-specific password of that Apple ID
 #
-# GitHub Pages must serve the gh-pages branch (Settings > Pages > Deploy from a branch).
+# gh-pages stores the signed feed. Deploy Website runs after this workflow succeeds,
+# combines it with website/, and deploys to Pages (Settings > Pages > GitHub Actions).
 name: Publish Appcast
 
 on:
@@ -57,7 +58,7 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release')
-    # One writer for gh-pages at a time. Set on the job, not the workflow, so only runs whose job
+    # One appcast writer for gh-pages at a time. Set on the job, not the workflow, so only runs whose job
     # actually runs join the group (skipped build completions never do). GitHub keeps at most one
     # pending job per group: if three publishes overlap, the middle pending one is cancelled and
     # must be re-run by hand (Publish Appcast > Run workflow).
@@ -309,4 +310,4 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit --quiet -m "chore: 🔧 Publish NimbusSync $VERSION to the $CHANNEL appcast"
           git push origin gh-pages
-          echo "Published $VERSION (build $BUILD) to $CHANNEL: $APPCAST_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Stored $VERSION (build $BUILD) on the $CHANNEL channel. Deploy Website will deploy $APPCAST_URL after this workflow succeeds." >> "$GITHUB_STEP_SUMMARY"

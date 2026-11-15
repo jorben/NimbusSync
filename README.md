@@ -16,7 +16,7 @@
 [![Cloudreve 4.12+](https://img.shields.io/badge/Cloudreve-4.12%2B-0070F3?style=flat-square)](#requirements)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-D22128?style=flat-square)](LICENSE)
 
-**English** | [简体中文](README.zh-CN.md)
+**English** | [简体中文](README.zh-CN.md) | [Website](https://jorben.github.io/NimbusSync/?lang=en)
 
 <img src="Design/Banner.png" alt="NimbusSync: your Cloudreve, native in Finder" width="100%">
 

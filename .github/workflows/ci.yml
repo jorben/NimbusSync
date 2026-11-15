@@ -43,6 +43,20 @@ jobs:
       - name: Run tests
         run: swift test --disable-sandbox --scratch-path "$RUNNER_TEMP/swiftpm"
 
+      - name: Check localization with an English host language
+        shell: bash
+        run: |
+          set -euo pipefail
+          # native SwiftPM emits one test bundle; swiftbuild emits one per test target.
+          # Scope AppleLanguages to the test processes; never change runner preferences.
+          find "$RUNNER_TEMP/swiftpm" -type d -name '*.xctest' -prune -print > "$RUNNER_TEMP/localization-test-bundles"
+          test -s "$RUNNER_TEMP/localization-test-bundles"
+          while IFS= read -r bundle; do
+            xcrun xctest -AppleLanguages '(en)' \
+              -XCTest 'NimbusSyncTests.LocalizationTests,NimbusSyncTests.LocalizationPresentationTests,NimbusSyncTests.AppMenuLocalizationTests,NimbusSyncTests.FinderLocalizationManifestTests,NimbusSyncFileProviderTests.FinderLocalizationProjectionTests' \
+              "$bundle"
+          done < "$RUNNER_TEMP/localization-test-bundles"
+
   build:
     name: Unsigned build
     runs-on: macos-26

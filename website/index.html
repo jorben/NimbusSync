@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f9fc">
+    <meta name="description" content="NimbusSync 把自托管的 Cloudreve 原生接入 macOS Finder。按需下载、后台同步、安全登录，让云端文件融入你的日常。">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="NimbusSync — 你的 Cloudreve，就在 Finder。">
+    <meta property="og:description" content="为 macOS 打造的开源 Cloudreve 客户端。按需下载，安心同步。">
+    <meta property="og:image" content="https://jorben.github.io/NimbusSync/assets/social.png">
+    <meta property="og:url" content="https://jorben.github.io/NimbusSync/">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="canonical" href="https://jorben.github.io/NimbusSync/">
+    <link rel="icon" type="image/png" href="assets/icon.png">
+    <link rel="apple-touch-icon" href="assets/icon.png">
+    <link rel="stylesheet" href="styles.css">
+    <script src="script.js" defer></script>
+    <title>NimbusSync — 你的 Cloudreve，就在 Finder。</title>
+</head>
+<body>
+    <a class="skip-link" href="#main" data-en="Skip to content">跳至内容</a>
+    <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a5 5 0 0 1-1-9.9 6.5 6.5 0 0 1 12.5 1.4A4.3 4.3 0 0 1 18 18H7Z"/></symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/><path d="M3 8h18"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+        <symbol id="i-sync" viewBox="0 0 24 24"><path d="M20 9a8 8 0 0 0-14-4L3 8m0-5v5h5M4 15a8 8 0 0 0 14 4l3-3m0 5v-5h-5"/></symbol>
+        <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+        <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+        <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-4 1-4-2-6-2m13 5v-4c0-1-.3-2-1-2.5 3-.4 6-1.5 6-6a4.7 4.7 0 0 0-1.3-3.3A4.5 4.5 0 0 0 19.6 3S18.5 2.7 16 4.3a13 13 0 0 0-8 0C5.5 2.7 4.4 3 4.4 3a4.5 4.5 0 0 0-.1 3.2A4.7 4.7 0 0 0 3 9.5c0 4.5 3 5.6 6 6-.7.5-1 1.5-1 2.5v4"/></symbol>
+        <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H5v20h14V7l-5-5Z"/><path d="M14 2v6h5M8 12h8m-8 4h6"/></symbol>
+        <symbol id="i-arrow" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    </svg>
+
+    <header class="site-header wrap">
+        <a href="./" class="brand" aria-label="NimbusSync"><img src="assets/icon.png" width="36" height="36" alt=""><span>NimbusSync</span></a>
+        <nav aria-label="主导航" data-en-aria="Main navigation">
+            <a class="nav-detail" href="#features" data-en="Features">功能</a>
+            <a class="nav-detail" href="#start" data-en="Get started">开始使用</a>
+            <a class="github-link" href="https://github.com/jorben/NimbusSync" aria-label="GitHub"><svg class="icon" aria-hidden="true"><use href="#i-github"/></svg><span class="nav-detail">GitHub</span></a>
+            <button id="language" type="button" hidden lang="en" aria-label="Switch to English">English</button>
+        </nav>
+    </header>
+
+    <main id="main">
+        <section class="hero wrap">
+            <div class="hero-copy">
+                <p class="platform"><span class="status-dot"></span><span data-en="Cloudreve, at home on your Mac">为你的 Mac，接上 Cloudreve</span></p>
+                <h1><span data-en="Your Cloudreve.">你的 Cloudreve，</span><br><span data-en="Right in Finder.">就在 Finder。</span></h1>
+                <p class="hero-description" data-en="Keep your files in your own cloud. Browse, open, and edit them in Finder. NimbusSync takes care of the sync.">文件留在自己的云端，工作留在熟悉的 Finder。浏览、打开、编辑，剩下的交给 NimbusSync。</p>
+                <div class="hero-actions">
+                    <a class="button primary" href="https://github.com/jorben/NimbusSync/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-en="Download for Mac">下载 Mac 版</span></a>
+                    <a class="text-link" href="https://github.com/jorben/NimbusSync/releases" data-en="Release notes">查看发布记录</a>
+                </div>
+                <p class="requirements" data-en="macOS 13+ · Apple silicon & Intel · Free & open source">macOS 13+ · Apple 芯片与 Intel · 免费开源</p>
+            </div>
+
+            <figure class="finder-scene">
+                <div class="finder-window" role="img" aria-label="Finder 工作方式示意：Cloudreve 出现在侧边栏，文件可在云端保存或下载到本地。" data-en-aria="Illustration of Finder: Cloudreve in the sidebar, with files stored in the cloud or downloaded locally.">
+                    <div class="finder-toolbar" aria-hidden="true"><div class="traffic-lights"><i></i><i></i><i></i></div><span class="finder-back">‹ &nbsp; ›</span><strong>Cloudreve</strong><span class="finder-view">▦</span></div>
+                    <div class="finder-body" aria-hidden="true">
+                        <aside class="finder-sidebar"><span class="sidebar-heading" data-en="Favorites">个人收藏</span><span><svg class="icon"><use href="#i-folder"/></svg><span data-en="Desktop">桌面</span></span><span><svg class="icon"><use href="#i-download"/></svg><span data-en="Downloads">下载</span></span><span class="sidebar-heading locations" data-en="Locations">位置</span><span class="sidebar-selected"><svg class="icon"><use href="#i-cloud"/></svg>Cloudreve</span></aside>
+                        <div class="finder-files">
+                            <div class="file-item"><svg class="folder-art"><use href="#i-folder"/></svg><span data-en="Projects">项目文件</span><svg class="file-status"><use href="#i-cloud"/></svg></div>
+                            <div class="file-item"><svg class="folder-art"><use href="#i-folder"/></svg><span data-en="Photos">照片</span><svg class="file-status"><use href="#i-cloud"/></svg></div>
+                            <div class="file-item"><svg class="folder-art"><use href="#i-folder"/></svg><span data-en="Archive">归档</span><svg class="file-status"><use href="#i-cloud"/></svg></div>
+                            <div class="file-item"><div class="document-art"><svg class="icon"><use href="#i-file"/></svg><small>PDF</small></div><span>Welcome.pdf</span><svg class="file-status local"><use href="#i-check"/></svg></div>
+                            <div class="file-item"><div class="photo-art"><div></div></div><span>Mountains.jpg</span><svg class="file-status"><use href="#i-cloud"/></svg></div>
+                            <div class="file-item"><div class="document-art blue"><svg class="icon"><use href="#i-file"/></svg><small>DOC</small></div><span>Notes.docx</span><svg class="file-status local"><use href="#i-check"/></svg></div>
+                        </div>
+                    </div>
+                    <div class="finder-footer" aria-hidden="true"><svg class="icon"><use href="#i-cloud"/></svg><span>Cloudreve</span><svg class="icon"><use href="#i-arrow"/></svg><span data-en="6 items">6 个项目</span></div>
+                </div>
+                <div class="sync-note" aria-hidden="true"><img src="assets/icon.png" width="42" height="42" alt=""><div><strong>NimbusSync</strong><span><svg class="icon"><use href="#i-check"/></svg><span data-en="Everything is up to date">所有文件均已同步</span></span></div></div>
+                <figcaption data-en="Finder workflow illustration">Finder 工作方式示意</figcaption>
+            </figure>
+        </section>
+
+        <div class="compatibility wrap"><span data-en="Your server. Your files. Your familiar workflow.">自己的服务器，自己的文件，熟悉的工作方式。</span><a href="https://github.com/cloudreve/cloudreve"><img src="assets/cloudreve.png" width="26" height="26" alt="">Cloudreve 4.12+</a><span class="compatibility-native" data-en="Built on Apple File Provider">基于 Apple File Provider</span></div>
+
+        <section id="features" class="features wrap section-space">
+            <div class="section-intro"><h2 data-en="Cloud files. Local habits.">云端文件，本地习惯。</h2><p data-en="No new workspace to learn. Just the folders and apps you already use.">不用适应另一套工作台。你熟悉的文件夹和应用，现在就能继续用。</p></div>
+            <div class="feature-grid">
+                <article><svg class="feature-icon"><use href="#i-folder"/></svg><h3 data-en="A real place in Finder">Finder 里，真正的位置</h3><p data-en="Each Cloudreve domain lives in your sidebar. Open and edit files with your usual Mac apps.">每个同步域都出现在 Finder 侧边栏。用你常用的 Mac 应用打开和编辑文件。</p></article>
+                <article><svg class="feature-icon"><use href="#i-cloud"/></svg><h3 data-en="Only download what you open">用到时，再下载</h3><p data-en="Browse your remote folders without downloading everything. Files download when opened, and macOS can reclaim local space.">浏览远端目录，无需先下载所有内容。打开文件时按需下载，macOS 也能按需释放本地空间。</p></article>
+                <article><svg class="feature-icon"><use href="#i-sync"/></svg><h3 data-en="Pick up where you left off">断开之后，接着来</h3><p data-en="Pending changes are saved on disk. After a disconnect or restart, sync resumes from its saved state.">待同步的修改会保存在磁盘上。断网或重启之后，从已保存的状态继续处理。</p></article>
+                <article><svg class="feature-icon"><use href="#i-file"/></svg><h3 data-en="Keep both sides of a conflict">有冲突，也保留你的版本</h3><p data-en="If a file changes on the server while you edit it, NimbusSync keeps your version as a conflict copy beside the original.">编辑时远端文件也发生变化？NimbusSync 会在原文件旁保留你的冲突副本。</p></article>
+                <article><svg class="feature-icon"><use href="#i-lock"/></svg><h3 data-en="Sign in with your browser">登录交给浏览器</h3><p data-en="Authorize with OAuth and PKCE. Tokens stay in your Mac’s Keychain, and server connections use HTTPS.">通过 OAuth 与 PKCE 授权，令牌保存在 Mac 钥匙串中，服务器连接使用 HTTPS。</p></article>
+                <article><svg class="feature-icon"><use href="#i-check"/></svg><h3 data-en="A glance at your menu bar">抬头就知道同步状态</h3><p data-en="See sync status, recent activity, and progress from the menu bar. Retry issues and manage domains in one place.">在菜单栏查看同步状态、最近活动和进度，重试失败的任务，集中管理同步域。</p></article>
+            </div>
+        </section>
+
+        <section class="product-section section-space">
+            <div class="wrap product-layout"><div class="product-copy"><h2 data-en="A little presence. A clear picture.">安静地同步，<br>清楚地掌握。</h2><p data-en="Your files stay front and center. NimbusSync stays in the menu bar, with a dedicated view of every domain when you need it.">文件是工作的主角。NimbusSync 常驻菜单栏，需要时再打开设置，查看每个同步域的状态。</p><ul class="check-list"><li><svg class="icon"><use href="#i-check"/></svg><span data-en="Connect multiple Cloudreve domains">连接多个 Cloudreve 同步域</span></li><li><svg class="icon"><use href="#i-check"/></svg><span data-en="Manage exclusions and full checks">管理排除项与完整检查</span></li><li><svg class="icon"><use href="#i-check"/></svg><span data-en="Remove a domain without deleting server files">移除同步域不会删除服务器文件</span></li></ul></div><figure class="product-image"><img src="assets/domains-zh.png" data-zh-src="assets/domains-zh.png" data-en-src="assets/domains-en.png" width="1640" height="1400" alt="NimbusSync 同步域设置界面，展示已同步、检查中与需要授权的同步域。" data-en-alt="NimbusSync domain settings showing up-to-date, checking, and authorization-required states." loading="lazy"><figcaption data-en="App interface with example data">应用界面，使用示例数据</figcaption></figure></div>
+        </section>
+
+        <section id="start" class="getting-started wrap section-space"><div class="section-intro"><h2 data-en="From your cloud to your Mac.">从你的云端，到你的 Mac。</h2><p data-en="All you need is a Mac and a Cloudreve 4.12+ server available over HTTPS.">准备好一台 Mac，以及可通过 HTTPS 访问的 Cloudreve 4.12+ 服务器。</p></div><ol class="steps"><li><span class="step-number">1</span><h3 data-en="Install NimbusSync">安装 NimbusSync</h3><p data-en="Download the DMG from GitHub Releases. Drag NimbusSync into Applications and open it.">从 GitHub Releases 下载 DMG，将 NimbusSync 拖入「应用程序」后打开。</p></li><li><span class="step-number">2</span><h3 data-en="Connect your Cloudreve">连接你的 Cloudreve</h3><p data-en="Choose Add Domain from the menu bar, enter your server URL, and authorize in your browser.">在菜单栏选择「添加同步域」，输入服务器地址，在浏览器中完成授权。</p></li><li><span class="step-number">3</span><h3 data-en="Make yourself at home">打开 Finder，开始工作</h3><p data-en="Find your domain under Locations in Finder. Browse and edit your files as you normally would.">在 Finder 侧边栏的「位置」中找到同步域，像平常一样浏览和编辑文件。</p></li></ol></section>
+
+        <section class="faq wrap section-space"><h2 data-en="A few things to know.">你可能还想知道。</h2><div class="faq-list"><details><summary data-en="Which Macs are supported?">支持哪些 Mac？</summary><p data-en="NimbusSync requires macOS 13 Ventura or later. The universal app supports both Apple silicon and Intel. You also need a Cloudreve 4.12+ server available over HTTPS.">需要 macOS 13 Ventura 或更新版本。通用二进制同时支持 Apple 芯片与 Intel。服务器需要 Cloudreve 4.12+，并提供 HTTPS 访问。</p></details><details><summary data-en="Do I need to download all my files?">需要把所有文件下载到本地吗？</summary><p data-en="No. Apple File Provider lets you browse the remote folder tree and download files when you open them. To work offline, download the files you need before disconnecting; changes sync once you reconnect.">不需要。通过 Apple File Provider，你可以先浏览远端目录，打开时再下载文件。需要离线工作时，请提前下载所需文件；重新联网后会同步修改。</p></details><details><summary data-en="Where are my credentials stored?">我的登录凭据存在哪里？</summary><p data-en="You sign in on your Cloudreve server through your browser. NimbusSync stores tokens in macOS Keychain. Logs exclude tokens, signed URLs, and file contents.">你会通过浏览器登录自己的 Cloudreve 服务器。NimbusSync 将令牌保存在 macOS 钥匙串中，日志不记录令牌、签名 URL 或文件内容。</p></details><details><summary data-en="How do updates work?">如何更新应用？</summary><p data-en="NimbusSync checks for updates daily through Sparkle. You can also check manually in Settings. Automatic download and installation are optional and off by default; beta releases are available through a separate setting.">NimbusSync 通过 Sparkle 每天检查更新，也可以在设置中手动检查。自动下载与安装默认关闭，可自行开启；测试版可在单独的设置项中选择接收。</p></details><details><summary data-en="Is NimbusSync open source?">NimbusSync 是开源的吗？</summary><p><span data-en="Yes. NimbusSync is free and open source under Apache 2.0. Explore the source or report an issue on ">是的。NimbusSync 免费开源，使用 Apache 2.0 许可证。你可以查看源码，或在 </span><a href="https://github.com/jorben/NimbusSync">GitHub</a><span data-en=". Cloudreve is an independent project with its own license."> 提交问题。Cloudreve 是独立项目，使用其自身的许可证。</span></p></details></div></section>
+
+        <section class="download-section wrap"><img src="assets/icon.png" width="80" height="80" alt="" loading="lazy"><h2 data-en="Your files, a little closer.">让文件，离你更近一点。</h2><p data-en="Bring your Cloudreve into Finder.">把你的 Cloudreve，带进 Finder。</p><a class="button primary" href="https://github.com/jorben/NimbusSync/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-en="Download NimbusSync">下载 NimbusSync</span></a><p class="early-note" data-en="Early-stage software. Keep a separate backup of important files.">项目仍处于早期阶段，请为重要文件保留独立备份。</p></section>
+    </main>
+
+    <footer class="site-footer wrap"><a class="brand" href="./"><img src="assets/icon.png" width="28" height="28" alt=""><span>NimbusSync</span></a><p data-en="Made for macOS. Built in the open.">为 macOS 打造，与开源同行。</p><div><a href="https://github.com/jorben/NimbusSync">GitHub</a><a href="https://github.com/jorben/NimbusSync/issues" data-en="Feedback">反馈</a><a href="https://github.com/jorben/NimbusSync/blob/master/LICENSE">Apache 2.0</a></div></footer>
+</body>
+</html>

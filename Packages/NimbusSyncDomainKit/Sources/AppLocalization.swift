@@ -87,7 +87,14 @@ public enum L10n {
     public static var locale: Locale { language.formattingLocale() }
 
     public static func bundle(for language: AppLanguage) -> Bundle {
-        guard let path = resourceBundle.path(forResource: language.rawValue, ofType: "lproj"),
+        bundle(for: language, in: resourceBundle)
+    }
+
+    static func bundle(for language: AppLanguage, in resourceBundle: Bundle) -> Bundle {
+        // Native SwiftPM lowercases localization directories; Xcode preserves their spelling.
+        guard let localization = resourceBundle.localizations.first(where: {
+            $0.caseInsensitiveCompare(language.rawValue) == .orderedSame
+        }), let path = resourceBundle.path(forResource: localization, ofType: "lproj"),
               let bundle = Bundle(path: path) else { return resourceBundle }
         return bundle
     }
