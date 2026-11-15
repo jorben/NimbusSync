@@ -1,8 +1,9 @@
 # Releasing and in-app updates
 
 NimbusSync updates itself with [Sparkle 2](https://sparkle-project.org). Installed copies read
-one appcast, `https://jorben.github.io/NimbusSync/appcast.xml`, served by GitHub Pages from the
-`gh-pages` branch.
+one appcast, `https://jorben.github.io/NimbusSync/appcast.xml`, served by GitHub Pages alongside
+[the product website](https://jorben.github.io/NimbusSync/). The `gh-pages` branch stores the signed
+feed; `deploy-website.yml` combines it with `website/` and deploys the artifact using GitHub Actions.
 
 ## What users get
 
@@ -31,8 +32,11 @@ without `SUPublicEDKey` keeps the updater off, and the release workflow refuses 
    - Store the contents of `sparkle-private-key.txt` as the repository secret
      `SPARKLE_PRIVATE_KEY`, then delete the file. Keep the Keychain copy as the backup: losing
      the key means installed copies can never update again.
-2. **GitHub Pages.** After the first publish created `gh-pages`: Settings › Pages › Deploy from a
-   branch › `gh-pages` / root.
+2. **GitHub Pages.** After `gh-pages` contains the first signed `appcast.xml` and
+   `deploy-website.yml` is on `master`: Settings › Pages › Source › **GitHub Actions**.
+   Run *Actions › Deploy Website › Run workflow* on `master` for the initial deployment.
+   For an existing branch-based Pages site, switch to Actions only after the new workflow is
+   available on `master`, then run it immediately. See [`website/README.md`](../website/README.md).
 3. The notarization secrets used by the build (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`,
    `APPLE_TEAM_ID`) are also read by the publish workflow.
 
@@ -62,6 +66,10 @@ without `SUPublicEDKey` keeps the updater off, and the release workflow refuses 
 team signature or notarization doesn't check out, or when `SPARKLE_PRIVATE_KEY` does not match
 the app's `SUPublicEDKey`. It signs the ZIP and the feed (`SURequireSignedFeed`) with the EdDSA
 key and pushes `appcast.xml` to `gh-pages`. `Scripts/update-appcast.py` does the XML merge.
+After *Publish Appcast* succeeds, *Deploy Website* reads the latest signed feed and deploys it
+alongside the website. A successful appcast push alone does not mean the public feed is updated:
+check that the following *Deploy Website* run also succeeded. If deployment fails, re-run
+*Deploy Website* on `master`; no re-signing or rebuilding the app is needed.
 
 ## Sandbox and signing notes
 
