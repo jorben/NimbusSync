@@ -1,5 +1,5 @@
 import XCTest
-import CloudreveDomainKit
+@testable import CloudreveDomainKit
 
 final class LocalizationTests: XCTestCase {
     func testPreferredLanguageMatchingAndEnglishFallback() {
@@ -33,7 +33,35 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(L10n.tr("Follow System", language: .english), "Follow System")
         XCTAssertEqual(L10n.tr("Follow System", language: .simplifiedChinese), "跟随系统")
         XCTAssertEqual(L10n.tr("Untranslated source fallback", language: .simplifiedChinese), "Untranslated source fallback")
-        XCTAssertEqual(L10n.resourceBundle.localizations.sorted(), ["en", "zh-Hans"])
+        XCTAssertEqual(L10n.resourceBundle.localizations.map { $0.lowercased() }.sorted(), ["en", "zh-hans"])
+        for language in AppLanguage.allCases {
+            let bundle = L10n.bundle(for: language)
+            XCTAssertEqual(bundle.bundleURL.pathExtension, "lproj", "Must select a language sub-bundle instead of the host-language fallback")
+            XCTAssertEqual(bundle.bundleURL.deletingPathExtension().lastPathComponent.lowercased(), language.rawValue.lowercased())
+        }
+    }
+
+    func testLanguageBundleLookupAcceptsPreservedAndLowercasedDirectoryNames() throws {
+        for directoryName in ["zh-Hans", "zh-hans"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("nimbussync-language-\(UUID().uuidString).bundle")
+            defer { try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let info = ["CFBundleDevelopmentRegion": "en"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+                .write(to: root.appendingPathComponent("Info.plist"))
+            for (name, title) in [("en", "Follow System"), (directoryName, "跟随系统")] {
+                let folder = root.appendingPathComponent("\(name).lproj")
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try "\"Follow System\" = \"\(title)\";\n".write(to: folder.appendingPathComponent("Localizable.strings"), atomically: true, encoding: .utf8)
+            }
+            let resourceBundle = try XCTUnwrap(Bundle(url: root))
+            let chinese = L10n.bundle(for: .simplifiedChinese, in: resourceBundle)
+            XCTAssertEqual(chinese.bundleURL.lastPathComponent, "\(directoryName).lproj")
+            XCTAssertEqual(String(localized: "Follow System", bundle: chinese, locale: Locale(identifier: "zh-Hans")), "跟随系统")
+            let english = L10n.bundle(for: .english, in: resourceBundle)
+            XCTAssertEqual(english.bundleURL.lastPathComponent, "en.lproj")
+            XCTAssertEqual(String(localized: "Follow System", bundle: english, locale: Locale(identifier: "en")), "Follow System")
+        }
     }
 
     func testInterpolationPreservesUserTextIncludingFormatCharacters() {

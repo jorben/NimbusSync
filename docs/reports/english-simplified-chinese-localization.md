@@ -51,6 +51,38 @@ An independent completion audit found four gaps; all are addressed:
 
 Finder's signed Debug extension was reloaded through System Settings. The running extension and daemon reported `nimbussyncLanguage = en` / `zh-Hans` for the same test item, and the visible Quick Actions were respectively `Check for Updates`, `Keep Downloaded`, `Open in NimbusSync` and `检查文件更新`, `保留下载`, `在 NimbusSync 中打开`. Neither menu exposed localization keys. No mutating action was invoked.
 
+## CI resource lookup follow-up (2026-11-15)
+
+[CI run 43583570950](https://github.com/jorben/NimbusSync/actions/runs/43583570950)
+exposed a packaging difference: native SwiftPM emits `zh-hans.lproj`, while Xcode and swiftbuild
+preserve `zh-Hans.lproj`. Looking up the standard language code as an exact resource name failed,
+so the shared localization service fell back to the whole bundle and its host language.
+An English host reproduced 68 assertion failures across five suites; a Chinese host masked most
+of them. The changelog-only PR did not introduce the failure.
+
+The lookup now matches the bundle's advertised localization names without case sensitivity and
+opens the actual language directory. Public language codes, saved preferences and Finder action
+identifiers retain their existing spelling. Resource tests assert that a language sub-bundle is
+selected, normalize only the packaging-name comparison, and exercise both preserved and lowercase
+directory fixtures. Before the fix, these tests caught three failures even on the Chinese host.
+After the fix, all ten resource tests and the 22 tests in the five localization suites passed
+with an explicitly English host. CI now repeats those suites with process-scoped
+`-AppleLanguages '(en)'` so a runner's language cannot mask this regression.
+
+Validation of this fix on Swift 6.4.2:
+
+| Check | Result |
+| --- | --- |
+| Native SwiftPM complete suite in a separate temporary scratch directory | 344 tests, zero failures |
+| Default swiftbuild complete suite in a separate temporary scratch directory | 293 main-module + 51 File Provider tests, zero failures |
+| English-host localization suites, native and swiftbuild | 22 tests on each backend, zero failures |
+| Unsigned Debug Xcode build in a temporary derived-data directory | Main app and both extensions built successfully |
+| `python3 Scripts/check-localization.py` | 428 strings and ten plural entries validated |
+| `actionlint .github/workflows/ci.yml` and `git diff --check` | Passed |
+
+This follow-up validates resource lookup and compilation. It does not repeat the earlier signed
+Finder runtime or release/notarization checks.
+
 ## Environment-dependent limits
 
 Release distribution, notarization, the full macOS compatibility matrix and extended sync endurance remain outside this local localization increment. Signed Finder runtime evidence is recorded separately above.
