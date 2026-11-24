@@ -144,6 +144,8 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CONFIGURATION: Release
+          # Same identity as the release build, so its compilation cache is the one that ships.
+          NIMBUSSYNC_RELEASE_IDENTITY: 1
           SIGNING_MODE: unsigned
           DESTINATION: generic/platform=macOS
           NIMBUSSYNC_CONFIG: /dev/null

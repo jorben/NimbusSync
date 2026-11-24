@@ -46,17 +46,49 @@ if [ -n "${APP_GROUP_IDENTIFIER:-}${NIMBUSSYNC_APP_GROUP_IDENTIFIER:-}" ]; then
     exit 2
 fi
 
+# A Release build carries the shipping identity only when asked for: CI's release and cache jobs
+# set NIMBUSSYNC_RELEASE_IDENTITY=1. Every other Release build (a local check, a signing test in
+# /tmp) gets the Dev identity. macOS registers every app extension it sees on disk, and launchd
+# keeps launching the first path it bootstrapped for a bundle ID, so a stray build under the
+# shipping ID can take over the installed app's File Provider; when that copy is later broken or
+# deleted, Finder shows "Loading…" forever.
+RELEASE_IDENTITY=${RELEASE_IDENTITY:-${NIMBUSSYNC_RELEASE_IDENTITY:-0}}
+case "$RELEASE_IDENTITY" in
+    1|true|TRUE|yes|YES) RELEASE_IDENTITY=1 ;;
+    0|false|FALSE|no|NO|'') RELEASE_IDENTITY=0 ;;
+    *)
+        printf '%s\n' "unsupported NIMBUSSYNC_RELEASE_IDENTITY: $RELEASE_IDENTITY (expected 1 or 0)" >&2
+        exit 2
+        ;;
+esac
+
 # The bundle name follows the identity (Config/<Configuration>.xcconfig NIMBUSSYNC_APP_NAME): macOS
 # lists apps by bundle name in Login Items and System Settings' File Providers, so the Dev build
-# is NimbusSyncDev.app and never shows up as a second "NimbusSync".
+# is NimbusSyncDev.app and never shows up as a second "NimbusSync". Signing values follow the
+# identity too (CONFIG_KEY): the Dev App IDs have their own profiles.
+DEV_IDENTITY_OVERRIDE=0
 case "$CONFIGURATION" in
     Debug) CONFIG_KEY=DEBUG; APP_NAME=NimbusSyncDev ;;
-    Release) CONFIG_KEY=RELEASE; APP_NAME=NimbusSync ;;
+    Release)
+        if [ "$RELEASE_IDENTITY" = 1 ]; then
+            CONFIG_KEY=RELEASE; APP_NAME=NimbusSync
+        else
+            CONFIG_KEY=DEBUG; APP_NAME=NimbusSyncDev; DEV_IDENTITY_OVERRIDE=1
+        fi
+        ;;
     *)
         printf '%s\n' "unsupported CONFIGURATION: $CONFIGURATION" >&2
         exit 2
         ;;
 esac
+
+# A Dev-identity Release build takes the identity settings from Config/Debug.xcconfig, the single
+# place they are defined. The app icon stays the Release one: Release excludes AppIconDev.icon.
+debug_xcconfig_value() {
+    debug_value=$(sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$ROOT/Config/Debug.xcconfig" | tail -n 1)
+    [ -n "$debug_value" ] || { printf '%s\n' "Config/Debug.xcconfig does not set $1" >&2; exit 1; }
+    printf '%s' "$debug_value"
+}
 
 # `build.sh --print-app-path` resolves the configuration exactly as a build would (local config,
 # environment) and prints where the app will land, so `make dev` can launch the right bundle.
@@ -228,6 +260,12 @@ set -- xcodebuild \
     -skipPackageUpdates \
     build
 
+if [ "$DEV_IDENTITY_OVERRIDE" = 1 ]; then
+    printf '%s\n' "Release build with the Dev identity ($APP_NAME.app); set NIMBUSSYNC_RELEASE_IDENTITY=1 for the shipping one." >&2
+    for setting in NIMBUSSYNC_BUNDLE_ID_BASE NIMBUSSYNC_DISPLAY_NAME NIMBUSSYNC_URL_SCHEME NIMBUSSYNC_APP_NAME NIMBUSSYNC_UPDATES_ENABLED; do
+        set -- "$@" "$setting=$(debug_xcconfig_value "$setting")"
+    done
+fi
 [ -z "$MARKETING_VERSION" ] || set -- "$@" MARKETING_VERSION="$MARKETING_VERSION"
 [ -z "$VERSION" ] || set -- "$@" NIMBUSSYNC_VERSION="$VERSION"
 [ -z "$BUILD_NUMBER" ] || set -- "$@" CURRENT_PROJECT_VERSION="$BUILD_NUMBER"

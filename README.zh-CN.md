@@ -133,7 +133,8 @@ make dev
 ```
 
 `make dev` 通过 [`Scripts/build.sh`](Scripts/build.sh) 构建，把应用放到
-`Dist/`（Debug 为 `NimbusSyncDev.app`，Release 为 `NimbusSync.app`）并重新启动。
+`Dist/`（默认为 `NimbusSyncDev.app`；Release 构建加 `NIMBUSSYNC_RELEASE_IDENTITY=1`
+时为 `NimbusSync.app`）并重新启动。
 如果没有签名配置，得到的是未签名构建：应用能运行，但 Finder 会提示扩展不可用。
 签名细节见[签名构建](#signed-builds)。Dev 版不会自动更新，可以和已安装的正式版
 共存。
@@ -171,7 +172,8 @@ make dev
 | `NIMBUSSYNC_APP_PROFILE` | 应用描述文件 UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_PROFILE` | File Provider 描述文件 UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE` | File Provider UI 描述文件 UUID |
-| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | 按配置覆盖上面的签名身份和三个描述文件，例如 `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | 按身份覆盖上面的签名身份和三个描述文件，例如 `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+| `NIMBUSSYNC_RELEASE_IDENTITY` | 设为 `1` 时 Release 构建使用正式版身份（默认 `0`，即 Dev 身份） |
 
 Debug 与 Release 使用两套独立身份，可以同时装在一台 Mac 上：
 
@@ -188,6 +190,12 @@ Debug 与 Release 使用两套独立身份，可以同时装在一台 Mac 上：
 File Provider Testing Mode）。Dev 版产物是 `NimbusSyncDev.app`，登录项和系统设置的
 文件提供程序列表里会与正式版分开显示。两者都注册了服务端规定的 `cloudreve://`
 OAuth 回调，macOS 只会交给其中一个：登录或重新授权前请先退出另一个版本。
+
+只有发布流程会构建正式版身份：Release 构建必须设置 `NIMBUSSYNC_RELEASE_IDENTITY=1`
+才会使用它，否则产出使用 Dev 身份和 `NIMBUSSYNC_DEBUG_*` 签名配置的
+`NimbusSyncDev.app`。macOS 会登记磁盘上找到的每一个扩展，并一直启动它最先为某个
+bundle ID 启动过的那一份；如果不加这道限制，一个零散的 Release 构建（例如放在
+`/tmp` 里）可能接管已安装应用的 File Provider，让 Finder 一直显示“正在载入”。
 
 命令行中也可以使用不带前缀的名称（`SIGNING_MODE`、`CONFIGURATION`、
 `DEVELOPMENT_TEAM` 等），以及 `BUILD_ROOT`、`DIST_DIR` 和 `VERSION`：

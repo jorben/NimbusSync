@@ -158,6 +158,9 @@ jobs:
       - name: Build signed universal app
         env:
           CONFIGURATION: Release
+          # Only this build and release-cache in ci.yml ship the io.github.jorben.nimbussync
+          # identity; any other Release build gets the Dev one (see Scripts/build.sh).
+          NIMBUSSYNC_RELEASE_IDENTITY: 1
           SIGNING_MODE: signed
           DESTINATION: generic/platform=macOS
           NIMBUSSYNC_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
