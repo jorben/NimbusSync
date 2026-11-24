@@ -7,6 +7,23 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <description>Updates for NimbusSync</description>
     <language>en</language>
     <item>
+      <title>NimbusSync 0.1.3-rc.2</title>
+      <pubDate>Tue, 24 Nov 2026 10:31:50 GMT</pubDate>
+      <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.3-rc.2</link>
+      <sparkle:version>15</sparkle:version>
+      <sparkle:shortVersionString>0.1.3-rc.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:channel>beta</sparkle:channel>
+      <sparkle:fullReleaseNotesLink>https://github.com/jorben/NimbusSync/releases/tag/0.1.3-rc.2</sparkle:fullReleaseNotesLink>
+      <description sparkle:format="markdown">### :sparkles: New Features
+- [`7f27ec8`](https://github.com/jorben/NimbusSync/commit/7f27ec840a6a558f825c8324256a61a59343edaa) - **website**: ✨ Add NimbusSync landing page and Pages deployment *(commit by @jorben)*
+
+### :bug: Bug Fixes
+- [`b29d90b`](https://github.com/jorben/NimbusSync/commit/b29d90b703793442020bb571d7247e74f573fb2e) - **i18n**: 🐛 Match packaged language directories without case sensitivity *(commit by @jorben)*
+- [`e023dd9`](https://github.com/jorben/NimbusSync/commit/e023dd98395a82a56404ed1ae7b8c916ad0e3801) - **file-provider**: 🐛 Surface Finder extension launch failures *(PR #4 by @jorben)*</description>
+      <enclosure url="https://github.com/jorben/NimbusSync/releases/download/0.1.3-rc.2/NimbusSync-0.1.3-rc.2.zip" length="14964586" type="application/octet-stream" sparkle:edSignature="Y062QJ4HcrvZp5X1blR6V4uX7NHRF8hADdvDwW/uLlrwkhyVNW0q14QjpdBQJhvQWJ8bT1EzgpJ5BEooTRE4DQ=="></enclosure>
+    </item>
+    <item>
       <title>NimbusSync 0.1.3-rc.1</title>
       <pubDate>Sun, 15 Nov 2026 01:17:59 GMT</pubDate>
       <link>https://github.com/jorben/NimbusSync/releases/tag/0.1.3-rc.1</link>
@@ -434,6 +451,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: 8KQBOoUZfer5pBIdgJUeG9U0ZMqrqtTjolPEIpYPGxKRkpyK73lXSBxK4GB2EfR7uFI3mBWS5JDFh5/mhAaxAQ==
-length: 60629
+edSignature: 1S6jO2CxURG56+Bc5O3h0duDm8O2Qztm6jU5QjrYNIwGUiNX3MAYXzQTggYlBF9dHc2nSj8etgwkEozyIvl+Bg==
+length: 62169
 -->
