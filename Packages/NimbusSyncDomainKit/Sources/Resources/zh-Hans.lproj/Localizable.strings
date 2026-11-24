@@ -428,3 +428,8 @@
 "Operation not supported" = "不支持此操作";
 "Download failed" = "下载失败";
 "Upload failed" = "上传失败";
+"Finder extension unavailable" = "Finder 扩展不可用";
+"Extension error" = "扩展异常";
+"Finder can't load your files" = "Finder 无法载入你的文件";
+"The File Provider extension isn't responding. Quit and reopen NimbusSync; if it continues, restart your Mac." = "File Provider 扩展没有响应。请退出并重新打开 NimbusSync；如果问题仍然存在，请重启 Mac。";
+"macOS is running the extension from another copy of NimbusSync. Delete other NimbusSync copies, then restart your Mac." = "macOS 正在运行另一份 NimbusSync 中的扩展。请删除其他 NimbusSync 副本，然后重启 Mac。";

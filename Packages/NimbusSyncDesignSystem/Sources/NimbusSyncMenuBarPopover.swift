@@ -28,6 +28,10 @@ public struct MenuBarPopoverView: View {
     /// Finder integration is switched off in System Settings, so nothing can sync.
     public let finderIntegrationOff: Bool
     public let onOpenFinderIntegrationSettings: () -> Void
+    /// Why a Domain's File Provider extension is unavailable, so Finder cannot load its files;
+    /// nil hides the banner.
+    public let extensionIssue: ExtensionUnavailableReason?
+    public let onRecheckExtension: () -> Void
     /// An update found or downloaded by the updater; `.none` hides the banner.
     public let updateStatus: AppUpdateStatus
     public let onOpenUpdate: () -> Void
@@ -68,6 +72,8 @@ public struct MenuBarPopoverView: View {
         onQuit: (() -> Void)? = nil,
         finderIntegrationOff: Bool = false,
         onOpenFinderIntegrationSettings: @escaping () -> Void = {},
+        extensionIssue: ExtensionUnavailableReason? = nil,
+        onRecheckExtension: @escaping () -> Void = {},
         updateStatus: AppUpdateStatus = .none,
         onOpenUpdate: @escaping () -> Void = {}
     ) {
@@ -89,6 +95,8 @@ public struct MenuBarPopoverView: View {
         self.onQuit = onQuit
         self.finderIntegrationOff = finderIntegrationOff
         self.onOpenFinderIntegrationSettings = onOpenFinderIntegrationSettings
+        self.extensionIssue = extensionIssue
+        self.onRecheckExtension = onRecheckExtension
         self.updateStatus = updateStatus
         self.onOpenUpdate = onOpenUpdate
     }
@@ -98,6 +106,10 @@ public struct MenuBarPopoverView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: NimbusSyncDesignTokens.spacing16) {
+                    if let extensionIssue {
+                        extensionBanner(extensionIssue)
+                    }
+
                     if finderIntegrationOff {
                         finderIntegrationBanner
                     }
@@ -186,6 +198,17 @@ public struct MenuBarPopoverView: View {
             actionTitle: "Turn On",
             action: onOpenFinderIntegrationSettings,
             actionSymbol: "arrow.up.forward.app"
+        )
+    }
+
+    private func extensionBanner(_ reason: ExtensionUnavailableReason) -> some View {
+        PopoverBanner(
+            symbol: "exclamationmark.octagon.fill",
+            title: ExtensionIssueText.title,
+            detail: ExtensionIssueText.detail(reason),
+            actionTitle: "Check Again",
+            action: onRecheckExtension,
+            tint: .red
         )
     }
 

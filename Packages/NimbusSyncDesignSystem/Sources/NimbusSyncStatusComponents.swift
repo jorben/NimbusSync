@@ -291,6 +291,7 @@ extension DomainStatus {
         case .removalPreflight: L10n.tr("Removing")
         case .repairRequired: L10n.tr("Repair required")
         case .preservedRemoval: L10n.tr("Finish removal")
+        case .extensionUnavailable: L10n.tr("Finder extension unavailable")
         default: L10n.tr("Preparing")
         }
     }
@@ -306,6 +307,7 @@ extension DomainStatus {
         case .scopeConflict: L10n.tr("Scope conflict")
         case .conflict: L10n.tr("Conflicts")
         case .repairRequired: L10n.tr("Repair")
+        case .extensionUnavailable: L10n.tr("Extension error")
         default: title
         }
     }
@@ -319,6 +321,7 @@ extension DomainStatus {
         case .removalPreflight: "trash"
         case .repairRequired: "wrench.and.screwdriver"
         case .preservedRemoval: "externaldrive.badge.xmark"
+        case .extensionUnavailable: "exclamationmark.octagon"
         default: "arrow.triangle.2.circlepath"
         }
     }
@@ -327,6 +330,7 @@ extension DomainStatus {
         switch self {
         case .healthy: .green
         case .authExpired, .conflict, .permanentError, .rootUnavailable, .scopeConflict, .repairRequired, .preservedRemoval: .orange
+        case .extensionUnavailable: .red
         case .offline: .secondary
         default: .accentColor
         }
@@ -334,6 +338,8 @@ extension DomainStatus {
 
     var priority: Int {
         switch self {
+        // Nothing in Finder works without the extension, so it outranks every other problem.
+        case .extensionUnavailable: 110
         case .authExpired: 100
         case .rootUnavailable, .scopeConflict, .repairRequired, .preservedRemoval: 90
         case .conflict, .permanentError: 80

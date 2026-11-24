@@ -7,7 +7,10 @@ NIMBUSSYNC_CONFIGURATION="${NIMBUSSYNC_CONFIGURATION:-Debug}"
 NIMBUSSYNC_SIGNING_MODE="${NIMBUSSYNC_SIGNING_MODE:-unsigned}"
 # Bundle IDs, App Group and Keychain group come from Config/<Configuration>.xcconfig:
 # Debug builds the coexisting "NimbusSyncDev" (io.github.jorben.nimbussync.dev),
-# Release the shipping app (io.github.jorben.nimbussync).
+# Release the shipping app (io.github.jorben.nimbussync) only with
+# NIMBUSSYNC_RELEASE_IDENTITY=1; otherwise a Release build also gets the Dev
+# identity and the NIMBUSSYNC_DEBUG_* signing values below.
+# NIMBUSSYNC_RELEASE_IDENTITY="${NIMBUSSYNC_RELEASE_IDENTITY:-0}"
 
 # Optional local manual signing settings. Fill these only when signed builds
 # are required, using profiles and a certificate installed on this Mac.

@@ -125,8 +125,11 @@
 "Excluded from sync" = "Excluded from sync";
 "Exit Full Screen" = "Exit Full Screen";
 "Export Local Copy" = "Export Local Copy";
+"Extension error" = "Extension error";
 "Failed" = "Failed";
+"Finder can't load your files" = "Finder can't load your files";
 "Finder did not accept the domain location." = "Finder did not accept the domain location.";
+"Finder extension unavailable" = "Finder extension unavailable";
 "Finder integration" = "Finder integration";
 "Finder integration is off" = "Finder integration is off";
 "Finder removed this location, but local changes were preserved at:\n%@\n\nSave that copy, then choose Finish removal from the domain menu." = "Finder removed this location, but local changes were preserved at:\n%@\n\nSave that copy, then choose Finish removal from the domain menu.";
@@ -346,6 +349,7 @@
 "The File Provider domain could not be found." = "The File Provider domain could not be found.";
 "The File Provider domain identifier is invalid." = "The File Provider domain identifier is invalid.";
 "The File Provider extension exited while starting (%@ %lld, stage: %@)." = "The File Provider extension exited while starting (%@ %lld, stage: %@).";
+"The File Provider extension isn't responding. Quit and reopen NimbusSync; if it continues, restart your Mac." = "The File Provider extension isn't responding. Quit and reopen NimbusSync; if it continues, restart your Mac.";
 "The File Provider location is unavailable." = "The File Provider location is unavailable.";
 "The File Provider manager is unavailable." = "The File Provider manager is unavailable.";
 "The File Provider request failed at %@ (%@ %lld)." = "The File Provider request failed at %@ (%@ %lld).";
@@ -424,6 +428,7 @@
 "finder.action.zh-Hans.resolve-conflict" = "解决冲突";
 "less than a minute left" = "less than a minute left";
 "macOS disabled the File Provider extension because NimbusSync is running from a translocated location. Move NimbusSync to Applications and reopen it." = "macOS disabled the File Provider extension because NimbusSync is running from a translocated location. Move NimbusSync to Applications and reopen it.";
+"macOS is running the extension from another copy of NimbusSync. Delete other NimbusSync copies, then restart your Mac." = "macOS is running the extension from another copy of NimbusSync. Delete other NimbusSync copies, then restart your Mac.";
 "macOS keeps the local copy and downloads files when you open them." = "macOS keeps the local copy and downloads files when you open them.";
 "macOS lets you choose which apps add locations to Finder. %@ is switched off there, so your domains are hidden from Finder and nothing syncs until you turn it back on." = "macOS lets you choose which apps add locations to Finder. %@ is switched off there, so your domains are hidden from Finder and nothing syncs until you turn it back on.";
 "unavailable" = "unavailable";

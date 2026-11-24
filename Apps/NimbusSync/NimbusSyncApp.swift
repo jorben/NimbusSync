@@ -45,7 +45,7 @@ struct NimbusSyncApp: App {
 
     private func settingsView(runtime: NimbusSyncAppState, appDelegate: NimbusSyncAppDelegate) -> some View {
         SettingsView(
-            domains: runtime.snapshot.domains,
+            domains: runtime.displayDomains,
             exclusionRules: runtime.snapshot.exclusionRules,
             notificationPreferences: runtime.snapshot.notificationPreferences,
             finderError: Binding<String?>(get: { runtime.finderError?.text }, set: { _ in runtime.finderError = nil }),
@@ -704,7 +704,7 @@ private struct StatusPopoverContent: View {
     var body: some View {
         VStack(spacing: 0) {
             MenuBarPopoverView(
-                domains: runtime.snapshot.domains,
+                domains: runtime.displayDomains,
                 tasks: runtime.snapshot.activeTasks.map { runtime.taskDisplay($0) },
                 recentTasks: runtime.snapshot.taskProjection.recent.filter { task in
                     !runtime.snapshot.activeTasks.contains { active in active.id == task.id }
@@ -724,6 +724,8 @@ private struct StatusPopoverContent: View {
                 onQuit: runtime.quitApplication,
                 finderIntegrationOff: runtime.finderIntegration == .off,
                 onOpenFinderIntegrationSettings: onOpenFinderIntegrationGuide,
+                extensionIssue: runtime.extensionIssue,
+                onRecheckExtension: runtime.recheckExtensions,
                 updateStatus: updater.status,
                 onOpenUpdate: onOpenUpdate
             )
@@ -930,6 +932,20 @@ private final class NimbusSyncAppState: ObservableObject {
     var onFinderIntegrationChanged: ((FinderIntegrationState) -> Void)?
     /// Each Domain's folder as Finder shows it, home written as "~", keyed by Domain identifier.
     @Published private(set) var domainFolderPaths: [String: String] = [:]
+    /// Whether each enabled Domain's File Provider extension starts and answers, keyed by Domain
+    /// identifier. The registry cannot tell: a Domain stays "up to date" there while macOS fails
+    /// to launch its extension and Finder shows "Loading…" forever.
+    @Published private(set) var extensionReachability: [String: ExtensionReachabilityTracker] = [:] {
+        didSet {
+            guard extensionReachability.mapValues(\.unavailableReason) != oldValue.mapValues(\.unavailableReason) else { return }
+            updateMenuBarStatus()
+        }
+    }
+    /// The Domains macOS has registered and switched on, from the last Finder integration read;
+    /// only these have an extension to probe.
+    private var enabledSystemDomainIdentifiers: Set<String> = []
+    private var extensionProbesInFlight: Set<String> = []
+    private var extensionProbedAt: [String: Date] = [:]
 
     private let factory = AppGroupStoreFactory()
     private let registry: SQLiteStateStore?
@@ -1003,6 +1019,14 @@ private final class NimbusSyncAppState: ObservableObject {
                 self.reload()
             }
         }
+        // Probes each Domain's extension when due: every few minutes, or soon after a failure.
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(ExtensionReachabilityTracker.failingInterval))
+                guard let self else { return }
+                self.probeExtensions()
+            }
+        }
         // Live updates carry everyday changes; this fallback catches what the server never
         // delivered. Each Domain counts from its own last check, so they stay spread out.
         Task { [weak self] in
@@ -1064,8 +1088,90 @@ private final class NimbusSyncAppState: ObservableObject {
     private func updateMenuBarStatus() {
         let finderOff = finderIntegration == .off
         let conflicts = !snapshot.actionableConflicts.isEmpty
-        menuBarIcon.setState(MenuBarIconState(domains: snapshot.domains, isSyncing: snapshot.isSyncing, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff))
-        menuBarIcon.setTooltip(MenuBarStatusSummary(domains: snapshot.domains, activeTaskCount: snapshot.activeTasks.count, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff).tooltip)
+        let domains = displayDomains
+        menuBarIcon.setState(MenuBarIconState(domains: domains, isSyncing: snapshot.isSyncing, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff))
+        menuBarIcon.setTooltip(MenuBarStatusSummary(domains: domains, activeTaskCount: snapshot.activeTasks.count, hasActionableConflicts: conflicts, finderIntegrationOff: finderOff).tooltip)
+    }
+
+    // MARK: Extension reachability
+
+    private var unavailableExtensionDomainIdentifiers: Set<String> {
+        let current = Set(snapshot.domains.map(\.identifier))
+        return Set(extensionReachability.compactMap { identifier, tracker in
+            tracker.unavailableReason != nil && current.contains(identifier) ? identifier : nil
+        })
+    }
+
+    /// The Domains as the UI shows them, with an unavailable extension overlaid on the status.
+    /// For display only: actions keep working from `snapshot.domains`.
+    var displayDomains: [DomainDescriptor] {
+        ExtensionReachability.overlay(snapshot.domains, unavailable: unavailableExtensionDomainIdentifiers)
+    }
+
+    /// The most telling reason any Domain's extension is unavailable, for the popover banner.
+    var extensionIssue: ExtensionUnavailableReason? {
+        let reasons = unavailableExtensionDomainIdentifiers.compactMap { extensionReachability[$0]?.unavailableReason }
+        return reasons.contains(.staleCopy) ? .staleCopy : reasons.first
+    }
+
+    func recheckExtensions() {
+        ActivityLog.shared.info("lifecycle", "File Provider extension check requested by the user")
+        probeExtensions(force: true)
+    }
+
+    /// The extension embedded in this app; an answer from any other path is a stale copy.
+    private static let embeddedExtensionPath: String? = {
+        guard let url = Bundle.main.builtInPlugInsURL?.appendingPathComponent("NimbusSyncFileProvider.appex"),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url.path
+    }()
+
+    /// Probes every enabled Domain's extension that is due (all of them when forced).
+    func probeExtensions(force: Bool = false) {
+        let probeable = Set(snapshot.domains.filter { !$0.status.isLifecycleHold }.map(\.identifier))
+            .intersection(enabledSystemDomainIdentifiers)
+        let stale = extensionReachability.keys.filter { !probeable.contains($0) }
+        if !stale.isEmpty {
+            for identifier in stale {
+                extensionReachability.removeValue(forKey: identifier)
+                extensionProbedAt.removeValue(forKey: identifier)
+            }
+        }
+        let now = Date()
+        for identifier in probeable where !extensionProbesInFlight.contains(identifier) {
+            let interval = extensionReachability[identifier]?.nextProbeInterval ?? 0
+            if !force, let last = extensionProbedAt[identifier], now.timeIntervalSince(last) < interval { continue }
+            extensionProbesInFlight.insert(identifier)
+            extensionProbedAt[identifier] = now
+            Task { [weak self] in
+                let result = await ExtensionReachability.probe(domainIdentifier: identifier)
+                self?.recordExtensionProbe(result, domainIdentifier: identifier)
+            }
+        }
+    }
+
+    private func recordExtensionProbe(_ result: ExtensionProbeResult, domainIdentifier: String) {
+        extensionProbesInFlight.remove(domainIdentifier)
+        // The Domain was removed or switched off while the probe ran.
+        guard enabledSystemDomainIdentifiers.contains(domainIdentifier),
+              snapshot.domains.contains(where: { $0.identifier == domainIdentifier }) else { return }
+        var tracker = extensionReachability[domainIdentifier] ?? ExtensionReachabilityTracker()
+        let before = tracker.unavailableReason
+        tracker.record(result, expectedBundlePath: Self.embeddedExtensionPath)
+        extensionReachability[domainIdentifier] = tracker
+        let after = tracker.unavailableReason
+        if case let .answered(_, version) = result, tracker.reason == .staleCopy {
+            // The path stays out of the log; the version is enough to tell the copies apart.
+            lifecycleLogger.error("extension.probe.stale_copy domain=\(domainIdentifier, privacy: .public) version=\(version, privacy: .public)")
+        } else if tracker.consecutiveFailures > 0 {
+            lifecycleLogger.error("extension.probe.failed domain=\(domainIdentifier, privacy: .public) result=\(result.diagnosticDescription, privacy: .public) failures=\(tracker.consecutiveFailures, privacy: .public)")
+        }
+        guard before != after else { return }
+        if let after {
+            ActivityLog.shared.error("lifecycle", "File Provider extension unavailable · domain=\(domainIdentifier) reason=\(after.rawValue) result=\(result.diagnosticDescription)")
+        } else {
+            ActivityLog.shared.info("lifecycle", "File Provider extension reachable again · domain=\(domainIdentifier)")
+        }
     }
 
     private func notifyChanges(from old: ProductSnapshot, to next: ProductSnapshot) async {
@@ -1563,6 +1669,8 @@ private final class NimbusSyncAppState: ObservableObject {
                 self.lifecycleLogger.info("finder.open_succeeded domain=\(domain.identifier, privacy: .public)")
             } catch {
                 self.reportFinderFailure(error, displayName: displayName)
+                // A failure to open is often the extension failing to start; find out now.
+                self.probeExtensions(force: true)
             }
         }
     }
@@ -1596,6 +1704,8 @@ private final class NimbusSyncAppState: ObservableObject {
             let enabled = ours.filter { $0.domain.userEnabled }
             let state: FinderIntegrationState = ours.isEmpty ? .notSetUp : (enabled.isEmpty ? .off : .on)
             if state != self.finderIntegration { self.finderIntegration = state }
+            self.enabledSystemDomainIdentifiers = Set(enabled.map(\.domain.identifier.rawValue))
+            self.probeExtensions()
             var paths: [String: String] = [:]
             for box in enabled {
                 guard let manager = NSFileProviderManager(for: box.domain),

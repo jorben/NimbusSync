@@ -146,7 +146,8 @@ make dev
 ```
 
 `make dev` builds through [`Scripts/build.sh`](Scripts/build.sh), places the app
-in `Dist/` (`NimbusSyncDev.app` for Debug, `NimbusSync.app` for Release) and
+in `Dist/` (`NimbusSyncDev.app`, or `NimbusSync.app` for a Release build with
+`NIMBUSSYNC_RELEASE_IDENTITY=1`) and
 relaunches it. Without signing settings you get an unsigned build. The app
 runs, but Finder reports the extension as unavailable. For signing details,
 see [Signed builds](#signed-builds). The Dev build never updates itself and
@@ -188,7 +189,8 @@ environment variables:
 | `NIMBUSSYNC_APP_PROFILE` | App provisioning profile UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_PROFILE` | File Provider profile UUID |
 | `NIMBUSSYNC_FILE_PROVIDER_UI_PROFILE` | File Provider UI profile UUID |
-| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | Per-configuration override of the identity and three profiles above, e.g. `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+| `NIMBUSSYNC_DEBUG_*` / `NIMBUSSYNC_RELEASE_*` | Per-identity override of the signing identity and three profiles above, e.g. `NIMBUSSYNC_DEBUG_APP_PROFILE` |
+| `NIMBUSSYNC_RELEASE_IDENTITY` | `1` gives a Release build the shipping identity (default: `0`, Dev identity) |
 
 Debug and Release use separate identities so both can be installed on one Mac:
 
@@ -206,6 +208,14 @@ File Provider also needs File Provider Testing Mode). The Dev build is
 `NimbusSyncDev.app`, so Login Items and the File Providers list in System
 Settings show it apart from the Release app. Both register the server-defined `cloudreve://` OAuth callback, and macOS hands
 it to only one of them: quit the other build before signing in or reauthorizing.
+
+Only the release workflow builds the shipping identity: a Release build gets it
+only with `NIMBUSSYNC_RELEASE_IDENTITY=1`, and otherwise builds
+`NimbusSyncDev.app` with the Dev identity and the `NIMBUSSYNC_DEBUG_*` signing
+values. macOS registers every extension it finds on disk and keeps launching
+the first copy it started for a bundle ID, so a stray Release build (say, in
+`/tmp`) could otherwise take over the installed app's File Provider and leave
+Finder stuck on "Loading…".
 
 The unprefixed names (`SIGNING_MODE`, `CONFIGURATION`, `DEVELOPMENT_TEAM`, …)
 also work on the command line, as do `BUILD_ROOT`, `DIST_DIR` and `VERSION`:
