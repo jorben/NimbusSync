@@ -565,5 +565,5 @@ private enum SHA256Digest {
 }
 
 private extension DomainStatus {
-    var priority: Int { switch self { case .authExpired: 100; case .rootUnavailable, .scopeConflict, .preservedRemoval: 90; case .conflict, .permanentError: 80; case .offline: 70; case .reconciling: 60; case .syncing: 50; case .eventDegraded, .appNotRunning: 40; case .healthy: 10; default: 0 } }
+    var priority: Int { switch self { case .extensionUnavailable: 110; case .authExpired: 100; case .rootUnavailable, .scopeConflict, .preservedRemoval: 90; case .conflict, .permanentError: 80; case .offline: 70; case .reconciling: 60; case .syncing: 50; case .eventDegraded, .appNotRunning: 40; case .healthy: 10; default: 0 } }
 }

@@ -863,8 +863,9 @@ private final class TaskCancellationBox: @unchecked Sendable {
     }
 }
 
-open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState, NSFileProviderThumbnailing, NSFileProviderCustomAction, @unchecked Sendable {
+open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState, NSFileProviderThumbnailing, NSFileProviderCustomAction, NSFileProviderServicing, @unchecked Sendable {
     public let domain: NSFileProviderDomain
+    private let probeServiceSource = ExtensionProbeServiceSource()
     private var store: SQLiteStateStore?
     private var backend: FileProviderBackend
     private let stateProjection: DomainStateProjection
@@ -940,6 +941,16 @@ open class NimbusSyncFileProviderExtension: NSObject, NSFileProviderDomainState,
         invalidated = true
         backgroundTask?.cancel()
         backgroundTask = nil
+        probeServiceSource.invalidate()
+    }
+
+    /// The app's reachability probe; served on the root only, which is all the app asks for.
+    @objc(supportedServiceSourcesForItemIdentifier:completionHandler:)
+    public func supportedServiceSources(for itemIdentifier: NSFileProviderItemIdentifier, completionHandler: @escaping ([NSFileProviderServiceSource]?, Error?) -> Void) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(itemIdentifier == .rootContainer ? [probeServiceSource] : [], nil)
+        progress.completedUnitCount = 1
+        return progress
     }
 
     @objc public var domainVersion: NSFileProviderDomainVersion { stateLock.lock(); defer { stateLock.unlock() }; return stateProjection.domainVersion }
